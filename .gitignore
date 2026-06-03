@@ -1,0 +1,9 @@
+# Build Stuff
+/target
+
+# My Stuff
+ref/
+
+# OS Stuff
+.DS_Store
+**:Zone.Identifier
