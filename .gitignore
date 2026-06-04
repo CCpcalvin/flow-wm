@@ -7,3 +7,5 @@ ref/
 # OS Stuff
 .DS_Store
 **:Zone.Identifier
+
+.tmp/sessions
