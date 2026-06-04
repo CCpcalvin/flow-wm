@@ -2,21 +2,22 @@
 
 use crate::common::{Rect, WindowId};
 
-/// Proportional column width in units of 1/8 monitor width.
+/// Proportional column width in eighths of the default column width.
 ///
-/// Valid range: 1–8 (1 = 1/8 screen, 4 = half, 8 = full).
+/// Valid range: 1–8.  A value of 4 equals `column_width` pixels;
+/// 8 equals `2 * column_width`.  See `projection::column_eighths_to_pixels`.
 pub type WidthEighths = u8;
 
 /// A column on the virtual canvas containing one or more stacked windows.
+///
+/// Windows within a column are always equally sized vertically.
+/// Users resize at runtime via drag or keybind — no config-level ratios.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Column {
-    /// Proportional width (1–8 eighths of monitor width).
+    /// Proportional width (1–8 eighths of column width base).
     pub width_eighths: WidthEighths,
     /// Window IDs ordered top-to-bottom within this column.
     pub rows: Vec<WindowId>,
-    /// Height ratios for each row, summing to 1.0.
-    /// Defaults to equal division if empty or mismatched.
-    pub row_ratios: Vec<f32>,
 }
 
 impl Column {
@@ -26,19 +27,15 @@ impl Column {
         Self {
             width_eighths,
             rows: vec![window],
-            row_ratios: vec![1.0],
         }
     }
 
-    /// Create a column with equal row ratios for the given windows.
+    /// Create a column with multiple equally-sized rows.
     #[must_use]
     pub fn with_equal_rows(width_eighths: WidthEighths, rows: Vec<WindowId>) -> Self {
-        let count = rows.len();
-        let ratio = if count > 0 { 1.0 / count as f32 } else { 1.0 };
         Self {
             width_eighths,
             rows,
-            row_ratios: vec![ratio; count],
         }
     }
 
@@ -169,11 +166,16 @@ pub struct MonitorInfo {
     pub work_area: Rect,
 }
 
-/// Gap configuration for the layout engine.
+/// Padding configuration for the layout engine.
+///
+/// - `window`: inset around each window within its container cell.
+/// - `up`: top screen margin so windows don't touch the top edge.
+/// - `down`: bottom screen margin so windows don't touch the bottom edge.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Gaps {
-    pub inner: i32,
-    pub outer: i32,
+pub struct Padding {
+    pub window: i32,
+    pub up: i32,
+    pub down: i32,
 }
 
 /// Result of a layout mutation.

@@ -16,13 +16,13 @@ pub struct StmConfig {
     #[serde(default = "default_window_action")]
     pub default_window_action: WindowAction,
 
-    /// Default width for new columns in eighths (1–8). Default: 4 = half screen.
+    /// Default column width in pixels. Default: 960.
     #[serde(default = "default_column_width")]
-    pub default_column_width_eighths: u8,
+    pub column_width: u32,
 
-    /// Gap settings.
+    /// Padding settings.
     #[serde(default)]
-    pub gaps: Gaps,
+    pub padding: Padding,
 
     /// Hotkey bindings.
     #[serde(default)]
@@ -49,9 +49,9 @@ fn default_window_action() -> WindowAction {
     WindowAction::Tile
 }
 
-/// Default column width: 4/8 = half the monitor width.
-const fn default_column_width() -> u8 {
-    4
+/// Default column width in pixels.
+const fn default_column_width() -> u32 {
+    960
 }
 
 impl Default for StmConfig {
@@ -59,8 +59,8 @@ impl Default for StmConfig {
         Self {
             super_key: default_super_key(),
             default_window_action: default_window_action(),
-            default_column_width_eighths: default_column_width(),
-            gaps: Gaps::default(),
+            column_width: default_column_width(),
+            padding: Padding::default(),
             hotkeys: Hotkeys::default(),
             window_rules: Vec::new(),
             animation: AnimationConfig::default(),
@@ -69,29 +69,67 @@ impl Default for StmConfig {
     }
 }
 
-/// Gap configuration in pixels.
+/// Padding configuration in pixels.
+///
+/// `window` is the inset around each window within its container cell.
+/// `up` and `down` are screen-level top/bottom margins so windows
+/// don't touch the screen edges.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Gaps {
-    #[serde(default = "default_inner_gap")]
-    pub inner: i32,
-    #[serde(default = "default_outer_gap")]
-    pub outer: i32,
+pub struct Padding {
+    #[serde(default = "default_window_padding")]
+    pub window: i32,
+    #[serde(default)]
+    pub up: i32,
+    #[serde(default)]
+    pub down: i32,
 }
 
-fn default_inner_gap() -> i32 {
-    8
+fn default_window_padding() -> i32 {
+    4
 }
 
-fn default_outer_gap() -> i32 {
-    16
-}
-
-impl Default for Gaps {
+impl Default for Padding {
     fn default() -> Self {
         Self {
-            inner: default_inner_gap(),
-            outer: default_outer_gap(),
+            window: default_window_padding(),
+            up: 0,
+            down: 0,
         }
+    }
+}
+
+impl Padding {
+    /// Validate that all padding values are non-negative.
+    ///
+    /// Returns `Err` with a descriptive message for the first invalid field.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.window < 0 {
+            return Err(format!(
+                "padding.window must be non-negative, got {}",
+                self.window
+            ));
+        }
+        if self.up < 0 {
+            return Err(format!("padding.up must be non-negative, got {}", self.up));
+        }
+        if self.down < 0 {
+            return Err(format!(
+                "padding.down must be non-negative, got {}",
+                self.down
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl StmConfig {
+    /// Validate config values that serde cannot enforce.
+    ///
+    /// Call this after deserializing a config file to catch
+    /// semantically invalid values like negative padding.
+    pub fn validate(&self) -> Result<(), String> {
+        self.padding.validate()?;
+        Ok(())
     }
 }
 
@@ -262,9 +300,10 @@ mod tests {
         let parsed: StmConfig = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(parsed.super_key, "VK_F24");
         assert_eq!(parsed.default_window_action, WindowAction::Tile);
-        assert_eq!(parsed.default_column_width_eighths, 4);
-        assert_eq!(parsed.gaps.inner, 8);
-        assert_eq!(parsed.gaps.outer, 16);
+        assert_eq!(parsed.column_width, 960);
+        assert_eq!(parsed.padding.window, 4);
+        assert_eq!(parsed.padding.up, 0);
+        assert_eq!(parsed.padding.down, 0);
         assert_eq!(parsed.animation.duration_ms, 180);
         assert_eq!(parsed.animation.easing, "ease-out-expo");
     }
@@ -274,9 +313,10 @@ mod tests {
         let yaml = r#"
 super_key: VK_F24
 default_window_action: tile
-gaps:
-  inner: 12
-  outer: 20
+padding:
+  window: 8
+  up: 10
+  down: 40
 window_rules:
   - match:
       exe: "explorer.exe"
@@ -290,7 +330,9 @@ animation:
   enabled: false
 "#;
         let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(config.gaps.inner, 12);
+        assert_eq!(config.padding.window, 8);
+        assert_eq!(config.padding.up, 10);
+        assert_eq!(config.padding.down, 40);
         assert_eq!(config.window_rules.len(), 2);
         assert_eq!(config.window_rules[0].action, WindowAction::Ignore);
         assert!(!config.animation.enabled);
@@ -302,7 +344,7 @@ animation:
         let yaml = "{}";
         let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(config.super_key, "VK_F24");
-        assert_eq!(config.gaps.inner, 8);
+        assert_eq!(config.padding.window, 4);
         assert!(config.window_rules.is_empty());
     }
 
@@ -314,10 +356,11 @@ animation:
         let config = StmConfig {
             super_key: "VK_LWIN".into(),
             default_window_action: WindowAction::Float,
-            default_column_width_eighths: 3,
-            gaps: Gaps {
-                inner: 4,
-                outer: 12,
+            column_width: 1200,
+            padding: Padding {
+                window: 6,
+                up: 10,
+                down: 40,
             },
             hotkeys: Hotkeys {
                 focus_left: "Alt+H".into(),
@@ -377,9 +420,10 @@ animation:
 
         assert_eq!(parsed.super_key, "VK_LWIN");
         assert_eq!(parsed.default_window_action, WindowAction::Float);
-        assert_eq!(parsed.default_column_width_eighths, 3);
-        assert_eq!(parsed.gaps.inner, 4);
-        assert_eq!(parsed.gaps.outer, 12);
+        assert_eq!(parsed.column_width, 1200);
+        assert_eq!(parsed.padding.window, 6);
+        assert_eq!(parsed.padding.up, 10);
+        assert_eq!(parsed.padding.down, 40);
         assert_eq!(parsed.hotkeys.focus_left, "Alt+H");
         assert_eq!(parsed.hotkeys.place_above, "Alt+A");
         assert_eq!(parsed.window_rules.len(), 2);
@@ -428,18 +472,6 @@ default_window_action: foobar
     }
 
     #[test]
-    fn config_invalid_column_width_clamps_via_defaults() {
-        // Negative: column_width outside 0-255 would underflow but serde
-        // will accept it as u8 (overflow). Test that a zero value is accepted
-        // by serde but doesn't crash — the production code should validate.
-        let yaml = r#"
-default_column_width_eighths: 0
-"#;
-        let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(config.default_column_width_eighths, 0);
-    }
-
-    #[test]
     fn config_all_window_actions_parse() {
         // Positive: all three window actions parse correctly
         for action_str in ["tile", "float", "ignore"] {
@@ -456,5 +488,48 @@ default_column_width_eighths: 0
                 "action mismatch for {action_str}"
             );
         }
+    }
+
+    #[test]
+    fn config_validate_rejects_negative_window_padding() {
+        // Negative: padding.window < 0 should fail validation
+        let mut config = StmConfig::default();
+        config.padding.window = -1;
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("padding.window"));
+    }
+
+    #[test]
+    fn config_validate_rejects_negative_up_padding() {
+        // Negative: padding.up < 0 should fail validation
+        let mut config = StmConfig::default();
+        config.padding.up = -5;
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("padding.up"));
+    }
+
+    #[test]
+    fn config_validate_rejects_negative_down_padding() {
+        // Negative: padding.down < 0 should fail validation
+        let mut config = StmConfig::default();
+        config.padding.down = -10;
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("padding.down"));
+    }
+
+    #[test]
+    fn config_validate_accepts_zero_padding() {
+        // Positive: all zeros is valid
+        let mut config = StmConfig::default();
+        config.padding.window = 0;
+        config.padding.up = 0;
+        config.padding.down = 0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_validate_accepts_default_config() {
+        // Positive: default config should always validate
+        assert!(StmConfig::default().validate().is_ok());
     }
 }

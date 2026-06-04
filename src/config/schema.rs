@@ -34,7 +34,8 @@ mod tests {
     fn schema_references_stm_config() {
         let json = generate_config_schema().expect("schema gen");
         assert!(json.contains("super_key"));
-        assert!(json.contains("gaps"));
+        assert!(json.contains("column_width"));
+        assert!(json.contains("padding"));
         assert!(json.contains("hotkeys"));
         assert!(json.contains("window_rules"));
         assert!(json.contains("animation"));
@@ -54,8 +55,8 @@ mod tests {
         let expected_keys = [
             "super_key",
             "default_window_action",
-            "default_column_width_eighths",
-            "gaps",
+            "column_width",
+            "padding",
             "hotkeys",
             "window_rules",
             "animation",
@@ -70,30 +71,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_gaps_has_inner_and_outer() {
-        // Positive: nested Gaps schema must have inner/outer
+    fn schema_padding_has_window_up_down() {
+        // Positive: nested Padding schema must have window/up/down
         let json = generate_config_schema().expect("schema gen");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
 
-        let gaps_schema = parsed
-            .pointer("/properties/gaps")
-            .expect("has /properties/gaps");
+        let padding_schema = parsed
+            .pointer("/properties/padding")
+            .expect("has /properties/padding");
 
         // schemars wraps $ref in allOf; resolve to definitions
-        let ref_path = gaps_schema
+        let ref_path = padding_schema
             .get("allOf")
             .and_then(|v| v.get(0))
             .and_then(|v| v.get("$ref"))
             .and_then(|v| v.as_str())
-            .expect("gaps has allOf > $ref");
+            .expect("padding has allOf > $ref");
         let ref_path = ref_path.trim_start_matches("#/");
-        let gaps_props = parsed
+        let padding_props = parsed
             .pointer(&format!("/{ref_path}/properties"))
-            .expect(&format!("resolved ref {ref_path} has properties"));
+            .unwrap_or_else(|| panic!("resolved ref {ref_path} has properties"));
 
-        let obj = gaps_props.as_object().expect("gaps properties is object");
-        assert!(obj.contains_key("inner"), "gaps missing 'inner'");
-        assert!(obj.contains_key("outer"), "gaps missing 'outer'");
+        let obj = padding_props
+            .as_object()
+            .expect("padding properties is object");
+        assert!(obj.contains_key("window"), "padding missing 'window'");
+        assert!(obj.contains_key("up"), "padding missing 'up'");
+        assert!(obj.contains_key("down"), "padding missing 'down'");
     }
 
     #[test]

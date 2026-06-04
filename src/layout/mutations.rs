@@ -13,25 +13,26 @@
 //! ```
 //!
 //! - Horizontal resize → adjust column `width_eighths`
-//! - Vertical resize → adjust column `row_ratios`
 //!
 //! All size parameters come from config, never hardcoded.
 
 use crate::common::{Direction, WindowId};
 use crate::layout::projection::{column_eighths_to_pixels, column_step_width};
-use crate::layout::types::{Column, Gaps, VirtualLayout};
+use crate::layout::types::{Column, Padding, VirtualLayout};
 
 /// Parameters that configure how mutations behave.
 ///
 /// Derived from `StmConfig` — the layout engine never hardcodes these.
 #[derive(Debug, Clone, Copy)]
 pub struct MutationConfig {
-    /// Monitor pixel width (used for scroll step calculation).
+    /// Monitor pixel width (used for visibility checks).
     pub monitor_width: i32,
-    /// Default column width in eighths for new columns.
+    /// Default column width in pixels for new columns.
+    pub column_width: u32,
+    /// Default column width in eighths (1–8) for new columns.
     pub default_column_width_eighths: u8,
-    /// Gap settings.
-    pub gaps: Gaps,
+    /// Padding settings.
+    pub padding: Padding,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +161,7 @@ fn ensure_column_visible(
 ) -> VirtualLayout {
     let mut canvas_x: i32 = 0;
     for (i, col) in layout.columns.iter().enumerate() {
-        let col_px = column_eighths_to_pixels(col.width_eighths, config.monitor_width);
+        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         if i == col_idx {
             let col_left = canvas_x;
             let col_right = canvas_x + col_px;
@@ -184,7 +185,7 @@ fn ensure_column_visible(
             // Already visible
             return layout.clone();
         }
-        canvas_x += col_px + config.gaps.inner;
+        canvas_x += col_px;
     }
     layout.clone()
 }
@@ -242,10 +243,6 @@ fn swap_rows(
     let mut new_layout = layout.clone();
     let col = &mut new_layout.columns[col_idx];
     col.rows.swap(row_a, row_b);
-    // Swap ratios too if they exist
-    if col.row_ratios.len() == col.rows.len() {
-        col.row_ratios.swap(row_a, row_b);
-    }
     Some(new_layout)
 }
 
@@ -287,7 +284,7 @@ fn find_first_offscreen_column(
 
     let mut canvas_x: i32 = 0;
     for (i, col) in layout.columns.iter().enumerate() {
-        let col_px = column_eighths_to_pixels(col.width_eighths, config.monitor_width);
+        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         let col_left = canvas_x;
         let col_right = canvas_x + col_px;
 
@@ -300,7 +297,7 @@ fn find_first_offscreen_column(
         if offscreen {
             return Some(i);
         }
-        canvas_x += col_px + config.gaps.inner;
+        canvas_x += col_px;
     }
     None
 }
@@ -448,10 +445,6 @@ fn merge_columns(
     let absorbed_rows = new_layout.columns[absorbed].rows.clone();
     let absorber_col = &mut new_layout.columns[absorber];
     absorber_col.rows.extend(absorbed_rows);
-    // Rebalance row ratios to equal
-    let count = absorber_col.rows.len();
-    let ratio = 1.0 / count as f32;
-    absorber_col.row_ratios = vec![ratio; count];
 
     new_layout.columns.remove(absorbed);
     Some(new_layout)
@@ -515,9 +508,6 @@ pub fn add_window_to_column(
     let mut new_layout = layout.clone();
     if let Some(col) = new_layout.columns.get_mut(col_idx) {
         col.rows.push(window);
-        let count = col.rows.len();
-        let ratio = 1.0 / count as f32;
-        col.row_ratios = vec![ratio; count];
     }
     new_layout
 }
@@ -542,11 +532,6 @@ pub fn remove_window(
 
     if col_ref.rows.is_empty() {
         new_layout.columns.remove(col);
-    } else {
-        // Rebalance row ratios
-        let count = col_ref.rows.len();
-        let ratio = 1.0 / count as f32;
-        col_ref.row_ratios = vec![ratio; count];
     }
 
     // Clamp viewport offset using actual config values
@@ -566,33 +551,27 @@ fn first_visible_step(layout: &VirtualLayout, config: &MutationConfig) -> Option
     let mut canvas_x: i32 = 0;
     let vp_right = layout.viewport_offset + config.monitor_width;
     for col in &layout.columns {
-        let col_px = column_eighths_to_pixels(col.width_eighths, config.monitor_width);
+        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         let col_left = canvas_x;
         let col_right = canvas_x + col_px;
         if col_right > layout.viewport_offset && col_left < vp_right {
-            return Some(column_step_width(
-                col,
-                config.monitor_width,
-                config.gaps.inner,
-            ));
+            return Some(column_step_width(col, config.column_width));
         }
-        canvas_x += col_px + config.gaps.inner;
+        canvas_x += col_px;
     }
     None
 }
 
-/// Total pixel span of all columns + inner gaps.
+/// Total pixel span of all columns (packed, no inter-column gap).
 fn total_column_span(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
     if layout.columns.is_empty() {
         return 0;
     }
-    let total_width: i32 = layout
+    layout
         .columns
         .iter()
-        .map(|c| column_eighths_to_pixels(c.width_eighths, config.monitor_width))
-        .sum();
-    let total_gaps = config.gaps.inner * (layout.columns.len().saturating_sub(1) as i32);
-    total_width + total_gaps
+        .map(|c| column_eighths_to_pixels(c.width_eighths, config.column_width))
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -603,15 +582,17 @@ fn total_column_span(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
 mod tests {
     use super::*;
     use crate::common::WindowId;
-    use crate::layout::types::Gaps;
+    use crate::layout::types::Padding;
 
     fn test_config() -> MutationConfig {
         MutationConfig {
             monitor_width: 1920,
+            column_width: 960,
             default_column_width_eighths: 4,
-            gaps: Gaps {
-                inner: 8,
-                outer: 16,
+            padding: Padding {
+                window: 4,
+                up: 0,
+                down: 0,
             },
         }
     }
@@ -635,8 +616,8 @@ mod tests {
         let config = test_config();
         let result = scroll_right(&layout, &config).expect("scroll right");
         assert!(result.viewport_offset > 0);
-        // Step = col_width + inner_gap = 960 + 8 = 968
-        assert_eq!(result.viewport_offset, 968);
+        // Step = col_width = 960 (packed, no inter-column gap)
+        assert_eq!(result.viewport_offset, 960);
     }
 
     #[test]
@@ -780,8 +761,6 @@ mod tests {
         let result = merge_column_right(&layout, WindowId(1)).expect("merge right");
         assert_eq!(result.columns.len(), 2);
         assert_eq!(result.columns[0].rows, vec![WindowId(1), WindowId(2)]);
-        // Row ratios should be rebalanced to equal
-        assert_eq!(result.columns[0].row_ratios.len(), 2);
     }
 
     #[test]
@@ -886,7 +865,7 @@ mod tests {
                 Column::new(4, WindowId(2)),
                 Column::new(4, WindowId(3)),
             ],
-            968, // offset past first column
+            960, // offset past first column (packed, no inter-column gap)
         );
         let result =
             swap_with_offscreen(&layout, WindowId(3), Direction::Left, &config).expect("swap");
@@ -912,9 +891,6 @@ mod tests {
         let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
         let result = add_window_to_column(&layout, 0, WindowId(2));
         assert_eq!(result.columns[0].rows, vec![WindowId(1), WindowId(2)]);
-        assert_eq!(result.columns[0].row_ratios.len(), 2);
-        // Ratios should be equal
-        assert!((result.columns[0].row_ratios[0] - 0.5).abs() < 0.01);
     }
 
     #[test]
@@ -989,15 +965,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_columns_rebalances_ratios() {
-        // Positive: after merge, row ratios are equal
+    fn merge_columns_combines_all_rows() {
+        // Positive: after merge, all rows are present in the merged column
         let layout = three_column_layout();
         let result = merge_column_right(&layout, WindowId(1)).expect("merge");
         let col = &result.columns[0];
         assert_eq!(col.rows.len(), 2);
-        let expected = 1.0 / 2.0;
-        assert!((col.row_ratios[0] - expected).abs() < 0.001);
-        assert!((col.row_ratios[1] - expected).abs() < 0.001);
+        assert_eq!(col.rows, vec![WindowId(1), WindowId(2)]);
     }
 
     #[test]
@@ -1038,22 +1012,6 @@ mod tests {
         assert_eq!(result.columns[0].width_eighths, 4);
         // Width didn't change, so delta was 0 and layout is unchanged
         assert_eq!(result.columns.len(), 3);
-    }
-
-    #[test]
-    fn swap_rows_preserves_ratios_order() {
-        // Positive: swapping rows also swaps their ratios
-        let mut col = Column::new(8, WindowId(1));
-        col.rows.push(WindowId(2));
-        col.row_ratios = vec![0.7, 0.3];
-        let layout = VirtualLayout::with_columns(vec![col], 0);
-
-        let result = swap(&layout, WindowId(1), Direction::Down).expect("swap");
-        assert_eq!(result.columns[0].rows[0], WindowId(2));
-        assert_eq!(result.columns[0].rows[1], WindowId(1));
-        // Ratios should also be swapped
-        assert!((result.columns[0].row_ratios[0] - 0.3).abs() < 0.001);
-        assert!((result.columns[0].row_ratios[1] - 0.7).abs() < 0.001);
     }
 
     #[test]
