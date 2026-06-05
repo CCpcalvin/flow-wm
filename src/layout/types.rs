@@ -73,20 +73,30 @@ impl Column {
     }
 }
 
-/// The complete virtual layout — all tiling columns on the infinite canvas.
+/// The complete virtual layout — all tiling columns on the infinite horizontal canvas.
 ///
-/// This is Layer 1 of the pipeline: a **logical description** with no pixel
-/// coordinates. Columns store proportional widths ([`WidthEighths`]), and
-/// position is implicit from their order in the `columns` vec.
+/// This is the "source of truth" for the layout engine. It describes **what exists**
+/// (columns, windows, their proportional widths) and **where the camera is**
+/// (`viewport_offset`), but contains no pixel coordinates for individual windows.
 ///
-/// The `viewport_offset` determines which portion of the infinite canvas is
-/// visible on screen. It is adjusted by scroll operations and auto-scroll
-/// during focus changes.
+/// # Camera model
+///
+/// `viewport_offset` acts as a camera position sliding along the infinite canvas.
+/// A value of `0` means the camera is aligned with the left edge of the first column.
+/// Increasing it scrolls the viewport rightward across the canvas.
+///
+/// Many operations (scrolling, focus-to-offscreen, swap-with-offscreen) are
+/// implemented by adjusting `viewport_offset` rather than moving individual windows.
+/// The projection layer then computes actual pixel positions from this combined state.
+///
+/// # Immutability
+///
+/// Mutations never modify a `VirtualLayout` in place — they return a new one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VirtualLayout {
     /// Columns ordered left-to-right on the virtual canvas.
     pub columns: Vec<Column>,
-    /// Pixel offset from the left edge of the canvas to the left edge of the viewport.
+    /// Camera position: pixel offset from canvas left edge to viewport left edge.
     pub viewport_offset: i32,
 }
 
@@ -135,28 +145,38 @@ impl Default for VirtualLayout {
     }
 }
 
-/// A single window's computed on-screen rectangle.
+/// A single window's computed on-screen rectangle — what Windows OS actually sees.
 ///
-/// This is Layer 2 of the pipeline. The `rect` is the **final HWND rect**
-/// with padding already baked in — it can be passed directly to `SetWindowPos`.
-///
-/// Produced by [`super::projection::project`], consumed by [`super::diff::diff`].
+/// Every window in the [`VirtualLayout`] has a corresponding `ActualEntry`, whether
+/// it is visible on-screen or parked off-screen. The `rect` field contains the real
+/// pixel coordinates that will be passed to `SetWindowPos`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActualEntry {
-    /// The window this entry describes.
+    /// The window identifier.
     pub window_id: WindowId,
-    /// Final on-screen rectangle (padding baked in, pass directly to `SetWindowPos`).
+    /// The computed on-screen rectangle (real pixel coordinates for Windows OS).
     pub rect: Rect,
 }
 
-/// The on-screen projection of the virtual layout.
+/// The on-screen projection of the virtual layout — what Windows OS must render.
 ///
-/// Layer 2 output — a flat list of [`ActualEntry`]s, one per window (including
-/// off-screen windows parked at hidden positions). Produced by
-/// [`super::projection::project`].
+/// This is produced by [`super::projection::project()`] and contains pixel-accurate
+/// rectangles for every window. Windows visible in the viewport receive on-screen
+/// coordinates; windows outside the viewport are **parked** at deterministic
+/// off-screen positions (one column-width beyond the nearest viewport edge).
+///
+/// # Why parking matters
+///
+/// Windows OS does not gracefully ignore windows placed at extreme off-screen
+/// coordinates. Rather than leaving off-screen windows at their unreachable virtual
+/// positions, we park them just beyond the viewport edge. This ensures:
+/// - Animation transitions (scroll in/out) are smooth and short-distance.
+/// - The OS window manager is never confused by far-off-screen windows.
+/// - There are two parking zones: **left** (beyond the left edge) and **right**
+///   (beyond the right edge), chosen based on which side the column exited.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActualLayout {
-    /// One entry per window (including off-screen/parked windows).
+    /// One entry per window (visible on-screen or parked off-screen).
     pub entries: Vec<ActualEntry>,
 }
 
@@ -201,27 +221,28 @@ pub struct WindowMove {
 
 /// Animation hint for a window move, controlling easing behavior.
 ///
-/// The compositor uses this to choose the animation curve:
+/// Hints are classified by the [`diff`](crate::layout::diff) module based on
+/// horizontal move distance. This allows the compositor to apply different animation
+/// curves depending on *why* a window is moving:
 ///
-/// - `Snap` — fast, springy (in-viewport adjustment)
-/// - `Displaced` — smooth, slightly slower (neighbor pushed out of the way)
-/// - `ScrollEnter` — window entering viewport from off-screen
-/// - `ScrollExit` — window leaving viewport
-/// - `Restore` — no animation, instant (crash/minimize restore)
-///
-/// Classification is based on horizontal move distance. See
-/// [`super::diff`] for the classification function.
+/// | Hint | When | Curve |
+/// |------|------|-------|
+/// | `Snap` | Small in-viewport move (≤500px) | Fast, springy |
+/// | `Displaced` | Neighbor pushed aside (unused currently) | Smooth, slower |
+/// | `ScrollEnter` | Entering viewport from parked position | Scroll ease-in |
+/// | `ScrollExit` | Leaving viewport to parked position | Scroll ease-out |
+/// | `Restore` | Crash/minimize recovery | Instant (no animation) |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnimationHint {
-    /// Snapped window itself — fast, springy.
+    /// Small in-viewport move — fast, springy easing.
     Snap,
-    /// Neighbor pushed out of the way — smooth, slightly slower.
+    /// Neighbor pushed out of the way — smooth, slightly slower easing.
     Displaced,
-    /// Window entering viewport from off-screen.
+    /// Window entering viewport from off-screen (moving from parked → visible).
     ScrollEnter,
-    /// Window leaving viewport.
+    /// Window leaving viewport (moving from visible → parked).
     ScrollExit,
-    /// Crash/minimize restore — no animation, instant.
+    /// Crash/minimize restore — no animation, instant placement.
     Restore,
 }
 
@@ -252,19 +273,23 @@ pub struct Padding {
     pub down: i32,
 }
 
-/// Result of a layout mutation.
+/// Result of a layout mutation — everything needed to animate the transition.
 ///
-/// Layer 3 output — contains the new virtual layout, the new actual layout,
-/// and the [`WindowMove`]s that describe how windows changed position.
+/// Produced by [`LayoutEngine`](crate::layout::engine::LayoutEngine) for each
+/// mutation. Contains:
+/// - The new [`VirtualLayout`] (infinite canvas state after mutation).
+/// - The new [`ActualLayout`] (pixel-accurate on-screen positions).
+/// - A list of [`WindowMove`]s describing what changed (for animation).
 ///
-/// The compositor reads `moves` to drive `SetWindowPos` calls with animation.
+/// Windows that did not move between the old and new actual layout are omitted
+/// from `moves` — only windows that need animation are included.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutDiff {
     /// The new virtual layout after the mutation.
     pub virtual_layout: VirtualLayout,
     /// The new actual layout after projection.
     pub actual_layout: ActualLayout,
-    /// Window moves to animate.
+    /// Window moves to animate — only windows whose position changed.
     pub moves: Vec<WindowMove>,
 }
 

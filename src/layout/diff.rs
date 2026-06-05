@@ -1,8 +1,16 @@
-//! Layout diff computation.
+//! Layout diff computation — compare two [`ActualLayout`]s for animation.
 //!
-//! This is the core of Layer 3: compares two [`ActualLayout`]s and produces
-//! the minimal set of [`WindowMove`] instructions with appropriate
-//! [`AnimationHint`]s for the compositor.
+//! This is Layer 3 of the pipeline. It compares the previous and current
+//! [`ActualLayout`]s (both produced by the projection layer with camera shift
+//! and parking applied) and produces the minimal set of [`WindowMove`]
+//! instructions with appropriate [`AnimationHint`]s.
+//!
+//! # Why parking matters for diffs
+//!
+//! Because off-screen windows are parked at deterministic positions just beyond
+//! the viewport edge (not left at extreme virtual positions), the diffs between
+//! parked and visible states are **short-distance moves**. This produces correct
+//! `ScrollEnter`/`ScrollExit` hints rather than spurious huge jumps.
 //!
 //! # Classification
 //!

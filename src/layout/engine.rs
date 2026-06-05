@@ -40,7 +40,19 @@ use crate::layout::mutations::{self, MutationConfig};
 use crate::layout::projection;
 use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, VirtualLayout};
 
-/// The layout engine — owns virtual layout state and produces diffs.
+/// The layout engine — owns virtual layout state, tracks focus, and produces diffs.
+///
+/// This is the single entry point for all layout operations. Each public method
+/// applies a mutation (scroll, focus, swap, resize, etc.), runs the full
+/// mutation pipeline, and returns a [`LayoutDiff`] describing what changed.
+///
+/// # Focus tracking
+///
+/// Focus is stored as `Option<WindowId>` — a stable window identifier, not a
+/// position index. This means:
+/// - Swapping columns does not require focus fixup.
+/// - Removing a window falls back to the first available window.
+/// - Focus moves with the window, not with the layout slot.
 ///
 /// This is the single entry point for all layout mutations. Call its public
 /// methods to scroll, focus, swap, resize, merge, toggle monocle, or
@@ -139,10 +151,10 @@ impl LayoutEngine {
     /// Apply a mutation and compute the resulting [`LayoutDiff`].
     ///
     /// This is the core pipeline that every mutation flows through:
-    /// 1. Receive new [`VirtualLayout`] from the mutation function
-    /// 2. [`projection::project`] → new [`ActualLayout`]
-    /// 3. [`super::diff::diff`] old vs new → [`Vec<super::types::WindowMove>`]
-    /// 4. Update internal state and return the diff
+    /// 1. Receive new [`VirtualLayout`] from the mutation function.
+    /// 2. [`projection::project`] → camera shift + parking → new [`ActualLayout`].
+    /// 3. [`diff::diff`] old vs new actual → `Vec<WindowMove>` (animation instructions).
+    /// 4. Update internal state and return the diff.
     fn apply_mutation(&mut self, new_layout: VirtualLayout) -> LayoutDiff {
         let new_actual = projection::project(
             &new_layout,
@@ -183,7 +195,12 @@ impl LayoutEngine {
     // Focus operations
     // -----------------------------------------------------------------------
 
-    /// Move focus in the given direction, scrolling if needed.
+    /// Move focus in the given direction, shifting the camera if the target
+    /// is off-screen.
+    ///
+    /// Focus is tracked by [`WindowId`] — if the target column requires a
+    /// camera shift, the viewport scrolls automatically. No focus fixup is
+    /// needed because the window ID is stable regardless of layout changes.
     pub fn focus(&mut self, direction: Direction) -> Option<WindowId> {
         let focused = self.focused?;
         let result = mutations::focus(&self.virtual_layout, focused, direction, &self.config)?;
@@ -194,7 +211,11 @@ impl LayoutEngine {
         Some(result.focused)
     }
 
-    /// Set the focused window explicitly.
+    /// Set the focused window explicitly by [`WindowId`].
+    ///
+    /// No validation is performed — the caller should ensure the window exists
+    /// in the layout. This does not produce a [`LayoutDiff`]; it only updates
+    /// internal focus state.
     pub fn set_focus(&mut self, window: WindowId) {
         self.focused = Some(window);
     }
@@ -204,13 +225,22 @@ impl LayoutEngine {
     // -----------------------------------------------------------------------
 
     /// Swap the focused window in the given direction.
+    ///
+    /// For Left/Right, swaps the focused column with its neighbor.
+    /// For Up/Down, swaps the focused row within its column.
+    /// Focus requires no fixup — it follows the window by [`WindowId`].
     pub fn swap(&mut self, direction: Direction) -> Option<LayoutDiff> {
         let focused = self.focused?;
         let new_layout = mutations::swap(&self.virtual_layout, focused, direction)?;
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Swap the focused column with the first off-screen column.
+    /// Swap the focused column with the first off-screen column, then
+    /// shift the camera to reveal it.
+    ///
+    /// Full flow: swap columns in [`VirtualLayout`] → call
+    /// [`mutations::swap_with_offscreen`] to shift the camera → project
+    /// and diff. Focus stays on the same [`WindowId`] throughout.
     pub fn swap_with_offscreen(&mut self, direction: Direction) -> Option<LayoutDiff> {
         let focused = self.focused?;
         let new_layout =

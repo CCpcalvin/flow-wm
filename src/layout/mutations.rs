@@ -5,6 +5,19 @@
 //! easy to test, compose, and reason about — there is no mutable state to get
 //! out of sync.
 //!
+//! # Design principles
+//!
+//! **Camera over window-shifting**: Many operations that intuitively feel like
+//! "move windows" are actually implemented by adjusting `viewport_offset` (the
+//! camera position) instead. For example, `ensure_column_visible` shifts the
+//! camera so a target column comes into view — no individual window positions
+//! are touched in the [`VirtualLayout`].
+//!
+//! **Focus-by-WindowId**: Focus is tracked as a stable [`WindowId`],
+//! not as a column/row index. This means operations like column swapping require
+//! no focus fixup — the focused window ID remains valid regardless of where it
+//! moves in the layout.
+//!
 //! # Container Model
 //!
 //! ```text
@@ -22,7 +35,6 @@
 //! All size parameters come from [`MutationConfig`], which is derived from
 //! [`StmConfig`](crate::config::StmConfig). The mutation layer never hardcodes
 //! pixel values — it delegates to [`super::projection`] for all pixel math.
-//! for all pixel math.
 
 use crate::common::{Direction, WindowId};
 use crate::layout::projection::{column_eighths_to_pixels, column_step_width};
@@ -89,22 +101,23 @@ pub fn scroll_right(layout: &VirtualLayout, config: &MutationConfig) -> Option<V
 // ---------------------------------------------------------------------------
 
 /// Result of a focus change — the newly focused window, and optionally
-/// a viewport scroll if the target column was off-screen.
-///
-/// The [`LayoutEngine`](crate::layout::LayoutEngine) reads `focused` to update
-/// its internal focus tracker, and applies `new_layout` through the mutation pipeline.
+/// a new virtual layout if the camera shifted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FocusResult {
-    /// The newly focused [`WindowId`].
+    /// The newly focused window.
     pub focused: WindowId,
-    /// Updated layout (viewport may have scrolled).
+    /// The new virtual layout (viewport may have scrolled to reveal the target).
     pub new_layout: VirtualLayout,
 }
 
 /// Move focus in the given direction.
 ///
-/// If focus would leave the visible viewport, the viewport scrolls
-/// to keep the newly focused window visible.
+/// For horizontal focus changes (Left/Right), if the target column is outside
+/// the viewport, the **camera shifts** (via `ensure_column_visible`) to bring
+/// it into view — no individual window positions are modified.
+///
+/// Focus is tracked by [`WindowId`], not by position, so this function simply
+/// resolves the target window ID and optionally adjusts the camera.
 ///
 /// Returns `None` if there is no window to focus in that direction.
 #[must_use]
@@ -168,7 +181,18 @@ fn focus_horizontal(
     })
 }
 
-/// Adjust viewport offset so the given column is visible.
+/// Shift the camera so the given column becomes visible.
+///
+/// This is the core "camera shift" operation. It checks whether the target
+/// column's virtual canvas range overlaps the current viewport:
+/// - If the column is off-screen **left**, the camera scrolls left to align
+///   the viewport with the column's left edge.
+/// - If the column is off-screen **right**, the camera scrolls right so the
+///   column's right edge aligns with the viewport's right edge.
+/// - If already visible, no change.
+///
+/// This is used by focus, swap-with-offscreen, and other operations that need
+/// to ensure a specific column is on-screen.
 fn ensure_column_visible(
     layout: &VirtualLayout,
     col_idx: usize,
@@ -262,6 +286,11 @@ fn swap_rows(
 }
 
 /// Swap two columns (horizontal container reorder).
+///
+/// Only the column order in the [`VirtualLayout`] changes — no pixel coordinates
+/// are touched. Focus is unaffected because it is tracked by [`WindowId`], not
+/// by column index. The projection layer will compute new pixel positions from
+/// the reordered layout.
 fn swap_columns(layout: &VirtualLayout, col_a: usize, col_b: usize) -> Option<VirtualLayout> {
     let mut new_layout = layout.clone();
     new_layout.columns.swap(col_a, col_b);
@@ -269,7 +298,15 @@ fn swap_columns(layout: &VirtualLayout, col_a: usize, col_b: usize) -> Option<Vi
 }
 
 /// Swap the focused window's column with the first off-screen column
-/// in the given direction, then scroll so the swapped-in column is visible.
+/// in the given direction, then shift the camera to reveal the swapped column.
+///
+/// This implements the full off-screen swap flow:
+/// 1. Find the first column fully outside the viewport in the given direction.
+/// 2. Swap it with the focused column in the [`VirtualLayout`].
+/// 3. Call `ensure_column_visible` to shift the camera if needed.
+///
+/// Focus requires no fixup — it is tracked by [`WindowId`], so it follows
+/// the focused window regardless of column reordering.
 #[must_use]
 pub fn swap_with_offscreen(
     layout: &VirtualLayout,

@@ -1,22 +1,32 @@
-//! Virtual layout → actual layout projection.
+//! Virtual layout → actual layout projection (camera to screen).
 //!
-//! This is the core of Layer 2: a pure function that converts the logical
-//! [`VirtualLayout`] into actual screen pixel coordinates ([`ActualLayout`]).
+//! This module implements the core **camera-to-screen** projection: it takes the
+//! infinite virtual canvas ([`VirtualLayout`]) and computes real pixel coordinates
+//! for every window ([`ActualLayout`]) that Windows OS must render.
 //!
-//! # How It Works
+//! # How it works
 //!
-//! 1. Iterate columns left-to-right, tracking cumulative `canvas_x`
-//! 2. Determine visibility: is this column within the viewport?
-//! 3. **Visible columns**: compute `screen_x = monitor_left + (canvas_x - viewport_offset)`,
-//!    then inset each window by `padding.window` on all sides
-//! 4. **Off-screen columns**: park exactly one column-width beyond the nearest
-//!    viewport edge (deterministic, no magic numbers)
+//! 1. **Camera shift**: Each column's virtual x-position is offset by subtracting
+//!    `viewport_offset` (the camera position). Columns whose shifted range overlaps
+//!    the monitor rectangle are **visible** and receive on-screen coordinates.
+//!
+//! 2. **Parking**: Columns fully outside the viewport are **parked** — placed at a
+//!    deterministic position exactly one column-width beyond the nearest viewport edge.
+//!    There are two parking zones:
+//!    - **Left parking** (`monitor_left - col_width`): for columns that scrolled off
+//!      the left side of the viewport.
+//!    - **Right parking** (`monitor_right + col_width`): for columns that scrolled off
+//!      the right side.
+//!
+//!    Parking is necessary because Windows OS does not gracefully handle windows at
+//!    extreme off-screen coordinates. By parking just beyond the edge, scroll-in/out
+//!    animations are short-distance and smooth.
 //!
 //! # Container Model
 //!
-//! Columns are **packed** with no inter-column gap. Visual spacing between
-//! adjacent windows comes entirely from `padding.window` (each window is
-//! inset by `padding.window` on all sides within its cell).
+//! Columns are **packed** with no inter-column gap. Visual spacing
+//! between adjacent windows comes entirely from `padding.window`
+//! (each window is inset by `padding.window` on all sides within its cell).
 //!
 //! ```text
 //! [Col 1] [Col 2] [Col 3] | viewport | [Col n] [Col n+1] ...
@@ -39,12 +49,20 @@ use crate::layout::types::{
 
 /// Project a virtual layout onto a monitor viewport.
 ///
-/// This is the Layer 2 core function. Visible windows receive real screen
-/// coordinates. Off-screen windows are parked one column-width beyond the
-/// nearest viewport edge.
+/// This is the **camera-to-screen** conversion. For each column on the infinite
+/// canvas, it:
 ///
-/// The returned [`ActualEntry`] rects include padding — they are the final
-/// `SetWindowPos` coordinates.
+/// 1. **Visible columns**: Computes real screen coordinates by subtracting the
+///    camera offset (`viewport_offset`) from the column's virtual x-position.
+///
+/// 2. **Off-screen-left columns**: Parks at `monitor_left - col_width` (one
+///    column-width beyond the left viewport edge).
+///
+/// 3. **Off-screen-right columns**: Parks at `monitor_right + col_width` (one
+///    column-width beyond the right viewport edge).
+///
+/// Every window gets an [`ActualEntry`] — visible or parked. This ensures the
+/// diff engine can track smooth transitions when windows scroll in/out.
 #[must_use]
 pub fn project(
     virtual_layout: &VirtualLayout,
@@ -145,10 +163,14 @@ fn project_column_rows(
     }
 }
 
-/// Park an off-screen column's rows at a hidden position.
+/// Park an off-screen column's rows at a hidden but deterministic position.
 ///
-/// Applies the same padding as visible windows for consistent animation
-/// transitions when scrolling windows in/out of the viewport. Parked positions
+/// Parked windows use the same padding as visible windows, so when a window
+/// transitions from parked → visible (or vice versa), the animation is smooth
+/// and the window dimensions remain consistent.
+///
+/// **Left parking**: `monitor_left - col_width` — for columns scrolled past the left edge.
+/// **Right parking**: `monitor_right` — for columns scrolled past the right edge. Parked positions
 /// are deterministic: one column-width beyond the nearest viewport edge.
 fn park_column_rows(
     column: &Column,
