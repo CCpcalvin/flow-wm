@@ -298,11 +298,11 @@ fn ensure_column_visible(
 // Swap mutations
 // ---------------------------------------------------------------------------
 
-/// Swap the focused window's **column** with an adjacent column (Left/Right),
-/// or swap two rows within the same column (Up/Down).
+/// Swap the focused window's **column** with an adjacent column (Left/Right).
 ///
-/// This is the **column-level** swap — horizontal directions reorder entire
-/// columns, keeping all windows within each column together.
+/// Columns only have horizontal neighbours, so vertical directions (`Up` / `Down`)
+/// are not meaningful for a column-level swap and always return `None`.
+/// Use [`swap_window`] for per-window swaps in all four directions.
 ///
 /// For horizontal swaps, after reordering the columns in the [`VirtualLayout`],
 /// [`ensure_column_visible`] is called to guarantee the focused window's column
@@ -312,7 +312,8 @@ fn ensure_column_visible(
 /// Focus requires no fixup — it is tracked by [`WindowId`], so it follows
 /// the focused window regardless of column reordering.
 ///
-/// Returns `None` if there is no adjacent element in that direction.
+/// Returns `None` if there is no adjacent column in that direction, or if the
+/// direction is vertical.
 #[must_use]
 pub fn swap_column(
     layout: &VirtualLayout,
@@ -320,15 +321,14 @@ pub fn swap_column(
     direction: Direction,
     config: &MutationConfig,
 ) -> Option<VirtualLayout> {
-    let (col, row) = layout.find_window(focused)?;
+    let (col, _row) = layout.find_window(focused)?;
     match direction {
-        Direction::Up => swap_rows(layout, col, row, row.saturating_sub(1)),
-        Direction::Down => {
-            let max_row = layout.columns[col].rows.len().saturating_sub(1);
-            if row >= max_row {
-                return None;
-            }
-            swap_rows(layout, col, row, row + 1)
+        Direction::Up | Direction::Down => {
+            log::warn!(
+                "swap_column: vertical direction ({direction:?}) is invalid — \
+                 columns only have horizontal neighbours; use swap_window instead"
+            );
+            None
         }
         Direction::Left => {
             if col == 0 {
@@ -397,22 +397,6 @@ pub fn swap_window(
 
     // Ensure the focused window (now at dst position) is visible
     Some(ensure_column_visible(&new_layout, dst_col, config))
-}
-
-/// Swap two rows within a column (vertical container reorder).
-fn swap_rows(
-    layout: &VirtualLayout,
-    col_idx: usize,
-    row_a: usize,
-    row_b: usize,
-) -> Option<VirtualLayout> {
-    if row_a == row_b {
-        return None;
-    }
-    let mut new_layout = layout.clone();
-    let col = &mut new_layout.columns[col_idx];
-    col.rows.swap(row_a, row_b);
-    Some(new_layout)
 }
 
 /// Swap two columns (horizontal container reorder).
@@ -845,38 +829,23 @@ mod tests {
     }
 
     #[test]
-    fn swap_column_rows_within_column() {
+    fn swap_column_down_returns_none() {
+        // Vertical directions are invalid for column-level swap
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        let result =
-            swap_column(&layout, WindowId(1), Direction::Down, &test_config()).expect("swap down");
-        assert_eq!(result.columns[0].rows[0], WindowId(2));
-        assert_eq!(result.columns[0].rows[1], WindowId(1));
+        assert!(swap_column(&layout, WindowId(1), Direction::Down, &test_config()).is_none());
     }
 
     #[test]
-    fn swap_column_up_swaps_rows() {
-        // Positive: W2 at row 1, swap_column Up → swaps with W1 at row 0
+    fn swap_column_up_returns_none() {
+        // Vertical directions are invalid for column-level swap
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        let result =
-            swap_column(&layout, WindowId(2), Direction::Up, &test_config()).expect("swap up");
-        assert_eq!(result.columns[0].rows[0], WindowId(2));
-        assert_eq!(result.columns[0].rows[1], WindowId(1));
-    }
-
-    #[test]
-    fn swap_column_up_at_first_row_returns_none() {
-        // Negative: W1 at row 0, swap_column Up → None (swap_rows with self returns None)
-        let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
-            0,
-        );
-        assert!(swap_column(&layout, WindowId(1), Direction::Up, &test_config()).is_none());
+        assert!(swap_column(&layout, WindowId(2), Direction::Up, &test_config()).is_none());
     }
 
     #[test]
@@ -1423,23 +1392,13 @@ mod tests {
     }
 
     #[test]
-    fn swap_column_same_row_returns_none() {
-        // Negative: can't swap with self (edge case)
+    fn swap_column_left_single_column_returns_none() {
+        // Negative: single column, no left neighbour to swap with
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
         assert!(swap_column(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
-    }
-
-    #[test]
-    fn swap_column_down_at_last_row_returns_none() {
-        // Negative: can't swap down from last row
-        let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
-            0,
-        );
-        assert!(swap_column(&layout, WindowId(2), Direction::Down, &test_config()).is_none());
     }
 
     #[test]

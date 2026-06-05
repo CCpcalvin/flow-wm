@@ -224,12 +224,11 @@ impl LayoutEngine {
     // Swap operations
     // -----------------------------------------------------------------------
 
-    /// Swap the focused window's **column** with an adjacent column (Left/Right),
-    /// or swap rows within the same column (Up/Down).
+    /// Swap the focused window's **column** with an adjacent column (Left/Right).
     ///
-    /// For Left/Right, entire columns are reordered — all windows within each
-    /// column move together. For Up/Down, only the focused row and its neighbor
-    /// within the same column swap positions.
+    /// Columns only have horizontal neighbours, so vertical directions
+    /// (`Up` / `Down`) always return `None`. Use [`swap_window`](Self::swap_window)
+    /// for per-window swaps in all four directions.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
     pub fn swap_column(&mut self, direction: Direction) -> Option<LayoutDiff> {
@@ -564,9 +563,9 @@ mod tests {
         assert!(engine.swap_column(Direction::Left).is_none());
         // Swap column right → None (no column to right)
         assert!(engine.swap_column(Direction::Right).is_none());
-        // Swap column up → None (only row)
+        // Swap column up → None (vertical direction invalid for column swap)
         assert!(engine.swap_column(Direction::Up).is_none());
-        // Swap column down → None (only row)
+        // Swap column down → None (vertical direction invalid for column swap)
         assert!(engine.swap_column(Direction::Down).is_none());
 
         // Expand/shrink — needs neighbor
