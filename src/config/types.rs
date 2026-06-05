@@ -1,11 +1,42 @@
 //! Configuration type definitions matching the YAML schema.
+//!
+//! Every field has `#[serde(default = "...")]` so partial YAML configs fill in
+//! missing fields with defaults. Full YAML round-trip is tested: every field
+//! survives `StmConfig → YAML → StmConfig`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration structure.
 ///
-/// See `docs/04-config-and-persistence.md` for the full schema.
+/// Loaded from `%APPDATA%\stm\stm.yml`. Every field has a default, so even an
+/// empty YAML file `{}` produces a valid config.
+///
+/// # Example
+///
+/// ```yaml
+/// super_key: VK_F24
+/// default_window_action: tile
+/// column_width: 960
+/// padding:
+///   window: 4
+///   up: 0
+///   down: 0
+/// hotkeys:
+///   focus_left: Super+H
+///   focus_right: Super+L
+/// window_rules:
+///   - match:
+///       exe: "explorer.exe"
+///       title_contains: "Open"
+///     action: ignore
+/// animation:
+///   enabled: true
+///   duration_ms: 180
+///   easing: ease-out-expo
+/// ```
+///
+/// See `docs/spec/04-config-and-persistence.md` for the full schema.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StmConfig {
     /// The virtual key code treated as the Super/modifier key.
@@ -71,15 +102,36 @@ impl Default for StmConfig {
 
 /// Padding configuration in pixels.
 ///
-/// `window` is the inset around each window within its container cell.
-/// `up` and `down` are screen-level top/bottom margins so windows
-/// don't touch the screen edges.
+/// Padding is applied during the projection step (see [`projection`](crate::layout::projection)),
+/// not stored inside window structs. This means [`ActualEntry`](crate::layout::ActualEntry) rects
+/// are the **final HWND rects** — they can be passed directly to `SetWindowPos`.
+///
+/// - `window`: inset around each window within its container cell (visual gap)
+/// - `up`: top screen margin so windows don't touch the top edge
+/// - `down`: bottom screen margin (e.g., for taskbar clearance)
+///
+/// ```text
+/// ┌─────────────────── monitor work area ───────────────────┐
+/// │ ↑ padding.up                                            │
+/// │ ┌──────── column cell ────────┐ ┌── next column cell ──┐ │
+/// │ │ ↑ padding.window            │ │                       │ │
+/// │ │ ┌──── window (HWND) ────┐   │ │                       │ │
+/// │ │ │                       │   │ │                       │ │
+/// │ │ └───────────────────────┘   │ │                       │ │
+/// │ │ ↓ padding.window            │ │                       │ │
+/// │ └─────────────────────────────┘ └───────────────────────┘ │
+/// │ ↓ padding.down                                          │
+/// └──────────────────────────────────────────────────────────┘
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Padding {
+    /// Inset around each window within its container cell (visual gap).
     #[serde(default = "default_window_padding")]
     pub window: i32,
+    /// Top screen margin so windows don't touch the top edge.
     #[serde(default)]
     pub up: i32,
+    /// Bottom screen margin (e.g., for taskbar clearance).
     #[serde(default)]
     pub down: i32,
 }
@@ -133,33 +185,49 @@ impl StmConfig {
     }
 }
 
-/// All hotkey bindings.
+/// All hotkey bindings (13 total).
+///
+/// Default keybinds use Vim-style `Super+H/J/K/L` for focus. All defaults are
+/// generated via a `default_hotkey!` macro to avoid repetition.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct Hotkeys {
+    /// Focus left: default `Super+H`.
     #[serde(default = "default_focus_left")]
     pub focus_left: String,
+    /// Focus right: default `Super+L`.
     #[serde(default = "default_focus_right")]
     pub focus_right: String,
+    /// Focus up: default `Super+K`.
     #[serde(default = "default_focus_up")]
     pub focus_up: String,
+    /// Focus down: default `Super+J`.
     #[serde(default = "default_focus_down")]
     pub focus_down: String,
+    /// Swap left: default `Super+Shift+H`.
     #[serde(default = "default_swap_left")]
     pub swap_left: String,
+    /// Swap right: default `Super+Shift+L`.
     #[serde(default = "default_swap_right")]
     pub swap_right: String,
+    /// Scroll left: default `Super+Left`.
     #[serde(default = "default_scroll_left")]
     pub scroll_left: String,
+    /// Scroll right: default `Super+Right`.
     #[serde(default = "default_scroll_right")]
     pub scroll_right: String,
+    /// Toggle float/tiling: default `Super+Space`.
     #[serde(default = "default_toggle_float")]
     pub toggle_float: String,
+    /// Toggle monocle mode: default `Super+M`.
     #[serde(default = "default_toggle_monocle")]
     pub toggle_monocle: String,
+    /// Close focused window: default `Super+Q`.
     #[serde(default = "default_close_window")]
     pub close_window: String,
+    /// Reload config from disk: default `Super+Shift+R`.
     #[serde(default = "default_reload_config")]
     pub reload_config: String,
+    /// Place window above others in column: default `Super+A`.
     #[serde(default = "default_place_above")]
     pub place_above: String,
 }
@@ -187,6 +255,12 @@ default_hotkey!(default_reload_config, "Super+Shift+R");
 default_hotkey!(default_place_above, "Super+A");
 
 /// A single window classification rule.
+///
+/// Rules are evaluated **top-to-bottom, first match wins** against new windows.
+/// If no rule matches, [`StmConfig::default_window_action`] is used.
+///
+/// The `match` field uses `#[serde(rename = "match")]` so the YAML key is
+/// `match` while the Rust field is `match_` (avoiding the reserved word).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WindowRule {
     /// Criteria to match against a window.
@@ -203,38 +277,61 @@ pub struct WindowRule {
 }
 
 /// Match criteria for a window rule.
+///
+/// All fields are optional — a rule matches if **all specified fields** match.
+/// Fields like `title_contains` are case-insensitive; `title_regex` uses full
+/// regex matching.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct MatchRule {
+    /// Exact executable name (e.g., `"code.exe"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
+    /// Exact window title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Case-insensitive substring match on title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_contains: Option<String>,
+    /// Full regex match on title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_regex: Option<String>,
+    /// Win32 window class name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
+    /// Full executable path (glob pattern).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_path: Option<String>,
 }
 
-/// Action to apply to a matched window.
+/// Action to apply when a window rule matches.
+///
+/// - `Tile` — managed by [`LayoutEngine`](crate::layout::LayoutEngine)
+/// - `Float` — free-floating, user-positioned, not tiled
+/// - `Ignore` — excluded from tiling entirely (e.g., fullscreen apps)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowAction {
+    /// Managed by [`LayoutEngine`](crate::layout::LayoutEngine).
     Tile,
+    /// Free-floating, user-positioned, not tiled.
     Float,
+    /// Excluded from tiling entirely (e.g., fullscreen apps).
     Ignore,
 }
 
-/// Animation configuration.
+/// Animation configuration for layout transitions.
+///
+/// When disabled, all [`WindowMove`](crate::layout::WindowMove)s are applied
+/// instantly (hint set to [`Restore`](crate::layout::AnimationHint::Restore)).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AnimationConfig {
+    /// Whether layout transitions are animated.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Animation duration in milliseconds.
     #[serde(default = "default_duration_ms")]
     pub duration_ms: u32,
+    /// Easing function name (e.g., `"ease-out-expo"`).
     #[serde(default = "default_easing")]
     pub easing: String,
 }
@@ -262,8 +359,13 @@ impl Default for AnimationConfig {
 }
 
 /// Strategy for restoring minimized tiling windows.
+///
+/// - `OriginalSlot` — put the window back where it was before minimize
+/// - `RightOfFocused` — insert as a new column to the right of focused
+/// - `AppendRight` — append as the rightmost column on the canvas
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MinimizeRestore {
+    /// Strategy for placing restored windows.
     #[serde(default = "default_minimize_restore_strategy")]
     pub strategy: MinimizeRestoreStrategy,
 }
@@ -281,11 +383,16 @@ impl Default for MinimizeRestore {
 }
 
 /// Available minimize restore strategies.
+///
+/// See [`MinimizeRestore`] for the semantics of each variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MinimizeRestoreStrategy {
+    /// Put the window back where it was before minimize.
     OriginalSlot,
+    /// Insert as a new column to the right of focused.
     RightOfFocused,
+    /// Append as the rightmost column on the canvas.
     AppendRight,
 }
 

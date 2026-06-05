@@ -1,8 +1,38 @@
 //! Layout engine orchestrator.
 //!
-//! `LayoutEngine` is the main entry point for layout operations. It owns
-//! the current virtual layout, tracks focus and monocle state, and
-//! produces `LayoutDiff` results for each mutation.
+//! [`LayoutEngine`] is the main entry point for layout operations. It owns
+//! the current [`VirtualLayout`], tracks focus and monocle state, and
+//! produces [`LayoutDiff`] results for each mutation.
+//!
+//! # The Mutation Pipeline
+//!
+//! Every public method follows the same 3-step pipeline internally:
+//!
+//! ```text
+//! User command (e.g., swap Right)
+//!     │
+//!     ▼
+//! mutations::swap() → new VirtualLayout
+//!     │
+//!     ▼  (apply_mutation)
+//! projection::project() → new ActualLayout
+//!     │
+//!     ▼
+//! diff::diff(prev_actual, new_actual) → Vec<WindowMove>
+//!     │
+//!     ▼
+//! LayoutDiff { virtual_layout, actual_layout, moves }
+//! ```
+//!
+//! # What LayoutEngine Does NOT Own
+//!
+//! The engine is **pure layout logic**. It does not own:
+//! - Window metadata (titles, classes, HWNDs) — that's `WindowRegistry`
+//! - Tile/float/ignore state — that's `WindowRegistry`
+//! - Animation timing — that's the compositor
+//! - Config loading — that's [`config`](crate::config)
+//!
+//! It only owns the layout math: columns, widths, focus, viewport offset.
 
 use crate::common::{Direction, WindowId};
 use crate::layout::diff;
@@ -11,6 +41,35 @@ use crate::layout::projection;
 use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, VirtualLayout};
 
 /// The layout engine — owns virtual layout state and produces diffs.
+///
+/// This is the single entry point for all layout mutations. Call its public
+/// methods to scroll, focus, swap, resize, merge, toggle monocle, or
+/// add/remove windows. Each call returns a [`LayoutDiff`] containing the
+/// new layouts and animation instructions.
+///
+/// # Example
+///
+/// ```rust
+/// use scrolling_tiling_manager::layout::{
+///     LayoutEngine,
+///     types::{MonitorInfo, Padding},
+/// };
+/// use scrolling_tiling_manager::common::{Rect, WindowId, Direction};
+///
+/// let monitor = MonitorInfo {
+///     work_area: Rect { x: 0, y: 0, width: 1920, height: 1080 },
+/// };
+/// let mut engine = LayoutEngine::new(monitor, 960, 4, Padding { window: 4, up: 0, down: 0 });
+///
+/// // Add windows (each becomes a new column, auto-focused)
+/// engine.add_window(WindowId(1));
+/// engine.add_window(WindowId(2));
+/// engine.add_window(WindowId(3));
+///
+/// // Focus is on WindowId(3) (last added). Focus left to WindowId(2).
+/// let focused = engine.focus(Direction::Left);
+/// assert_eq!(focused, Some(WindowId(2)));
+/// ```
 pub struct LayoutEngine {
     /// Current virtual layout (the infinite horizontal canvas).
     virtual_layout: VirtualLayout,
@@ -77,12 +136,13 @@ impl LayoutEngine {
         &self.monitor
     }
 
-    /// Apply a mutation and compute the resulting `LayoutDiff`.
+    /// Apply a mutation and compute the resulting [`LayoutDiff`].
     ///
-    /// This is the core pipeline:
-    /// 1. Apply mutation → new `VirtualLayout`
-    /// 2. Project → new `ActualLayout`
-    /// 3. Diff old vs new → `Vec<WindowMove>`
+    /// This is the core pipeline that every mutation flows through:
+    /// 1. Receive new [`VirtualLayout`] from the mutation function
+    /// 2. [`projection::project`] → new [`ActualLayout`]
+    /// 3. [`super::diff::diff`] old vs new → [`Vec<super::types::WindowMove>`]
+    /// 4. Update internal state and return the diff
     fn apply_mutation(&mut self, new_layout: VirtualLayout) -> LayoutDiff {
         let new_actual = projection::project(
             &new_layout,

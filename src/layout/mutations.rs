@@ -1,20 +1,28 @@
-//! Layout mutation operations.
+//! Layout mutation operations — all pure functions.
 //!
-//! All mutations are pure functions that take a `VirtualLayout` and return
-//! a new one. The layout is never mutated in place.
+//! Every mutation takes a `&VirtualLayout` and returns a **new** `VirtualLayout`.
+//! The layout is never mutated in place. This functional approach makes mutations
+//! easy to test, compose, and reason about — there is no mutable state to get
+//! out of sync.
 //!
-//! ## Container Model
+//! # Container Model
 //!
 //! ```text
-//! HorizontalContainer (VirtualLayout)
-//! ├── Column (VerticalContainer) — rows stacked top-to-bottom
-//! ├── Column
-//! └── Column
+//! VirtualLayout (horizontal container)
+//! ├── Column 0 (vertical container) — rows stacked top-to-bottom
+//! ├── Column 1
+//! └── Column 2
 //! ```
 //!
-//! - Horizontal resize → adjust column `width_eighths`
+//! - **Horizontal operations** (Left/Right): swap columns, resize `width_eighths`, scroll
+//! - **Vertical operations** (Up/Down): swap rows within a column, focus between rows
 //!
-//! All size parameters come from config, never hardcoded.
+//! # Size Philosophy
+//!
+//! All size parameters come from [`MutationConfig`], which is derived from
+//! [`StmConfig`](crate::config::StmConfig). The mutation layer never hardcodes
+//! pixel values — it delegates to [`super::projection`] for all pixel math.
+//! for all pixel math.
 
 use crate::common::{Direction, WindowId};
 use crate::layout::projection::{column_eighths_to_pixels, column_step_width};
@@ -22,7 +30,9 @@ use crate::layout::types::{Column, Padding, VirtualLayout};
 
 /// Parameters that configure how mutations behave.
 ///
-/// Derived from `StmConfig` — the layout engine never hardcodes these.
+/// Extracted from [`StmConfig`](crate::config::StmConfig) by the daemon.
+/// The layout engine receives this (not the full config) to stay decoupled
+/// from config parsing details.
 #[derive(Debug, Clone, Copy)]
 pub struct MutationConfig {
     /// Monitor pixel width (used for visibility checks).
@@ -79,10 +89,15 @@ pub fn scroll_right(layout: &VirtualLayout, config: &MutationConfig) -> Option<V
 // ---------------------------------------------------------------------------
 
 /// Result of a focus change — the newly focused window, and optionally
-/// a viewport scroll if focus would leave the visible area.
+/// a viewport scroll if the target column was off-screen.
+///
+/// The [`LayoutEngine`](crate::layout::LayoutEngine) reads `focused` to update
+/// its internal focus tracker, and applies `new_layout` through the mutation pipeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FocusResult {
+    /// The newly focused [`WindowId`].
     pub focused: WindowId,
+    /// Updated layout (viewport may have scrolled).
     pub new_layout: VirtualLayout,
 }
 

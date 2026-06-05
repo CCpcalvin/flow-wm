@@ -1,42 +1,99 @@
-//! Geometry types and direction enum.
+//! Geometry primitives, direction enum, and platform-independent window handle.
+//!
+//! These types are the vocabulary shared by every subsystem in stm. They contain
+//! no platform-specific logic — the actual Win32 conversion (`WindowId` → `HWND`)
+//! happens only in the (future) `registry` module.
 
 /// Axis-parallel rectangle with integer pixel coordinates.
+///
+/// This is the **frozen cross-layer contract** between [`LayoutEngine`](crate::layout::LayoutEngine)
+/// and the Win32 compositor. The field layout (`x`, `y`, `width`, `height`) must not change.
+///
+/// After projection, every [`ActualEntry`](crate::layout::ActualEntry) carries a `Rect`
+/// representing the final `SetWindowPos` coordinates — padding already baked in.
+///
+/// # Overlap Semantics
+///
+/// Touching rectangles are **not** overlapping (consistent with Win32 `IntersectRect`):
+///
+/// ```
+/// # use scrolling_tiling_manager::common::Rect;
+/// let a = Rect { x: 0, y: 0, width: 100, height: 100 };
+/// let b = Rect { x: 100, y: 0, width: 100, height: 100 };
+/// assert!(!a.overlaps(b)); // touching at x=100 → no overlap
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rect {
+    /// Left edge X coordinate.
     pub x: i32,
+    /// Top edge Y coordinate.
     pub y: i32,
+    /// Width in pixels.
     pub width: i32,
+    /// Height in pixels.
     pub height: i32,
 }
 
 /// 2D size in integer pixels.
+///
+/// Used for preferred window sizes and monitor dimensions where position
+/// is not relevant (unlike [`Rect`] which includes position).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Size {
+    /// Width in pixels.
     pub w: i32,
+    /// Height in pixels.
     pub h: i32,
 }
 
 /// 2D point with integer pixel coordinates.
+///
+/// Used for absolute screen positions (e.g., viewport offset calculations).
+/// For positioned+bounded regions, prefer [`Rect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Point {
+    /// Horizontal coordinate.
     pub x: i32,
+    /// Vertical coordinate.
     pub y: i32,
 }
 
-/// Cardinal direction for focus and swap operations.
+/// Cardinal direction for focus, swap, and resize operations.
+///
+/// - `Left`/`Right` operate on **columns** (horizontal container in [`VirtualLayout`](crate::layout::VirtualLayout))
+/// - `Up`/`Down` operate on **rows** within a column (vertical container in [`Column`](crate::layout::Column))
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
+    /// Move focus/swap to the left column.
     Left,
+    /// Move focus/swap to the right column.
     Right,
+    /// Move focus/swap to the row above (within column).
     Up,
+    /// Move focus/swap to the row below (within column).
     Down,
 }
 
-/// Platform-independent window identifier.
+/// Platform-independent opaque window handle.
 ///
-/// Wraps the OS-native window handle as an opaque `isize`.
-/// On Windows, this stores the HWND value. The actual Win32
-/// conversion happens only in the `registry` and `win32` modules.
+/// Wraps the OS-native window handle as an `isize`. On Windows, this stores
+/// the HWND value. The actual Win32 conversion (`HWND` ↔ `WindowId`) happens
+/// only in the (future) `registry` module.
+///
+/// This is the **bridge type** between [`LayoutEngine`](crate::layout::LayoutEngine)
+/// (which only knows `WindowId`) and `WindowRegistry` (which knows HWNDs).
+///
+/// # Usage as map key
+///
+/// `WindowId` implements `Hash` + `Eq`, so it works as a `HashMap`/`HashSet` key:
+///
+/// ```
+/// # use scrolling_tiling_manager::common::WindowId;
+/// # use std::collections::HashSet;
+/// let mut set = HashSet::new();
+/// set.insert(WindowId(1));
+/// assert!(set.contains(&WindowId(1)));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub isize);
 

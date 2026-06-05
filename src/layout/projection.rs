@@ -1,23 +1,36 @@
 //! Virtual layout → actual layout projection.
 //!
-//! Projects the infinite virtual canvas onto the monitor viewport,
-//! computing real pixel coordinates for each visible window.
+//! This is the core of Layer 2: a pure function that converts the logical
+//! [`VirtualLayout`] into actual screen pixel coordinates ([`ActualLayout`]).
 //!
-//! Off-screen windows are parked exactly one column-width
-//! beyond the visible viewport edge, so their position is geometrically
-//! deterministic rather than using a magic offset.
+//! # How It Works
 //!
-//! ## Container Model
+//! 1. Iterate columns left-to-right, tracking cumulative `canvas_x`
+//! 2. Determine visibility: is this column within the viewport?
+//! 3. **Visible columns**: compute `screen_x = monitor_left + (canvas_x - viewport_offset)`,
+//!    then inset each window by `padding.window` on all sides
+//! 4. **Off-screen columns**: park exactly one column-width beyond the nearest
+//!    viewport edge (deterministic, no magic numbers)
 //!
-//! Columns are **packed** with no inter-column gap. Visual spacing
-//! between adjacent windows comes entirely from `padding.window`
-//! (each window is inset by `padding.window` on all sides within its cell).
+//! # Container Model
+//!
+//! Columns are **packed** with no inter-column gap. Visual spacing between
+//! adjacent windows comes entirely from `padding.window` (each window is
+//! inset by `padding.window` on all sides within its cell).
 //!
 //! ```text
 //! [Col 1] [Col 2] [Col 3] | viewport | [Col n] [Col n+1] ...
 //! ```
 //!
 //! Screen-level top margin = `padding.up`, bottom margin = `padding.down`.
+//!
+//! # Padding: Outside the Window Concept
+//!
+//! Padding is applied **here**, during projection. The [`ActualEntry`] rects
+//! produced are the **final HWND rects** — they can be passed directly to
+//! `SetWindowPos` without any further adjustment. This keeps the padding logic
+//! in one place and prevents every consumer of window rects from needing to
+//! know about padding.
 
 use crate::common::Rect;
 use crate::layout::types::{
@@ -26,8 +39,12 @@ use crate::layout::types::{
 
 /// Project a virtual layout onto a monitor viewport.
 ///
-/// Visible windows receive real screen coordinates. Off-screen windows
-/// are parked one column-width beyond the nearest viewport edge.
+/// This is the Layer 2 core function. Visible windows receive real screen
+/// coordinates. Off-screen windows are parked one column-width beyond the
+/// nearest viewport edge.
+///
+/// The returned [`ActualEntry`] rects include padding — they are the final
+/// `SetWindowPos` coordinates.
 #[must_use]
 pub fn project(
     virtual_layout: &VirtualLayout,
@@ -92,7 +109,8 @@ pub fn project(
 /// Project a visible column's rows into actual entries.
 ///
 /// Rows are packed (no inter-row gap). Each window is inset by
-/// `padding.window` within its allocated row cell.
+/// `padding.window` within its allocated row cell. The resulting
+/// [`ActualEntry::rect`](crate::layout::ActualEntry::rect) is the final HWND rect.
 fn project_column_rows(
     column: &Column,
     col_x: i32,
@@ -130,7 +148,8 @@ fn project_column_rows(
 /// Park an off-screen column's rows at a hidden position.
 ///
 /// Applies the same padding as visible windows for consistent animation
-/// transitions when scrolling windows in/out of the viewport.
+/// transitions when scrolling windows in/out of the viewport. Parked positions
+/// are deterministic: one column-width beyond the nearest viewport edge.
 fn park_column_rows(
     column: &Column,
     park_x: i32,
@@ -166,6 +185,9 @@ fn park_column_rows(
 }
 
 /// Compute the pixel height for a row (always equal division).
+///
+/// All rows within a column have equal height. If custom row ratios are
+/// needed in the future, this is the function to modify.
 fn compute_row_height(_index: usize, row_count: usize, usable_height: i32) -> i32 {
     if row_count == 0 {
         return 0;

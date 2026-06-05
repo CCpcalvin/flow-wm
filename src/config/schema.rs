@@ -1,4 +1,8 @@
-//! JSON Schema generation for config autocomplete support.
+//! JSON Schema generation for config editor autocomplete.
+//!
+//! Generates a JSON Schema from [`super::types::StmConfig`] via
+//! `schemars`. Write the output to `%APPDATA%\stm\stm-config-schema.json`
+//! for VS Code / Neovim YAML autocomplete.
 
 use crate::common::{StmError, StmResult};
 use schemars::schema_for;

@@ -1,7 +1,24 @@
 //! Layout diff computation.
 //!
-//! Compares two actual layouts and produces the minimal set of
-//! `WindowMove` instructions with appropriate animation hints.
+//! This is the core of Layer 3: compares two [`ActualLayout`]s and produces
+//! the minimal set of [`WindowMove`] instructions with appropriate
+//! [`AnimationHint`]s for the compositor.
+//!
+//! # Classification
+//!
+//! Moves are classified by horizontal distance:
+//!
+//! | Condition | Hint |
+//! |-----------|------|
+//! | `|dx| ≤ 500px` | [`Snap`](AnimationHint::Snap) |
+//! | `dx > 500px` (moving right) | [`ScrollEnter`](AnimationHint::ScrollEnter) |
+//! | `dx > 500px` (moving left) | [`ScrollExit`](AnimationHint::ScrollExit) |
+//!
+//! New windows (not in previous layout) are treated as entering from a parked
+//! position at x=-10000, which always triggers [`ScrollEnter`](AnimationHint::ScrollEnter).
+//!
+//! Windows that disappeared are **not** included in the diff — call
+//! [`removed_windows`] separately to detect them.
 
 use crate::common::Rect;
 use crate::common::WindowId;
@@ -17,8 +34,8 @@ const SCROLL_THRESHOLD: i32 = 500;
 ///
 /// Produces a `Vec<WindowMove>` containing:
 /// - Moves for windows present in both layouts (position changed)
-/// - Moves for new windows (from a parked position)
-/// - Windows that disappeared are not included (handled by the caller)
+/// - Moves for new windows (from a parked position at x=-10000)
+/// - Windows that disappeared are **not** included — use [`removed_windows`]
 #[must_use]
 pub fn diff(prev: &ActualLayout, next: &ActualLayout) -> Vec<WindowMove> {
     let mut moves = Vec::new();
@@ -48,7 +65,10 @@ pub fn diff(prev: &ActualLayout, next: &ActualLayout) -> Vec<WindowMove> {
     moves
 }
 
-/// Classify the animation hint based on the nature of the position change.
+/// Classify the animation hint based on horizontal move distance.
+///
+/// Uses [`SCROLL_THRESHOLD`] (500px) as the boundary between in-viewport
+/// adjustments and scroll transitions.
 fn classify_hint(from: Rect, to: Rect) -> AnimationHint {
     let dx = (to.x - from.x).abs();
 
@@ -68,6 +88,9 @@ fn classify_hint(from: Rect, to: Rect) -> AnimationHint {
 }
 
 /// Find windows that exist in `prev` but not in `next` (removed windows).
+///
+/// Call this alongside [`diff`] to handle window removals. Removed windows
+/// are not included in the move diff because they don't move — they disappear.
 #[must_use]
 pub fn removed_windows(prev: &ActualLayout, next: &ActualLayout) -> Vec<WindowId> {
     let next_ids: std::collections::HashSet<WindowId> =

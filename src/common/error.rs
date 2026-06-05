@@ -1,8 +1,18 @@
 //! Project-wide error types.
+//!
+//! All stm subsystems report errors through [`StmError`] and the [`StmResult`]
+//! convenience alias. This keeps error handling consistent across modules
+//! without introducing per-module error types.
 
 use std::fmt;
 
 /// All errors produced by stm subsystems.
+///
+/// Each variant corresponds to a subsystem:
+///
+/// - [`Config`](StmError::Config) — produced by [`config`](crate::config) during YAML parsing or validation
+/// - [`Layout`](StmError::Layout) — produced by [`layout`](crate::layout) on invalid state transitions
+/// - [`Io`](StmError::Io) — produced during file I/O or socket operations
 #[derive(Debug)]
 pub enum StmError {
     /// Configuration parsing or validation failure.
@@ -31,7 +41,17 @@ impl From<std::io::Error> for StmError {
     }
 }
 
-/// Convenience alias used across the project.
+/// Convenience alias used across the project for fallible operations.
+///
+/// # Example
+///
+/// ```no_run
+/// use scrolling_tiling_manager::common::{StmResult, StmError};
+///
+/// fn load_config() -> StmResult<String> {
+///     Err(StmError::Config("file not found".into()))
+/// }
+/// ```
 pub type StmResult<T> = Result<T, StmError>;
 
 #[cfg(test)]
