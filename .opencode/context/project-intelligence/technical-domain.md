@@ -1,108 +1,113 @@
-<!-- Context: project-intelligence/technical | Priority: high | Version: 1.0 | Updated: 2025-01-12 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 2.0 | Updated: 2026-06-05 -->
 
 # Technical Domain
 
-> Document the technical foundation, architecture, and key decisions.
+**Purpose**: Tech stack, architecture, and coding patterns for ScrollingTilingManager (STM).
+**Last Updated**: 2026-06-05
 
 ## Quick Reference
-
-- **Purpose**: Understand how the project works technically
-- **Update When**: New features, refactoring, tech stack changes
-- **Audience**: Developers, DevOps, technical stakeholders
+**Update Triggers**: New modules | Architecture changes | Dependency additions
+**Audience**: Developers, AI agents writing Rust for this project
 
 ## Primary Stack
 
 | Layer | Technology | Version | Rationale |
 |-------|-----------|---------|-----------|
-| Language | [e.g., TypeScript] | [Version] | [Why this language] |
-| Framework | [e.g., Node.js] | [Version] | [Why this framework] |
-| Database | [e.g., PostgreSQL] | [Version] | [Why this database] |
-| Infrastructure | [e.g., AWS, Vercel] | [N/A] | [Why this infra] |
-| Key Libraries | [List important ones] | [Versions] | [Why each matters] |
+| Language | Rust | Edition 2024 | Performance-critical native Windows binary |
+| Target | x86_64-pc-windows-msvc | — | Windows-only tiling window manager |
+| Serialization | serde + serde_yaml + schemars | 1.x | YAML config with JSON Schema support |
+| Error Handling | thiserror | 2.x | Derive error enums |
+| Logging | log + env_logger | 0.4/0.11 | Structured logging |
+| Build Profile | LTO + strip | release | Optimized, small binary |
 
-## Architecture Pattern
+## Binaries
 
-```
-Type: [Monolith | Microservices | Serverless | Agent-based | Hybrid]
-Pattern: [Brief description]
-Diagram: [Link to architecture diagram if exists]
-```
+| Binary | Role |
+|--------|------|
+| `stmd` | Daemon — owns all state, manages windows |
+| `stm` | CLI client — sends commands via IPC |
+| `stm-watchdog` | Crash-recovery — restores windows if daemon dies |
 
-### Why This Architecture?
+## Architecture: Mutation Pipeline
 
-[Explain the business and technical reasons for this architecture choice. What problem does this architecture solve? What were alternatives considered?]
+Every layout operation flows through the same 3-step functional pipeline:
 
-## Project Structure
-
-```
-[Project Root]
-├── src/                    # Source code
-├── tests/                  # Test files
-├── docs/                   # Documentation
-├── scripts/                # Build/deploy scripts
-└── [Other key directories]
+```rust
+fn apply_mutation(&mut self, new_layout: VirtualLayout) -> LayoutDiff {
+    let new_actual = projection::project(&new_layout, &self.monitor, ...);
+    let moves = diff::diff(&self.prev_actual, &new_actual);
+    LayoutDiff { virtual_layout, actual_layout, moves }
+}
 ```
 
-**Key Directories**:
-- `src/` - Contains all application logic organized by [module/feature/domain]
-- `tests/` - [How tests are organized]
-- `docs/` - [What documentation lives here]
-
-## Key Technical Decisions
-
-| Decision | Rationale | Impact |
-|----------|-----------|--------|
-| [Decision 1] | [Why this choice] | [What it enables] |
-| [Decision 2] | [Why this choice] | [What it enables] |
-
-See `decisions-log.md` for full decision history with alternatives.
-
-## Integration Points
-
-| System | Purpose | Protocol | Direction |
-|--------|---------|----------|-----------|
-| [API 1] | [What it does] | [REST/GraphQL/gRPC] | [Inbound/Outbound] |
-| [Database] | [What it stores] | [PostgreSQL/Mongo/etc] | [Internal] |
-| [Service] | [What it provides] | [HTTP/gRPC] | [Outbound] |
-
-## Technical Constraints
-
-| Constraint | Origin | Impact |
-|------------|--------|--------|
-| [Legacy systems] | [Business/Tech] | [What limitation it creates] |
-| [Compliance] | [Regulation] | [What must be followed] |
-| [Performance] | [SLAs] | [What must be met] |
-
-## Development Environment
-
+The 3-layer model:
 ```
-Setup: [Quick setup command or link]
-Requirements: [What developers need installed]
-Local Dev: [How to run locally]
-Testing: [How to run tests]
+VirtualLayout (logical, no pixels)
+       ↓ projection::project()
+ActualLayout (pixel-accurate rects)
+       ↓ diff::diff()
+Vec<WindowMove> (animation instructions)
 ```
 
-## Deployment
+Key rules: mutations return new `VirtualLayout` (never mutate in place). `LayoutEngine` is pure math — zero Win32. `WindowId` bridges engine ↔ registry.
+
+## Module Structure
 
 ```
-Environment: [Production/Staging/Development]
-Platform: [Where it deploys]
-CI/CD: [Pipeline used]
-Monitoring: [Tools for observability]
+src/
+├── main.rs, lib.rs       # Daemon entry, library root
+├── bin/                  # stm CLI, stm-watchdog
+├── common/               # Cross-cutting types (Rect, WindowId, StmError)
+├── config/               # YAML config loading & validation
+├── layout/               # Pure layout logic (engine, mutations, projection, diff)
+├── ipc/                  # IPC between CLI ↔ daemon (stub)
+├── input/                # Keyboard/mouse interception (stub)
+├── persist/              # State persistence (stub)
+├── registry/             # HWND ↔ WindowId, Win32 bridge (stub)
+└── animation/            # Animation timing & easing (stub)
 ```
 
-## Onboarding Checklist
+Convention: each module has `mod.rs` + `types.rs`. `common/` is vocabulary only. Platform code isolated in `registry/`, `input/`.
 
-- [ ] Know the primary tech stack
-- [ ] Understand the architecture pattern and why it was chosen
-- [ ] Know the key project directories and their purpose
-- [ ] Understand major technical decisions and rationale
-- [ ] Know integration points and dependencies
-- [ ] Be able to set up local development environment
-- [ ] Know how to run tests and deploy
+## Naming Conventions
+
+| Type | Convention | Example |
+|------|-----------|---------|
+| Files | `snake_case.rs` | `engine.rs`, `mutations.rs` |
+| Structs / Enums | `PascalCase` | `LayoutEngine`, `AnimationHint` |
+| Functions | `snake_case` | `add_window()`, `scroll_left()` |
+| Config fields | `snake_case` (YAML) | `window_rules`, `duration_ms` |
+| Serde reserved | `match_` field + `#[serde(rename)]` | `WindowRule.match_` → YAML `match` |
+
+## Code Standards
+
+- `#![warn(missing_docs)]` — every public item must have doc comments
+- Module docs (`//!`) explain architecture; item docs (`///`) include examples
+- `#[must_use]` on all pure functions and constructors
+- Single error enum: `StmError` + `StmResult<T>` alias project-wide
+- Serde defaults: `#[serde(default = "fn_name")]` for all config fields
+- Config validation: `StmConfig::validate()` for semantic checks beyond serde
+- Tests in same file via `#[cfg(test)] mod tests`, annotated `// Positive:` / `// Negative:`
+- **After each session, AI must synchronize docstrings to reflect any code changes**
+
+## Security & Safety
+
+- Safe Rust by default — `unsafe` only at Win32 FFI boundary
+- Any `unsafe` wrapped in safe abstraction with safety comments
+- No `.unwrap()` in daemon code — use `StmResult<T>` / `Option<T>` propagation
+- Graceful degradation — malformed config falls back to defaults, logs error
+- Watchdog recovery — no orphaned hidden windows after crash
+
+## 📂 Codebase References
+
+| Module | Files | Purpose |
+|--------|-------|---------|
+| Common | `src/common/types.rs`, `src/common/error.rs` | Shared types, error enum |
+| Config | `src/config/types.rs`, `src/config/schema.rs` | YAML config, validation |
+| Layout | `src/layout/{engine,mutations,projection,diff,types}.rs` | Pure layout pipeline |
+| Build | `Cargo.toml` | Dependencies, targets, release profile |
 
 ## Related Files
 
-- `business-domain.md` - Why this technical foundation exists
-- `business-tech-bridge.md` - How business needs map to technical solutions
-- `decisions-log.md` - Full decision history with context
+- `business-domain.md` — Why this project exists
+- `decisions-log.md` — Architecture decisions with rationale
