@@ -85,7 +85,7 @@ impl Column {
 /// A value of `0` means the camera is aligned with the left edge of the first column.
 /// Increasing it scrolls the viewport rightward across the canvas.
 ///
-/// Many operations (scrolling, focus-to-offscreen, swap-with-offscreen) are
+/// Many operations (scrolling, focus-to-offscreen, swap) are
 /// implemented by adjusting `viewport_offset` rather than moving individual windows.
 /// The projection layer then computes actual pixel positions from this combined state.
 ///

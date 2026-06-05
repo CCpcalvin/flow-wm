@@ -226,25 +226,13 @@ impl LayoutEngine {
 
     /// Swap the focused window in the given direction.
     ///
-    /// For Left/Right, swaps the focused column with its neighbor.
+    /// For Left/Right, swaps the focused column with its neighbor, then
+    /// shifts the camera if the new column position is off-screen.
     /// For Up/Down, swaps the focused row within its column.
     /// Focus requires no fixup — it follows the window by [`WindowId`].
     pub fn swap(&mut self, direction: Direction) -> Option<LayoutDiff> {
         let focused = self.focused?;
-        let new_layout = mutations::swap(&self.virtual_layout, focused, direction)?;
-        Some(self.apply_mutation(new_layout))
-    }
-
-    /// Swap the focused column with the first off-screen column, then
-    /// shift the camera to reveal it.
-    ///
-    /// Full flow: swap columns in [`VirtualLayout`] → call
-    /// [`mutations::swap_with_offscreen`] to shift the camera → project
-    /// and diff. Focus stays on the same [`WindowId`] throughout.
-    pub fn swap_with_offscreen(&mut self, direction: Direction) -> Option<LayoutDiff> {
-        let focused = self.focused?;
-        let new_layout =
-            mutations::swap_with_offscreen(&self.virtual_layout, focused, direction, &self.config)?;
+        let new_layout = mutations::swap(&self.virtual_layout, focused, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
@@ -593,7 +581,6 @@ mod tests {
         assert!(engine.merge_column_left().is_none());
         assert!(engine.merge_column_right().is_none());
         assert!(engine.toggle_monocle().is_none());
-        assert!(engine.swap_with_offscreen(Direction::Right).is_none());
     }
 
     #[test]
@@ -653,8 +640,8 @@ mod tests {
     }
 
     #[test]
-    fn engine_swap_with_offscreen() {
-        // Positive: swap focused column with off-screen column
+    fn engine_swap_shifts_camera_when_target_offscreen() {
+        // Positive: swap with adjacent column that is off-screen shifts the camera
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
@@ -662,13 +649,23 @@ mod tests {
         engine.add_window(WindowId(4));
         engine.set_focus(WindowId(1));
 
-        // Focus right twice to scroll, then swap with offscreen left
+        // Focus right twice to scroll viewport, then focus back to window 2
+        // so column 0 (window 1) is off-screen left
         let _ = engine.focus(Direction::Right).expect("f1");
         let _ = engine.focus(Direction::Right).expect("f2");
         assert!(engine.virtual_layout().viewport_offset > 0);
 
-        let diff = engine.swap_with_offscreen(Direction::Left).expect("swap");
+        // Focus on window at the left edge of viewport, then swap left
+        // The column to the left (window 1) is off-screen
+        engine.set_focus(WindowId(2));
+        let prev_offset = engine.virtual_layout().viewport_offset;
+        let diff = engine.swap(Direction::Left).expect("swap left");
         assert!(!diff.moves.is_empty());
+        // Camera should shift to make the swapped column visible
+        assert!(
+            diff.virtual_layout.viewport_offset < prev_offset,
+            "viewport should have scrolled left to reveal swapped column"
+        );
     }
 
     #[test]

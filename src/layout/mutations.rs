@@ -191,7 +191,7 @@ fn focus_horizontal(
 ///   column's right edge aligns with the viewport's right edge.
 /// - If already visible, no change.
 ///
-/// This is used by focus, swap-with-offscreen, and other operations that need
+/// This is used by focus, swap, and other operations that need
 /// to ensure a specific column is on-screen.
 fn ensure_column_visible(
     layout: &VirtualLayout,
@@ -236,12 +236,21 @@ fn ensure_column_visible(
 /// Swap the focused window with an adjacent sibling within its column (vertical swap),
 /// or swap the focused window's column with an adjacent column (horizontal swap).
 ///
+/// For horizontal swaps, after reordering the columns in the [`VirtualLayout`],
+/// [`ensure_column_visible`] is called to guarantee the focused window's column
+/// is within the viewport. If the column is already visible, this is a no-op;
+/// if not, the camera shifts automatically.
+///
+/// Focus requires no fixup — it is tracked by [`WindowId`], so it follows
+/// the focused window regardless of column reordering.
+///
 /// Returns `None` if there is no adjacent element in that direction.
 #[must_use]
 pub fn swap(
     layout: &VirtualLayout,
     focused: WindowId,
     direction: Direction,
+    config: &MutationConfig,
 ) -> Option<VirtualLayout> {
     let (col, row) = layout.find_window(focused)?;
     match direction {
@@ -257,14 +266,16 @@ pub fn swap(
             if col == 0 {
                 return None;
             }
-            swap_columns(layout, col, col - 1)
+            let swapped = swap_columns(layout, col, col - 1)?;
+            Some(ensure_column_visible(&swapped, col - 1, config))
         }
         Direction::Right => {
             let max_col = layout.columns.len().saturating_sub(1);
             if col >= max_col {
                 return None;
             }
-            swap_columns(layout, col, col + 1)
+            let swapped = swap_columns(layout, col, col + 1)?;
+            Some(ensure_column_visible(&swapped, col + 1, config))
         }
     }
 }
@@ -295,63 +306,6 @@ fn swap_columns(layout: &VirtualLayout, col_a: usize, col_b: usize) -> Option<Vi
     let mut new_layout = layout.clone();
     new_layout.columns.swap(col_a, col_b);
     Some(new_layout)
-}
-
-/// Swap the focused window's column with the first off-screen column
-/// in the given direction, then shift the camera to reveal the swapped column.
-///
-/// This implements the full off-screen swap flow:
-/// 1. Find the first column fully outside the viewport in the given direction.
-/// 2. Swap it with the focused column in the [`VirtualLayout`].
-/// 3. Call `ensure_column_visible` to shift the camera if needed.
-///
-/// Focus requires no fixup — it is tracked by [`WindowId`], so it follows
-/// the focused window regardless of column reordering.
-#[must_use]
-pub fn swap_with_offscreen(
-    layout: &VirtualLayout,
-    focused: WindowId,
-    direction: Direction,
-    config: &MutationConfig,
-) -> Option<VirtualLayout> {
-    let (focused_col, _) = layout.find_window(focused)?;
-    let offscreen_col = find_first_offscreen_column(layout, direction, config)?;
-
-    let mut new_layout = layout.clone();
-    new_layout.columns.swap(focused_col, offscreen_col);
-
-    // Scroll so the focused column (now containing swapped windows) is visible
-    let new_layout = ensure_column_visible(&new_layout, focused_col, config);
-    Some(new_layout)
-}
-
-/// Find the first column that is fully off-screen in the given direction.
-fn find_first_offscreen_column(
-    layout: &VirtualLayout,
-    direction: Direction,
-    config: &MutationConfig,
-) -> Option<usize> {
-    let vp_left = layout.viewport_offset;
-    let vp_right = vp_left + config.monitor_width;
-
-    let mut canvas_x: i32 = 0;
-    for (i, col) in layout.columns.iter().enumerate() {
-        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
-        let col_left = canvas_x;
-        let col_right = canvas_x + col_px;
-
-        let offscreen = match direction {
-            Direction::Left => col_right <= vp_left,
-            Direction::Right => col_left >= vp_right,
-            _ => false,
-        };
-
-        if offscreen {
-            return Some(i);
-        }
-        canvas_x += col_px;
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +702,7 @@ mod tests {
     #[test]
     fn swap_columns_reorders() {
         let layout = three_column_layout();
-        let result = swap(&layout, WindowId(1), Direction::Right).expect("swap");
+        let result = swap(&layout, WindowId(1), Direction::Right, &test_config()).expect("swap");
         assert_eq!(result.columns[0].rows[0], WindowId(2));
         assert_eq!(result.columns[1].rows[0], WindowId(1));
         assert_eq!(result.columns[2].rows[0], WindowId(3));
@@ -760,7 +714,8 @@ mod tests {
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        let result = swap(&layout, WindowId(1), Direction::Down).expect("swap down");
+        let result =
+            swap(&layout, WindowId(1), Direction::Down, &test_config()).expect("swap down");
         assert_eq!(result.columns[0].rows[0], WindowId(2));
         assert_eq!(result.columns[0].rows[1], WindowId(1));
     }
@@ -768,7 +723,37 @@ mod tests {
     #[test]
     fn swap_left_at_edge_returns_none() {
         let layout = three_column_layout();
-        assert!(swap(&layout, WindowId(1), Direction::Left).is_none());
+        assert!(swap(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
+    }
+
+    #[test]
+    fn swap_column_shifts_viewport_when_target_offscreen() {
+        let config = test_config(); // monitor_width=1920, column_width=960 → each col = 960px
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            960, // viewport past column 0
+        );
+        // Window 2 is in column 1 (visible). Swap left → column 0 (off-screen).
+        let result = swap(&layout, WindowId(2), Direction::Left, &config).expect("swap");
+        assert!(
+            result.viewport_offset < 960,
+            "camera should shift left to reveal col 0"
+        );
+    }
+
+    #[test]
+    fn swap_column_no_viewport_change_when_both_visible() {
+        let config = test_config();
+        let layout = three_column_layout(); // viewport=0, cols 0+1 fully visible
+        let result = swap(&layout, WindowId(1), Direction::Right, &config).expect("swap");
+        assert_eq!(
+            result.viewport_offset, 0,
+            "camera should not shift when both columns are visible"
+        );
     }
 
     // --- Expand / Shrink ---
@@ -884,58 +869,6 @@ mod tests {
     }
 
     // --- Integration: Mutation edge cases ---
-
-    #[test]
-    fn swap_with_offscreen_right() {
-        // Positive: swap focused column with first off-screen-right column
-        let config = test_config();
-        let layout = VirtualLayout::with_columns(
-            vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
-                Column::new(4, WindowId(4)),
-            ],
-            0,
-        );
-        // Viewport at 0, col 3 (index 2) and 4 (index 3) are off-screen right
-        let result =
-            swap_with_offscreen(&layout, WindowId(1), Direction::Right, &config).expect("swap");
-        // Column 0 (was id=1) swapped with first off-screen right (index 2, was id=3)
-        // After swap: cols = [id=3, id=2, id=1, id=4], and viewport scrolls to show col 0
-        assert_eq!(result.columns[0].rows[0], WindowId(3));
-        assert_eq!(result.columns[2].rows[0], WindowId(1));
-    }
-
-    #[test]
-    fn swap_with_offscreen_left() {
-        // Positive: swap focused with first off-screen-left column
-        let config = test_config();
-        let layout = VirtualLayout::with_columns(
-            vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
-            ],
-            960, // offset past first column (packed, no inter-column gap)
-        );
-        let result =
-            swap_with_offscreen(&layout, WindowId(3), Direction::Left, &config).expect("swap");
-        // Column 2 (was id=3) swapped with first off-screen left (index 0, was id=1)
-        assert_eq!(result.columns[2].rows[0], WindowId(1));
-        assert_eq!(result.columns[0].rows[0], WindowId(3));
-    }
-
-    #[test]
-    fn swap_with_offscreen_none_when_all_visible() {
-        // Negative: all columns visible → no off-screen to swap with
-        let config = test_config();
-        let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
-            0,
-        );
-        assert!(swap_with_offscreen(&layout, WindowId(1), Direction::Right, &config).is_none());
-    }
 
     #[test]
     fn add_window_to_column_appends_row() {
@@ -1073,7 +1006,7 @@ mod tests {
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        assert!(swap(&layout, WindowId(1), Direction::Left).is_none());
+        assert!(swap(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
     }
 
     #[test]
@@ -1083,14 +1016,14 @@ mod tests {
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        assert!(swap(&layout, WindowId(2), Direction::Down).is_none());
+        assert!(swap(&layout, WindowId(2), Direction::Down, &test_config()).is_none());
     }
 
     #[test]
     fn swap_right_at_last_column_returns_none() {
         // Negative: can't swap right from last column
         let layout = three_column_layout();
-        assert!(swap(&layout, WindowId(3), Direction::Right).is_none());
+        assert!(swap(&layout, WindowId(3), Direction::Right, &test_config()).is_none());
     }
 
     #[test]

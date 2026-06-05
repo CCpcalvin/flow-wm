@@ -25,7 +25,7 @@
 //! # The Camera Model
 //!
 //! The `viewport_offset` on [`VirtualLayout`] acts as a camera that slides along the
-//! infinite canvas. Many operations — scrolling, focus-to-offscreen, swap-with-offscreen —
+//! infinite canvas. Many operations — scrolling, focus-to-offscreen, swap —
 //! are implemented simply by adjusting this offset rather than moving individual windows.
 //!
 //! ```text
