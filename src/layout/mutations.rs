@@ -66,6 +66,10 @@ pub struct MutationConfig {
     pub column_width: u32,
     /// Default column width in eighths (1–8) for new columns.
     pub default_column_width_eighths: u8,
+    /// Minimum column width in eighths (computed from config `min_column_width_px`).
+    pub min_column_eighths: u8,
+    /// Maximum column width in eighths (computed from `monitor_width / column_width`).
+    pub max_column_eighths: u8,
     /// Padding settings.
     pub padding: Padding,
 }
@@ -256,9 +260,9 @@ pub fn focus(
 ///   column's right edge aligns with the viewport's right edge.
 /// - If already visible, no change.
 ///
-/// This is used by focus, swap, and other operations that need
+/// This is used by focus, swap, resize, and other operations that need
 /// to ensure a specific column is on-screen.
-fn ensure_column_visible(
+pub(crate) fn ensure_column_visible(
     layout: &VirtualLayout,
     col_idx: usize,
     config: &MutationConfig,
@@ -412,106 +416,132 @@ fn swap_columns(layout: &VirtualLayout, col_a: usize, col_b: usize) -> Option<Vi
 }
 
 // ---------------------------------------------------------------------------
-// Resize mutations (horizontal container = adjust width_eighths)
+// Resize mutations (independent — no neighbor compensation)
 // ---------------------------------------------------------------------------
 
-/// Expand the focused column by 1 eighth. The adjacent column in the
-/// direction of growth shrinks by 1 to compensate.
+/// Convert a pixel width to the nearest eighths value.
 ///
-/// Returns `None` if the column is already at max width or there is
-/// no neighbor to shrink.
-#[must_use]
-pub fn expand_column(
-    layout: &VirtualLayout,
-    focused: WindowId,
-    direction: Direction,
-) -> Option<VirtualLayout> {
-    resize_column(layout, focused, direction, 1)
+/// Uses rounding: `(px * 4 + column_width / 2) / column_width`.
+/// Result is clamped to `[1, 255]`.
+fn pixels_to_eighths(px: i32, column_width: u32) -> u8 {
+    let cw = column_width as i32;
+    ((px * 4 + cw / 2) / cw).clamp(1, 255) as u8
 }
 
-/// Shrink the focused column by 1 eighth. The adjacent column in the
-/// direction of shrink grows by 1 to compensate.
-#[must_use]
-pub fn shrink_column(
-    layout: &VirtualLayout,
-    focused: WindowId,
-    direction: Direction,
-) -> Option<VirtualLayout> {
-    resize_column(layout, focused, direction, -1)
-}
-
-/// Set the focused column width explicitly.
+/// Set the focused column width to an explicit pixel value.
 ///
-/// The adjacent column compensates to keep total width constant.
+/// This is the **core resize primitive** — all other resize functions
+/// delegate here. The target pixel width is snapped to the nearest
+/// eighth, validated against `[min_column_eighths, max_column_eighths]`,
+/// applied to the column, and followed by [`ensure_column_visible`]
+/// to guarantee the resized column is in view.
+///
+/// Returns `None` if the focused window is not found, the target snaps
+/// to the same width as current, or the target is out of bounds.
 #[must_use]
 pub fn set_column_width(
     layout: &VirtualLayout,
     focused: WindowId,
-    eighths: u8,
-    _config: &MutationConfig,
+    target_px: i32,
+    config: &MutationConfig,
 ) -> Option<VirtualLayout> {
     let (col, _) = layout.find_window(focused)?;
-    let current = layout.columns[col].width_eighths;
-    let delta = eighths as i8 - current as i8;
-    if delta == 0 {
-        return Some(layout.clone());
-    }
-    let direction = if delta > 0 {
-        // Prefer shrinking the right neighbor
-        Direction::Right
-    } else {
-        Direction::Left
-    };
-    // Apply delta iteratively (simpler than computing compound compensation)
-    let mut result = layout.clone();
-    for _ in 0..delta.abs() {
-        result = resize_column(&result, focused, direction, delta.signum())?;
-    }
-    Some(result)
-}
 
-fn resize_column(
-    layout: &VirtualLayout,
-    focused: WindowId,
-    direction: Direction,
-    delta: i8,
-) -> Option<VirtualLayout> {
-    let (col, _) = layout.find_window(focused)?;
-    let mut new_layout = layout.clone();
-
-    let current_width = new_layout.columns[col].width_eighths;
-    let new_width = (current_width as i8 + delta) as u8;
+    let target_eighths = pixels_to_eighths(target_px, config.column_width);
 
     // Validate bounds
-    if !(1..=8).contains(&new_width) {
+    if target_eighths < config.min_column_eighths || target_eighths > config.max_column_eighths {
         return None;
     }
 
-    // Find neighbor to compensate
-    let neighbor = match direction {
-        Direction::Left => col.checked_sub(1),
-        Direction::Right => {
-            if col + 1 < new_layout.columns.len() {
-                Some(col + 1)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-
-    let neighbor = neighbor?;
-
-    let neighbor_width = new_layout.columns[neighbor].width_eighths;
-    let compensated = (neighbor_width as i8 - delta) as u8;
-    if !(1..=8).contains(&compensated) {
+    // No change — nothing to do
+    if target_eighths == layout.columns[col].width_eighths {
         return None;
     }
 
-    new_layout.columns[col].width_eighths = new_width;
-    new_layout.columns[neighbor].width_eighths = compensated;
+    let mut new_layout = layout.clone();
+    new_layout.columns[col].width_eighths = target_eighths;
 
-    Some(new_layout)
+    Some(ensure_column_visible(&new_layout, col, config))
+}
+
+/// Resize the focused column by a pixel delta.
+///
+/// Computes `target_px = current_px + delta_px` and delegates to
+/// [`set_column_width`]. Positive delta grows the column, negative
+/// shrinks it.
+///
+/// Returns `None` if the resulting width is out of bounds.
+#[must_use]
+pub fn resize_column(
+    layout: &VirtualLayout,
+    focused: WindowId,
+    delta_px: i32,
+    config: &MutationConfig,
+) -> Option<VirtualLayout> {
+    let (col, _) = layout.find_window(focused)?;
+    let current_px =
+        column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
+    let target_px = current_px + delta_px;
+    set_column_width(layout, focused, target_px, config)
+}
+
+/// Expand the focused column to the next `column_width` boundary above.
+///
+/// Snap points are multiples of `column_width` (e.g., 0, 960, 1920 with
+/// column_width=960). The column width is set to the next snap point
+/// strictly above its current width, capped at `max_column_eighths`.
+///
+/// Returns `None` if already at max or no higher snap point exists.
+#[must_use]
+pub fn expand_column(
+    layout: &VirtualLayout,
+    focused: WindowId,
+    config: &MutationConfig,
+) -> Option<VirtualLayout> {
+    let (col, _) = layout.find_window(focused)?;
+    let current_px =
+        column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
+    let cw = config.column_width as i32;
+
+    // Next column_width boundary strictly above current
+    let target_px = ((current_px / cw) + 1) * cw;
+
+    // Already at or beyond monitor width
+    if target_px > config.monitor_width {
+        return None;
+    }
+
+    set_column_width(layout, focused, target_px, config)
+}
+
+/// Shrink the focused column to the previous `column_width` boundary below.
+///
+/// Snap points are multiples of `column_width` (e.g., 0, 960, 1920 with
+/// column_width=960). The column width is set to the next snap point
+/// strictly below its current width, floored at `min_column_eighths`.
+///
+/// Returns `None` if already at minimum or no lower snap point exists.
+#[must_use]
+pub fn shrink_column(
+    layout: &VirtualLayout,
+    focused: WindowId,
+    config: &MutationConfig,
+) -> Option<VirtualLayout> {
+    let (col, _) = layout.find_window(focused)?;
+    let current_px =
+        column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
+    let cw = config.column_width as i32;
+
+    // Previous column_width boundary strictly below current
+    let target_px = ((current_px - 1) / cw) * cw;
+    let min_px = column_eighths_to_pixels(config.min_column_eighths, config.column_width);
+
+    if target_px < min_px {
+        return None;
+    }
+
+    set_column_width(layout, focused, target_px, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +728,10 @@ mod tests {
             monitor_width: 1920,
             column_width: 960,
             default_column_width_eighths: 4,
+            // ceil((320 * 4) / 960) = 2 eighths
+            min_column_eighths: 2,
+            // (1920 * 4) / 960 = 8 eighths
+            max_column_eighths: 8,
             padding: Padding {
                 window: 4,
                 up: 0,
@@ -1148,38 +1182,194 @@ mod tests {
         assert_eq!(layout.columns[neighbor.col].rows[neighbor.row], WindowId(8));
     }
 
-    // --- Expand / Shrink ---
+    // --- Resize: set_column_width ---
 
     #[test]
-    fn expand_column_grows_focused_shrinks_neighbor() {
+    fn set_column_width_sets_target_in_px() {
+        // Positive: 1440px → pixels_to_eighths(1440, 960) = 6 → width set to 6 eighths
         let layout = three_column_layout();
-        let result = expand_column(&layout, WindowId(1), Direction::Right).expect("expand");
-        assert_eq!(result.columns[0].width_eighths, 5);
-        assert_eq!(result.columns[1].width_eighths, 3);
+        let result =
+            set_column_width(&layout, WindowId(1), 1440, &test_config()).expect("set width");
+        assert_eq!(result.columns[0].width_eighths, 6);
     }
 
     #[test]
-    fn shrink_column_shrinks_focused_grows_neighbor() {
+    fn set_column_width_only_affects_target_column() {
+        // Positive: independent resize — other columns unchanged
         let layout = three_column_layout();
-        let result = shrink_column(&layout, WindowId(1), Direction::Right).expect("shrink");
-        assert_eq!(result.columns[0].width_eighths, 3);
-        assert_eq!(result.columns[1].width_eighths, 5);
+        let result =
+            set_column_width(&layout, WindowId(1), 1440, &test_config()).expect("set width");
+        assert_eq!(result.columns[0].width_eighths, 6);
+        // Other columns remain at 4 (no compensation)
+        assert_eq!(result.columns[1].width_eighths, 4);
+        assert_eq!(result.columns[2].width_eighths, 4);
     }
 
     #[test]
-    fn expand_at_max_width_returns_none() {
+    fn set_column_width_returns_none_if_below_min() {
+        // Negative: target px snaps to eighths below min_column_eighths
+        // 320px → 1.33 → rounds to 1 eighth, but min is 2 → None
+        let layout = three_column_layout();
+        assert!(set_column_width(&layout, WindowId(1), 320, &test_config()).is_none());
+    }
+
+    #[test]
+    fn set_column_width_returns_none_if_above_max() {
+        // Negative: target px exceeds monitor width
+        // 2400px → 10 eighths, max is 8 → None
+        let layout = three_column_layout();
+        assert!(set_column_width(&layout, WindowId(1), 2400, &test_config()).is_none());
+    }
+
+    #[test]
+    fn set_column_width_returns_none_if_same_as_current() {
+        // Negative: target matches current → no-op → None
+        // 960px → 4 eighths, current is 4 → None
+        let layout = three_column_layout();
+        assert!(set_column_width(&layout, WindowId(1), 960, &test_config()).is_none());
+    }
+
+    #[test]
+    fn set_column_width_ensures_column_visible() {
+        // Positive: after resize, viewport adjusts to show the column
+        let config = test_config();
+        // 3 columns × 960px = 2880px total canvas. viewport at 3000 → all off-screen right.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            3000,
+        );
+        // Resize column 2 (W3) from 960px to 1920px → ensure_column_visible shifts viewport
+        let result = set_column_width(&layout, WindowId(3), 1920, &config).expect("set width");
+        assert_eq!(result.columns[2].width_eighths, 8);
+        // ensure_column_visible should have shifted the viewport left
+        assert!(
+            result.viewport_offset < 3000,
+            "viewport should shift left to reveal the resized column"
+        );
+    }
+
+    // --- Resize: resize_column ---
+
+    #[test]
+    fn resize_column_positive_delta_grows() {
+        // Positive: +480px delta on 960px column → 1440px → 6 eighths
+        let layout = three_column_layout();
+        let result = resize_column(&layout, WindowId(1), 480, &test_config()).expect("resize +480");
+        assert_eq!(result.columns[0].width_eighths, 6);
+    }
+
+    #[test]
+    fn resize_column_negative_delta_shrinks() {
+        // Positive: -480px delta on 960px column → 480px → 2 eighths
+        let layout = three_column_layout();
+        let result =
+            resize_column(&layout, WindowId(1), -480, &test_config()).expect("resize -480");
+        assert_eq!(result.columns[0].width_eighths, 2);
+    }
+
+    #[test]
+    fn resize_column_delta_too_small_returns_none() {
+        // Negative: +100px on 960px → 1060px → rounds to 4 eighths (same) → None
+        let layout = three_column_layout();
+        assert!(resize_column(&layout, WindowId(1), 100, &test_config()).is_none());
+    }
+
+    // --- Resize: expand_column ---
+
+    #[test]
+    fn expand_column_snaps_to_next_column_width_boundary() {
+        // Positive: 960px (4 eighths) → snap up to 1920px (8 eighths)
+        let layout = three_column_layout(); // columns at 4 eighths = 960px
+        let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
+        assert_eq!(result.columns[0].width_eighths, 8);
+    }
+
+    #[test]
+    fn expand_column_from_sub_boundary() {
+        // Positive: 480px (2 eighths) → snap up to 960px (4 eighths)
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
+        assert_eq!(result.columns[0].width_eighths, 4);
+    }
+
+    #[test]
+    fn expand_column_at_max_returns_none() {
+        // Negative: 1920px (8 eighths) → next boundary would be 2880 > 1920 → None
         let layout = VirtualLayout::with_columns(
             vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
             0,
         );
-        assert!(expand_column(&layout, WindowId(1), Direction::Right).is_none());
+        assert!(expand_column(&layout, WindowId(1), &test_config()).is_none());
     }
 
     #[test]
-    fn set_column_width_explicit() {
+    fn expand_column_only_affects_target() {
+        // Positive: independent resize — neighbors unchanged
         let layout = three_column_layout();
-        let result = set_column_width(&layout, WindowId(1), 6, &test_config()).expect("set width");
-        assert_eq!(result.columns[0].width_eighths, 6);
+        let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
+        assert_eq!(result.columns[0].width_eighths, 8);
+        assert_eq!(result.columns[1].width_eighths, 4);
+        assert_eq!(result.columns[2].width_eighths, 4);
+    }
+
+    // --- Resize: shrink_column ---
+
+    #[test]
+    fn shrink_column_snaps_to_prev_column_width_boundary() {
+        // Positive: 1920px (8 eighths) → snap down to 960px (4 eighths)
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
+        assert_eq!(result.columns[0].width_eighths, 4);
+    }
+
+    #[test]
+    fn shrink_column_from_mid_boundary() {
+        // Positive: 1200px (5 eighths) → snap down to 960px (4 eighths)
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(5, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
+        assert_eq!(result.columns[0].width_eighths, 4);
+    }
+
+    #[test]
+    fn shrink_column_at_boundary_returns_none() {
+        // Negative: 960px (4 eighths) → prev boundary is 0 → below min (2 eighths = 480px) → None
+        let layout = three_column_layout();
+        assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
+    }
+
+    #[test]
+    fn shrink_column_at_min_eighths_returns_none() {
+        // Negative: 480px (2 eighths = min) → prev boundary is 0 → None
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
+    }
+
+    #[test]
+    fn shrink_column_only_affects_target() {
+        // Positive: independent resize — neighbors unchanged
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
+        assert_eq!(result.columns[0].width_eighths, 4);
+        assert_eq!(result.columns[1].width_eighths, 4);
     }
 
     // --- Merge ---
@@ -1314,31 +1504,13 @@ mod tests {
 
     #[test]
     fn shrink_at_minimum_width_returns_none() {
-        // Negative: can't shrink column below 1 eighth
+        // Negative: can't shrink column below min_column_eighths
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(1, WindowId(1)), Column::new(7, WindowId(2))],
+            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
             0,
         );
-        assert!(shrink_column(&layout, WindowId(1), Direction::Right).is_none());
-    }
-
-    #[test]
-    fn expand_column_neighbor_at_minimum_prevents() {
-        // Negative: can't expand if neighbor would go below 1
-        let layout = VirtualLayout::with_columns(
-            vec![Column::new(7, WindowId(1)), Column::new(1, WindowId(2))],
-            0,
-        );
-        assert!(expand_column(&layout, WindowId(1), Direction::Right).is_none());
-    }
-
-    #[test]
-    fn expand_column_left_shrinks_left_neighbor() {
-        // Positive: expand left direction shrinks left neighbor
-        let layout = three_column_layout();
-        let result = expand_column(&layout, WindowId(2), Direction::Left).expect("expand left");
-        assert_eq!(result.columns[1].width_eighths, 5);
-        assert_eq!(result.columns[0].width_eighths, 3);
+        // 2 eighths = 480px → prev boundary = 0 → below min → None
+        assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
     }
 
     #[test]
@@ -1382,13 +1554,11 @@ mod tests {
     }
 
     #[test]
-    fn set_column_width_no_change_returns_same_layout() {
-        // Positive: setting width to current value is no-op
+    fn set_column_width_no_change_returns_none() {
+        // Negative: setting width to current px value → same eighths → None
         let layout = three_column_layout();
-        let result = set_column_width(&layout, WindowId(1), 4, &test_config()).expect("set");
-        assert_eq!(result.columns[0].width_eighths, 4);
-        // Width didn't change, so delta was 0 and layout is unchanged
-        assert_eq!(result.columns.len(), 3);
+        // 4 eighths * 960 / 4 = 960px; setting 960px → 4 eighths = current → None
+        assert!(set_column_width(&layout, WindowId(1), 960, &test_config()).is_none());
     }
 
     #[test]
@@ -1412,13 +1582,5 @@ mod tests {
     fn merge_right_at_last_column_returns_none() {
         // Negative: can't merge right from last column (already tested but explicit)
         assert!(merge_column_right(&three_column_layout(), WindowId(3)).is_none());
-    }
-
-    #[test]
-    fn expand_column_without_horizontal_direction_returns_none() {
-        // Negative: expand/shrink only works for Left/Right
-        let layout = three_column_layout();
-        assert!(expand_column(&layout, WindowId(1), Direction::Up).is_none());
-        assert!(shrink_column(&layout, WindowId(1), Direction::Down).is_none());
     }
 }

@@ -60,6 +60,7 @@ mod tests {
             "super_key",
             "default_window_action",
             "column_width",
+            "min_column_width_px",
             "padding",
             "hotkeys",
             "window_rules",

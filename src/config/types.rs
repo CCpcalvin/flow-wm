@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 /// super_key: VK_F24
 /// default_window_action: tile
 /// column_width: 960
+/// min_column_width_px: 320
 /// padding:
 ///   window: 4
 ///   up: 0
@@ -50,6 +51,11 @@ pub struct StmConfig {
     /// Default column width in pixels. Default: 960.
     #[serde(default = "default_column_width")]
     pub column_width: u32,
+
+    /// Minimum column width in pixels. Columns cannot be resized below this.
+    /// Default: 320.
+    #[serde(default = "default_min_column_width_px")]
+    pub min_column_width_px: u32,
 
     /// Padding settings.
     #[serde(default)]
@@ -85,12 +91,18 @@ const fn default_column_width() -> u32 {
     960
 }
 
+/// Default minimum column width in pixels.
+const fn default_min_column_width_px() -> u32 {
+    320
+}
+
 impl Default for StmConfig {
     fn default() -> Self {
         Self {
             super_key: default_super_key(),
             default_window_action: default_window_action(),
             column_width: default_column_width(),
+            min_column_width_px: default_min_column_width_px(),
             padding: Padding::default(),
             hotkeys: Hotkeys::default(),
             window_rules: Vec::new(),
@@ -178,9 +190,19 @@ impl StmConfig {
     /// Validate config values that serde cannot enforce.
     ///
     /// Call this after deserializing a config file to catch
-    /// semantically invalid values like negative padding.
+    /// semantically invalid values like negative padding or
+    /// min_column_width_px exceeding column_width.
     pub fn validate(&self) -> Result<(), String> {
         self.padding.validate()?;
+        if self.min_column_width_px == 0 {
+            return Err("min_column_width_px must be positive, got 0".into());
+        }
+        if self.min_column_width_px > self.column_width {
+            return Err(format!(
+                "min_column_width_px ({}) must not exceed column_width ({})",
+                self.min_column_width_px, self.column_width
+            ));
+        }
         Ok(())
     }
 }
@@ -408,6 +430,7 @@ mod tests {
         assert_eq!(parsed.super_key, "VK_F24");
         assert_eq!(parsed.default_window_action, WindowAction::Tile);
         assert_eq!(parsed.column_width, 960);
+        assert_eq!(parsed.min_column_width_px, 320);
         assert_eq!(parsed.padding.window, 4);
         assert_eq!(parsed.padding.up, 0);
         assert_eq!(parsed.padding.down, 0);
@@ -464,6 +487,7 @@ animation:
             super_key: "VK_LWIN".into(),
             default_window_action: WindowAction::Float,
             column_width: 1200,
+            min_column_width_px: 400,
             padding: Padding {
                 window: 6,
                 up: 10,
@@ -528,6 +552,7 @@ animation:
         assert_eq!(parsed.super_key, "VK_LWIN");
         assert_eq!(parsed.default_window_action, WindowAction::Float);
         assert_eq!(parsed.column_width, 1200);
+        assert_eq!(parsed.min_column_width_px, 400);
         assert_eq!(parsed.padding.window, 6);
         assert_eq!(parsed.padding.up, 10);
         assert_eq!(parsed.padding.down, 40);
@@ -638,5 +663,43 @@ default_window_action: foobar
     fn config_validate_accepts_default_config() {
         // Positive: default config should always validate
         assert!(StmConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_min_column_width() {
+        // Negative: min_column_width_px = 0 should fail
+        let mut config = StmConfig::default();
+        config.min_column_width_px = 0;
+        assert!(config.validate().is_err());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("min_column_width_px")
+        );
+    }
+
+    #[test]
+    fn config_validate_rejects_min_exceeding_column_width() {
+        // Negative: min_column_width_px > column_width should fail
+        let mut config = StmConfig::default();
+        config.min_column_width_px = 1000;
+        config.column_width = 960;
+        assert!(config.validate().is_err());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("min_column_width_px")
+        );
+    }
+
+    #[test]
+    fn config_validate_accepts_min_equal_to_column_width() {
+        // Positive: min_column_width_px == column_width is valid (single-width columns only)
+        let mut config = StmConfig::default();
+        config.min_column_width_px = 960;
+        config.column_width = 960;
+        assert!(config.validate().is_ok());
     }
 }
