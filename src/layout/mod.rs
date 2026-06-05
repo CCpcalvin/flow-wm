@@ -89,4 +89,5 @@ pub mod projection;
 pub mod types;
 
 pub use engine::LayoutEngine;
+pub use mutations::NeighborLocation;
 pub use types::{ActualEntry, ActualLayout, AnimationHint, Column, VirtualLayout, WindowMove};

@@ -12,7 +12,7 @@
 //! User command (e.g., swap Right)
 //!     │
 //!     ▼
-//! mutations::swap() → new VirtualLayout
+//! mutations::swap_column() → new VirtualLayout
 //!     │
 //!     ▼  (apply_mutation)
 //! projection::project() → new ActualLayout
@@ -224,15 +224,34 @@ impl LayoutEngine {
     // Swap operations
     // -----------------------------------------------------------------------
 
-    /// Swap the focused window in the given direction.
+    /// Swap the focused window's **column** with an adjacent column (Left/Right),
+    /// or swap rows within the same column (Up/Down).
     ///
-    /// For Left/Right, swaps the focused column with its neighbor, then
-    /// shifts the camera if the new column position is off-screen.
-    /// For Up/Down, swaps the focused row within its column.
+    /// For Left/Right, entire columns are reordered — all windows within each
+    /// column move together. For Up/Down, only the focused row and its neighbor
+    /// within the same column swap positions.
+    ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn swap(&mut self, direction: Direction) -> Option<LayoutDiff> {
+    pub fn swap_column(&mut self, direction: Direction) -> Option<LayoutDiff> {
         let focused = self.focused?;
-        let new_layout = mutations::swap(&self.virtual_layout, focused, direction, &self.config)?;
+        let new_layout =
+            mutations::swap_column(&self.virtual_layout, focused, direction, &self.config)?;
+        Some(self.apply_mutation(new_layout))
+    }
+
+    /// Swap the focused **window** with an adjacent individual window.
+    ///
+    /// Unlike [`swap_column`](Self::swap_column) which moves entire columns,
+    /// this swaps two specific window IDs regardless of which columns they
+    /// belong to. For Left/Right, the focused window is exchanged with the
+    /// nearest window in the adjacent column. For Up/Down, it behaves like
+    /// a row swap within the same column.
+    ///
+    /// Focus requires no fixup — it follows the window by [`WindowId`].
+    pub fn swap_window(&mut self, direction: Direction) -> Option<LayoutDiff> {
+        let focused = self.focused?;
+        let new_layout =
+            mutations::swap_window(&self.virtual_layout, focused, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
@@ -397,7 +416,7 @@ mod tests {
     #[test]
     fn engine_swap_columns() {
         let mut engine = engine_with_three_columns();
-        let diff = engine.swap(Direction::Right).expect("swap");
+        let diff = engine.swap_column(Direction::Right).expect("swap");
         assert_eq!(diff.virtual_layout.columns[0].rows[0], WindowId(2));
         assert_eq!(diff.virtual_layout.columns[1].rows[0], WindowId(1));
         assert!(!diff.moves.is_empty());
@@ -487,7 +506,7 @@ mod tests {
 
         // Step 2: Mutate — swap columns 0 and 1
         engine.set_focus(WindowId(1));
-        let d_swap = engine.swap(Direction::Right).expect("swap");
+        let d_swap = engine.swap_column(Direction::Right).expect("swap");
         assert_eq!(d_swap.virtual_layout.columns[0].rows[0], WindowId(2));
         assert_eq!(d_swap.virtual_layout.columns[1].rows[0], WindowId(1));
         assert!(!d_swap.moves.is_empty());
@@ -541,14 +560,14 @@ mod tests {
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
         engine.add_window(WindowId(1));
 
-        // Swap left → None (no column to left)
-        assert!(engine.swap(Direction::Left).is_none());
-        // Swap right → None (no column to right)
-        assert!(engine.swap(Direction::Right).is_none());
-        // Swap up → None (only row)
-        assert!(engine.swap(Direction::Up).is_none());
-        // Swap down → None (only row)
-        assert!(engine.swap(Direction::Down).is_none());
+        // Swap column left → None (no column to left)
+        assert!(engine.swap_column(Direction::Left).is_none());
+        // Swap column right → None (no column to right)
+        assert!(engine.swap_column(Direction::Right).is_none());
+        // Swap column up → None (only row)
+        assert!(engine.swap_column(Direction::Up).is_none());
+        // Swap column down → None (only row)
+        assert!(engine.swap_column(Direction::Down).is_none());
 
         // Expand/shrink — needs neighbor
         assert!(engine.expand_column(Direction::Right).is_none());
@@ -575,7 +594,7 @@ mod tests {
         assert!(engine.scroll_left().is_none());
         assert!(engine.scroll_right().is_none());
         assert!(engine.focus(Direction::Right).is_none());
-        assert!(engine.swap(Direction::Right).is_none());
+        assert!(engine.swap_column(Direction::Right).is_none());
         assert!(engine.expand_column(Direction::Right).is_none());
         assert!(engine.shrink_column(Direction::Right).is_none());
         assert!(engine.merge_column_left().is_none());
@@ -659,7 +678,7 @@ mod tests {
         // The column to the left (window 1) is off-screen
         engine.set_focus(WindowId(2));
         let prev_offset = engine.virtual_layout().viewport_offset;
-        let diff = engine.swap(Direction::Left).expect("swap left");
+        let diff = engine.swap_column(Direction::Left).expect("swap left");
         assert!(!diff.moves.is_empty());
         // Camera should shift to make the swapped column visible
         assert!(
@@ -722,5 +741,68 @@ mod tests {
         let _ = engine.focus(Direction::Down).expect("focus down");
         // Vertical focus within a fully visible column → no scroll
         assert_eq!(engine.virtual_layout().viewport_offset, prev_offset);
+    }
+
+    // --- Engine swap_window tests ---
+
+    #[test]
+    fn engine_swap_window_cross_column() {
+        // Positive: engine swap_window moves individual windows between columns
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
+        engine.add_window(WindowId(1));
+        engine.add_window_to_focused_column(WindowId(5));
+        engine.add_window(WindowId(2));
+        engine.set_focus(WindowId(1));
+
+        // Layout: [W1, W5] [W2]. swap_window Right on W1 → [W2, W5] [W1]
+        let diff = engine.swap_window(Direction::Right).expect("swap window");
+        assert_eq!(
+            diff.virtual_layout.columns[0].rows,
+            vec![WindowId(2), WindowId(5)]
+        );
+        assert_eq!(diff.virtual_layout.columns[1].rows, vec![WindowId(1)]);
+        assert!(!diff.moves.is_empty());
+    }
+
+    #[test]
+    fn engine_swap_window_same_column_vertical() {
+        // Positive: engine swap_window Up/Down within column
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
+        engine.add_window(WindowId(1));
+        engine.add_window_to_focused_column(WindowId(2));
+        engine.set_focus(WindowId(2));
+
+        let diff = engine.swap_window(Direction::Up).expect("swap window up");
+        assert_eq!(
+            diff.virtual_layout.columns[0].rows,
+            vec![WindowId(2), WindowId(1)]
+        );
+        assert!(!diff.moves.is_empty());
+    }
+
+    #[test]
+    fn engine_swap_window_none_when_no_focus() {
+        // Negative: engine swap_window without focus → None
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
+        engine.add_window(WindowId(1));
+        // Focus is already on WindowId(1) from add_window. Clear it.
+        // We can't clear focus directly, so test with empty engine instead.
+        let mut empty_engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
+        assert!(empty_engine.swap_window(Direction::Right).is_none());
+        assert!(empty_engine.swap_window(Direction::Up).is_none());
+        assert!(empty_engine.swap_window(Direction::Down).is_none());
+    }
+
+    #[test]
+    fn engine_swap_window_none_at_boundary() {
+        // Negative: engine swap_window at layout boundary → None
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, test_padding());
+        engine.add_window(WindowId(1));
+        engine.set_focus(WindowId(1));
+
+        assert!(engine.swap_window(Direction::Left).is_none());
+        assert!(engine.swap_window(Direction::Right).is_none());
+        assert!(engine.swap_window(Direction::Up).is_none());
+        assert!(engine.swap_window(Direction::Down).is_none());
     }
 }

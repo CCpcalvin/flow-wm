@@ -40,6 +40,19 @@ use crate::common::{Direction, WindowId};
 use crate::layout::projection::{column_eighths_to_pixels, column_step_width};
 use crate::layout::types::{Column, Padding, VirtualLayout};
 
+/// Location of a neighboring window returned by [`find_neighbor_window`].
+///
+/// Contains the column and row indices identifying a single window's position
+/// within the [`VirtualLayout`]. This is the vocabulary shared by `focus` and
+/// `swap_window` for directional neighbor lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NeighborLocation {
+    /// Column index in [`VirtualLayout::columns`].
+    pub col: usize,
+    /// Row index within the column's `rows` vector.
+    pub row: usize,
+}
+
 /// Parameters that configure how mutations behave.
 ///
 /// Extracted from [`StmConfig`](crate::config::StmConfig) by the daemon.
@@ -55,6 +68,93 @@ pub struct MutationConfig {
     pub default_column_width_eighths: u8,
     /// Padding settings.
     pub padding: Padding,
+}
+
+// ---------------------------------------------------------------------------
+// Neighbor lookup
+// ---------------------------------------------------------------------------
+
+/// Find the nearest neighboring window in the given direction.
+///
+/// This is the shared directional-lookup primitive used by both [`focus`] and
+/// [`swap_window`]. For vertical directions (Up/Down), the neighbor is the
+/// adjacent row within the same column. For horizontal directions (Left/Right),
+/// the neighbor is the window in the adjacent column whose row index is
+/// **closest** to the focused window's row.
+///
+/// # Horizontal neighbor selection
+///
+/// When crossing column boundaries, the target column may have a different
+/// number of rows than the source column. This function picks the row whose
+/// index is closest to the focused window's row:
+///
+/// ```text
+/// Col 0        Col 1
+/// [W1] (row 0) [W3] (row 0)  ← W1's right neighbor = W3
+/// [W2] (row 1) [W4] (row 1)  ← W2's right neighbor = W4
+///              [W5] (row 2)  ← (extra row, not matched)
+/// ```
+///
+/// If the target column has fewer rows, the last row is used:
+/// ```text
+/// Col 0        Col 1
+/// [W1] (row 0) [W3] (row 0)  ← W2's right neighbor = W3 (clamped from row 1)
+/// [W2] (row 1)
+/// ```
+///
+/// Returns `None` if there is no window in that direction.
+#[must_use]
+pub fn find_neighbor_window(
+    layout: &VirtualLayout,
+    focused: WindowId,
+    direction: Direction,
+) -> Option<NeighborLocation> {
+    let (col, row) = layout.find_window(focused)?;
+
+    match direction {
+        Direction::Up => {
+            if row == 0 {
+                return None;
+            }
+            Some(NeighborLocation { col, row: row - 1 })
+        }
+        Direction::Down => {
+            let max_row = layout.columns[col].rows.len().saturating_sub(1);
+            if row >= max_row {
+                return None;
+            }
+            Some(NeighborLocation { col, row: row + 1 })
+        }
+        Direction::Left => {
+            if col == 0 {
+                return None;
+            }
+            let target_col = col - 1;
+            let target_row = closest_row(&layout.columns[target_col], row);
+            Some(NeighborLocation {
+                col: target_col,
+                row: target_row,
+            })
+        }
+        Direction::Right => {
+            if col + 1 >= layout.columns.len() {
+                return None;
+            }
+            let target_col = col + 1;
+            let target_row = closest_row(&layout.columns[target_col], row);
+            Some(NeighborLocation {
+                col: target_col,
+                row: target_row,
+            })
+        }
+    }
+}
+
+/// Pick the row index in `column` closest to `preferred_row`.
+///
+/// Clamps to the valid range `[0, column.rows.len() - 1]`.
+fn closest_row(column: &Column, preferred_row: usize) -> usize {
+    preferred_row.min(column.rows.len().saturating_sub(1))
 }
 
 // ---------------------------------------------------------------------------
@@ -112,9 +212,10 @@ pub struct FocusResult {
 
 /// Move focus in the given direction.
 ///
-/// For horizontal focus changes (Left/Right), if the target column is outside
-/// the viewport, the **camera shifts** (via `ensure_column_visible`) to bring
-/// it into view — no individual window positions are modified.
+/// Uses [`find_neighbor_window`] to locate the nearest window in the specified
+/// direction. For horizontal focus changes (Left/Right), if the target column
+/// is outside the viewport, the **camera shifts** (via `ensure_column_visible`)
+/// to bring it into view — no individual window positions are modified.
 ///
 /// Focus is tracked by [`WindowId`], not by position, so this function simply
 /// resolves the target window ID and optionally adjusts the camera.
@@ -127,58 +228,22 @@ pub fn focus(
     direction: Direction,
     config: &MutationConfig,
 ) -> Option<FocusResult> {
-    let (col, row) = layout.find_window(focused)?;
+    let neighbor = find_neighbor_window(layout, focused, direction)?;
+    let target_window = layout.columns[neighbor.col].rows[neighbor.row];
 
     match direction {
-        Direction::Left => focus_horizontal(layout, col, row, col.saturating_sub(1), config),
-        Direction::Right => {
-            let target_col = (col + 1).min(layout.columns.len().saturating_sub(1));
-            focus_horizontal(layout, col, row, target_col, config)
-        }
-        Direction::Up => {
-            if row == 0 {
-                return None;
-            }
-            let target = layout.columns[col].rows[row - 1];
+        Direction::Left | Direction::Right => {
+            let new_layout = ensure_column_visible(layout, neighbor.col, config);
             Some(FocusResult {
-                focused: target,
-                new_layout: layout.clone(),
+                focused: target_window,
+                new_layout,
             })
         }
-        Direction::Down => {
-            let col_ref = &layout.columns[col];
-            if row + 1 >= col_ref.rows.len() {
-                return None;
-            }
-            let target = col_ref.rows[row + 1];
-            Some(FocusResult {
-                focused: target,
-                new_layout: layout.clone(),
-            })
-        }
+        Direction::Up | Direction::Down => Some(FocusResult {
+            focused: target_window,
+            new_layout: layout.clone(),
+        }),
     }
-}
-
-/// Focus a window in a target column, scrolling the viewport if needed.
-fn focus_horizontal(
-    layout: &VirtualLayout,
-    current_col: usize,
-    _current_row: usize,
-    target_col: usize,
-    config: &MutationConfig,
-) -> Option<FocusResult> {
-    if target_col == current_col {
-        return None;
-    }
-    let col_ref = layout.columns.get(target_col)?;
-    let target_window = col_ref.rows.first()?;
-
-    // Check if target column is visible; scroll if needed
-    let new_layout = ensure_column_visible(layout, target_col, config);
-    Some(FocusResult {
-        focused: *target_window,
-        new_layout,
-    })
 }
 
 /// Shift the camera so the given column becomes visible.
@@ -233,8 +298,11 @@ fn ensure_column_visible(
 // Swap mutations
 // ---------------------------------------------------------------------------
 
-/// Swap the focused window with an adjacent sibling within its column (vertical swap),
-/// or swap the focused window's column with an adjacent column (horizontal swap).
+/// Swap the focused window's **column** with an adjacent column (Left/Right),
+/// or swap two rows within the same column (Up/Down).
+///
+/// This is the **column-level** swap — horizontal directions reorder entire
+/// columns, keeping all windows within each column together.
 ///
 /// For horizontal swaps, after reordering the columns in the [`VirtualLayout`],
 /// [`ensure_column_visible`] is called to guarantee the focused window's column
@@ -246,7 +314,7 @@ fn ensure_column_visible(
 ///
 /// Returns `None` if there is no adjacent element in that direction.
 #[must_use]
-pub fn swap(
+pub fn swap_column(
     layout: &VirtualLayout,
     focused: WindowId,
     direction: Direction,
@@ -278,6 +346,57 @@ pub fn swap(
             Some(ensure_column_visible(&swapped, col + 1, config))
         }
     }
+}
+
+/// Swap the focused window with an adjacent **individual window**.
+///
+/// Unlike [`swap_column`] which moves entire columns, this swaps two specific
+/// window IDs regardless of which columns they belong to. For Left/Right,
+/// the focused window is swapped with the nearest window in the adjacent column
+/// (found via [`find_neighbor_window`]). For Up/Down, it behaves like row swap
+/// within the same column.
+///
+/// # Example
+///
+/// ```text
+/// Before: [W1] [W2, W3]   ← W1 focused, swap_window Right
+/// After:  [W2] [W1, W3]   ← W1 and W2 exchanged positions
+/// ```
+///
+/// After the swap, [`ensure_column_visible`] is called to guarantee the
+/// focused window's new position is visible in the viewport.
+///
+/// Returns `None` if there is no neighbor in that direction.
+#[must_use]
+pub fn swap_window(
+    layout: &VirtualLayout,
+    focused: WindowId,
+    direction: Direction,
+    config: &MutationConfig,
+) -> Option<VirtualLayout> {
+    let (src_col, src_row) = layout.find_window(focused)?;
+    let neighbor = find_neighbor_window(layout, focused, direction)?;
+    let (dst_col, dst_row) = (neighbor.col, neighbor.row);
+
+    // Same position — nothing to swap
+    if src_col == dst_col && src_row == dst_row {
+        return None;
+    }
+
+    let mut new_layout = layout.clone();
+
+    if src_col == dst_col {
+        // Same column — swap rows directly
+        new_layout.columns[src_col].rows.swap(src_row, dst_row);
+    } else {
+        // Different columns — exchange window IDs between the two positions
+        let dst_window = new_layout.columns[dst_col].rows[dst_row];
+        new_layout.columns[src_col].rows[src_row] = dst_window;
+        new_layout.columns[dst_col].rows[dst_row] = focused;
+    }
+
+    // Ensure the focused window (now at dst position) is visible
+    Some(ensure_column_visible(&new_layout, dst_col, config))
 }
 
 /// Swap two rows within a column (vertical container reorder).
@@ -697,33 +816,73 @@ mod tests {
         assert!(r2.new_layout.viewport_offset > r1.new_layout.viewport_offset);
     }
 
+    #[test]
+    fn focus_right_crosses_to_column_with_different_row_count() {
+        // Col 0: [W1] (1 row), Col 1: [W2, W3, W4] (3 rows)
+        // Focus right from W1 → picks closest row in col 1 (row 0) = W2
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(4)]),
+            ],
+            0,
+        );
+        let result =
+            focus(&layout, WindowId(1), Direction::Right, &test_config()).expect("focus right");
+        assert_eq!(result.focused, WindowId(2));
+    }
+
     // --- Swap ---
 
     #[test]
-    fn swap_columns_reorders() {
+    fn swap_column_reorders() {
         let layout = three_column_layout();
-        let result = swap(&layout, WindowId(1), Direction::Right, &test_config()).expect("swap");
+        let result =
+            swap_column(&layout, WindowId(1), Direction::Right, &test_config()).expect("swap");
         assert_eq!(result.columns[0].rows[0], WindowId(2));
         assert_eq!(result.columns[1].rows[0], WindowId(1));
         assert_eq!(result.columns[2].rows[0], WindowId(3));
     }
 
     #[test]
-    fn swap_rows_within_column() {
+    fn swap_column_rows_within_column() {
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
         let result =
-            swap(&layout, WindowId(1), Direction::Down, &test_config()).expect("swap down");
+            swap_column(&layout, WindowId(1), Direction::Down, &test_config()).expect("swap down");
         assert_eq!(result.columns[0].rows[0], WindowId(2));
         assert_eq!(result.columns[0].rows[1], WindowId(1));
     }
 
     #[test]
-    fn swap_left_at_edge_returns_none() {
+    fn swap_column_up_swaps_rows() {
+        // Positive: W2 at row 1, swap_column Up → swaps with W1 at row 0
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        let result =
+            swap_column(&layout, WindowId(2), Direction::Up, &test_config()).expect("swap up");
+        assert_eq!(result.columns[0].rows[0], WindowId(2));
+        assert_eq!(result.columns[0].rows[1], WindowId(1));
+    }
+
+    #[test]
+    fn swap_column_up_at_first_row_returns_none() {
+        // Negative: W1 at row 0, swap_column Up → None (swap_rows with self returns None)
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        assert!(swap_column(&layout, WindowId(1), Direction::Up, &test_config()).is_none());
+    }
+
+    #[test]
+    fn swap_column_left_at_edge_returns_none() {
         let layout = three_column_layout();
-        assert!(swap(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
+        assert!(swap_column(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
     }
 
     #[test]
@@ -738,7 +897,7 @@ mod tests {
             960, // viewport past column 0
         );
         // Window 2 is in column 1 (visible). Swap left → column 0 (off-screen).
-        let result = swap(&layout, WindowId(2), Direction::Left, &config).expect("swap");
+        let result = swap_column(&layout, WindowId(2), Direction::Left, &config).expect("swap");
         assert!(
             result.viewport_offset < 960,
             "camera should shift left to reveal col 0"
@@ -749,11 +908,275 @@ mod tests {
     fn swap_column_no_viewport_change_when_both_visible() {
         let config = test_config();
         let layout = three_column_layout(); // viewport=0, cols 0+1 fully visible
-        let result = swap(&layout, WindowId(1), Direction::Right, &config).expect("swap");
+        let result = swap_column(&layout, WindowId(1), Direction::Right, &config).expect("swap");
         assert_eq!(
             result.viewport_offset, 0,
             "camera should not shift when both columns are visible"
         );
+    }
+
+    // --- Swap Window (individual window swap) ---
+
+    #[test]
+    fn swap_window_right_swaps_with_neighbor_in_next_column() {
+        // [W1] [W2, W3] → swap_window right on W1 → [W2] [W1, W3]
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3)]),
+            ],
+            0,
+        );
+        let result =
+            swap_window(&layout, WindowId(1), Direction::Right, &test_config()).expect("swap");
+        assert_eq!(result.columns[0].rows, vec![WindowId(2)]);
+        assert_eq!(result.columns[1].rows, vec![WindowId(1), WindowId(3)]);
+    }
+
+    #[test]
+    fn swap_window_left_swaps_with_neighbor_in_prev_column() {
+        // [W1, W2] [W3] → swap_window left on W3 → [W1, W3] [W2]
+        // W3 is at row 0 in col 1. Closest row in col 0 is row 0 = W1.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2)]),
+                Column::new(4, WindowId(3)),
+            ],
+            0,
+        );
+        let result =
+            swap_window(&layout, WindowId(3), Direction::Left, &test_config()).expect("swap");
+        assert_eq!(result.columns[0].rows, vec![WindowId(3), WindowId(2)]);
+        assert_eq!(result.columns[1].rows, vec![WindowId(1)]);
+    }
+
+    #[test]
+    fn swap_window_down_same_column() {
+        // [W1, W2] in same column → swap_window down on W1 → [W2, W1]
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        let result =
+            swap_window(&layout, WindowId(1), Direction::Down, &test_config()).expect("swap");
+        assert_eq!(result.columns[0].rows, vec![WindowId(2), WindowId(1)]);
+    }
+
+    #[test]
+    fn swap_window_picks_closest_row_in_target_column() {
+        // Col 0: [W1, W2] (2 rows)
+        // Col 1: [W3] (1 row)
+        // W2 is at row 1. Closest row in col 1 (clamped) = row 0 = W3.
+        // swap_window right on W2 → W2 goes to col 1 row 0, W3 goes to col 0 row 1.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2)]),
+                Column::new(4, WindowId(3)),
+            ],
+            0,
+        );
+        let result =
+            swap_window(&layout, WindowId(2), Direction::Right, &test_config()).expect("swap");
+        assert_eq!(result.columns[0].rows, vec![WindowId(1), WindowId(3)]);
+        assert_eq!(result.columns[1].rows, vec![WindowId(2)]);
+    }
+
+    #[test]
+    fn swap_window_right_at_edge_returns_none() {
+        let layout = three_column_layout();
+        assert!(swap_window(&layout, WindowId(3), Direction::Right, &test_config()).is_none());
+    }
+
+    #[test]
+    fn swap_window_left_at_edge_returns_none() {
+        let layout = three_column_layout();
+        assert!(swap_window(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
+    }
+
+    #[test]
+    fn swap_window_down_at_last_row_returns_none() {
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        assert!(swap_window(&layout, WindowId(2), Direction::Down, &test_config()).is_none());
+    }
+
+    #[test]
+    fn swap_window_up_same_column() {
+        // [W1, W2] → swap_window up on W2 → [W2, W1]
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        let result =
+            swap_window(&layout, WindowId(2), Direction::Up, &test_config()).expect("swap");
+        assert_eq!(result.columns[0].rows, vec![WindowId(2), WindowId(1)]);
+    }
+
+    #[test]
+    fn swap_window_up_at_first_row_returns_none() {
+        // Negative: W1 at row 0, swap_window up → None
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        assert!(swap_window(&layout, WindowId(1), Direction::Up, &test_config()).is_none());
+    }
+
+    #[test]
+    fn swap_window_shifts_viewport_when_target_offscreen() {
+        let config = test_config();
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            960, // viewport past column 0
+        );
+        let result = swap_window(&layout, WindowId(2), Direction::Left, &config).expect("swap");
+        assert!(
+            result.viewport_offset < 960,
+            "camera should shift left to reveal col 0"
+        );
+    }
+
+    #[test]
+    fn swap_window_no_viewport_change_when_both_visible() {
+        let config = test_config();
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        let result = swap_window(&layout, WindowId(1), Direction::Right, &config).expect("swap");
+        assert_eq!(result.viewport_offset, 0);
+    }
+
+    #[test]
+    fn swap_window_nonexistent_returns_none() {
+        let layout = three_column_layout();
+        assert!(swap_window(&layout, WindowId(99), Direction::Right, &test_config()).is_none());
+    }
+
+    // --- find_neighbor_window ---
+
+    #[test]
+    fn find_neighbor_right_returns_first_row_in_next_column() {
+        let layout = three_column_layout();
+        let neighbor = find_neighbor_window(&layout, WindowId(1), Direction::Right).expect("right");
+        assert_eq!(neighbor, NeighborLocation { col: 1, row: 0 });
+        assert_eq!(layout.columns[neighbor.col].rows[neighbor.row], WindowId(2));
+    }
+
+    #[test]
+    fn find_neighbor_left_returns_first_row_in_prev_column() {
+        let layout = three_column_layout();
+        let neighbor = find_neighbor_window(&layout, WindowId(2), Direction::Left).expect("left");
+        assert_eq!(neighbor, NeighborLocation { col: 0, row: 0 });
+        assert_eq!(layout.columns[neighbor.col].rows[neighbor.row], WindowId(1));
+    }
+
+    #[test]
+    fn find_neighbor_up_returns_prev_row_same_column() {
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        let neighbor = find_neighbor_window(&layout, WindowId(2), Direction::Up).expect("up");
+        assert_eq!(neighbor, NeighborLocation { col: 0, row: 0 });
+    }
+
+    #[test]
+    fn find_neighbor_down_returns_next_row_same_column() {
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        let neighbor = find_neighbor_window(&layout, WindowId(1), Direction::Down).expect("down");
+        assert_eq!(neighbor, NeighborLocation { col: 0, row: 1 });
+    }
+
+    #[test]
+    fn find_neighbor_clamps_row_to_target_column_size() {
+        // Col 0 has 3 rows, Col 1 has 1 row.
+        // W3 is at row 2 in col 0. Right neighbor in col 1 → clamped to row 0.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2), WindowId(3)]),
+                Column::new(4, WindowId(4)),
+            ],
+            0,
+        );
+        let neighbor = find_neighbor_window(&layout, WindowId(3), Direction::Right).expect("right");
+        assert_eq!(neighbor, NeighborLocation { col: 1, row: 0 });
+    }
+
+    #[test]
+    fn find_neighbor_right_at_edge_returns_none() {
+        let layout = three_column_layout();
+        assert!(find_neighbor_window(&layout, WindowId(3), Direction::Right).is_none());
+    }
+
+    #[test]
+    fn find_neighbor_left_at_edge_returns_none() {
+        let layout = three_column_layout();
+        assert!(find_neighbor_window(&layout, WindowId(1), Direction::Left).is_none());
+    }
+
+    #[test]
+    fn find_neighbor_up_at_first_row_returns_none() {
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        assert!(find_neighbor_window(&layout, WindowId(1), Direction::Up).is_none());
+    }
+
+    #[test]
+    fn find_neighbor_down_at_last_row_returns_none() {
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        assert!(find_neighbor_window(&layout, WindowId(2), Direction::Down).is_none());
+    }
+
+    #[test]
+    fn find_neighbor_nonexistent_window_returns_none() {
+        let layout = three_column_layout();
+        assert!(find_neighbor_window(&layout, WindowId(99), Direction::Right).is_none());
+    }
+
+    #[test]
+    fn find_neighbor_source_fewer_rows_picks_closest() {
+        // Col 0 has 1 row, Col 1 has 3 rows.
+        // W1 at row 0 in col 0. Right neighbor in col 1 → closest_row(3, 0) = 0 → W2.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(4)]),
+            ],
+            0,
+        );
+        let neighbor = find_neighbor_window(&layout, WindowId(1), Direction::Right).expect("right");
+        assert_eq!(neighbor, NeighborLocation { col: 1, row: 0 });
+        assert_eq!(layout.columns[neighbor.col].rows[neighbor.row], WindowId(2));
+    }
+
+    #[test]
+    fn find_neighbor_multirow_matching_row_in_both_columns() {
+        // Both columns have 3 rows. W5 at row 1 in col 0 → right neighbor = row 1 in col 1 = W8.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_equal_rows(4, vec![WindowId(1), WindowId(5), WindowId(9)]),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(8), WindowId(6)]),
+            ],
+            0,
+        );
+        let neighbor = find_neighbor_window(&layout, WindowId(5), Direction::Right).expect("right");
+        assert_eq!(neighbor, NeighborLocation { col: 1, row: 1 });
+        assert_eq!(layout.columns[neighbor.col].rows[neighbor.row], WindowId(8));
     }
 
     // --- Expand / Shrink ---
@@ -1000,30 +1423,30 @@ mod tests {
     }
 
     #[test]
-    fn swap_same_row_returns_none() {
+    fn swap_column_same_row_returns_none() {
         // Negative: can't swap with self (edge case)
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        assert!(swap(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
+        assert!(swap_column(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
     }
 
     #[test]
-    fn swap_down_at_last_row_returns_none() {
+    fn swap_column_down_at_last_row_returns_none() {
         // Negative: can't swap down from last row
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
             0,
         );
-        assert!(swap(&layout, WindowId(2), Direction::Down, &test_config()).is_none());
+        assert!(swap_column(&layout, WindowId(2), Direction::Down, &test_config()).is_none());
     }
 
     #[test]
-    fn swap_right_at_last_column_returns_none() {
+    fn swap_column_right_at_last_column_returns_none() {
         // Negative: can't swap right from last column
         let layout = three_column_layout();
-        assert!(swap(&layout, WindowId(3), Direction::Right, &test_config()).is_none());
+        assert!(swap_column(&layout, WindowId(3), Direction::Right, &test_config()).is_none());
     }
 
     #[test]
