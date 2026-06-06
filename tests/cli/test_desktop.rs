@@ -14,15 +14,15 @@ use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::StationsAndDesktops::HDESK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    HCURSOR, HICON, RegisterClassExW, SW_MINIMIZE, SW_RESTORE, ShowWindow, WINDOW_EX_STYLE,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, HCURSOR,
+    HICON, RegisterClassExW, SW_MINIMIZE, SW_RESTORE, ShowWindow, WINDOW_EX_STYLE, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 
 use scrolling_tiling_manager::registry::desktop;
 
@@ -262,6 +262,41 @@ fn is_pipe_available(pipe: &str) -> bool {
         true
     } else {
         false
+    }
+}
+
+// ── DaemonGuard ─────────────────────────────────────────────────────
+
+/// RAII guard that stops the test daemon on drop.
+///
+/// If a test panics after starting the daemon, `stop_test_daemon` is called
+/// during unwinding, preventing orphaned `stmd.exe` processes.
+///
+/// # Usage
+///
+/// ```ignore
+/// let _guard = DaemonGuard::new(&pipe);
+/// // ... test assertions that may panic ...
+/// // daemon is stopped automatically when `_guard` is dropped
+/// ```
+pub struct DaemonGuard {
+    pipe: String,
+}
+
+impl DaemonGuard {
+    /// Create a new guard that will stop the daemon for `pipe` on drop.
+    pub fn new(pipe: &str) -> Self {
+        Self {
+            pipe: pipe.to_owned(),
+        }
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        stop_test_daemon(&self.pipe);
+        // Give the daemon process time to exit cleanly.
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
 }
 

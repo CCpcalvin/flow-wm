@@ -59,6 +59,14 @@ pub fn create_desktop(name: &str) -> Result<HDESK, String> {
 ///
 /// Used by the daemon and hook thread to join the test desktop.
 ///
+/// # Handle lifetime
+///
+/// The `OpenDesktopW` handle opened here is **intentionally not closed**.
+/// The handle must remain valid for the lifetime of the thread's desktop
+/// assignment. If the handle were closed, the thread could be orphaned on
+/// a destroyed desktop once all other handles are released. Windows frees
+/// the handle when the process exits.
+///
 /// # Errors
 ///
 /// Returns an error if `OpenDesktopW` or `SetThreadDesktop` fails.
@@ -78,8 +86,7 @@ pub fn switch_to_desktop(name: &str) -> Result<(), String> {
 /// Returns an error if `SetThreadDesktop` fails.
 pub fn set_thread_desktop(desktop: HDESK) -> Result<(), String> {
     // SAFETY: SetThreadDesktop switches the calling thread to the given desktop.
-    unsafe { SetThreadDesktop(desktop) }
-        .map_err(|e| format!("failed to set thread desktop: {e}"))
+    unsafe { SetThreadDesktop(desktop) }.map_err(|e| format!("failed to set thread desktop: {e}"))
 }
 
 /// Returns a handle to the calling thread's current desktop.

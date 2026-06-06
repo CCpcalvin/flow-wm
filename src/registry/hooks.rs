@@ -159,11 +159,11 @@ pub fn start_hook_thread(
 
     std::thread::spawn(move || {
         // Switch to test desktop before any User32/GDI calls.
-        if let Some(ref name) = desktop_name {
-            if let Err(e) = super::desktop::switch_to_desktop(name) {
-                log::error!("hook thread: {e}");
-                return;
-            }
+        if let Some(ref name) = desktop_name
+            && let Err(e) = super::desktop::switch_to_desktop(name)
+        {
+            log::error!("hook thread: {e}");
+            return;
         }
 
         // Send our OS thread ID back to the caller before registering hooks.

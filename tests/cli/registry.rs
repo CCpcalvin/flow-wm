@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{
-    TestDesktop, TestWindow, query_windows, start_test_daemon, stop_test_daemon, unique_title,
+    DaemonGuard, TestDesktop, TestWindow, query_windows, start_test_daemon, unique_title,
 };
 
 /// Helper: find a window by title in the JSON response.
@@ -33,6 +33,7 @@ fn event_hooking_detects_new_windows() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
+    let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(Duration::from_millis(500));
 
     let title1 = unique_title("Hook-A");
@@ -72,8 +73,6 @@ fn event_hooking_detects_new_windows() {
 
     drop(w1);
     drop(w2);
-    stop_test_daemon(&pipe);
-    std::thread::sleep(Duration::from_millis(300));
     drop(td);
 }
 
@@ -83,6 +82,7 @@ fn event_hooking_create_and_destroy() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
+    let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(Duration::from_millis(500));
 
     let title1 = unique_title("CD-1");
@@ -127,8 +127,6 @@ fn event_hooking_create_and_destroy() {
     println!("✓ event_hooking_create_and_destroy: {count_after_create} -> {count_after_destroy}");
 
     drop(w1);
-    stop_test_daemon(&pipe);
-    std::thread::sleep(Duration::from_millis(300));
     drop(td);
 }
 
@@ -138,6 +136,7 @@ fn event_hooking_minimize_and_restore() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
+    let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(Duration::from_millis(500));
 
     let title = unique_title("Min");
@@ -156,33 +155,29 @@ fn event_hooking_minimize_and_restore() {
     std::thread::sleep(Duration::from_millis(1000));
 
     let json_min = query_windows(&pipe).expect("query minimized");
-    let minimized = find_window_by_title(&json_min, &title);
-    if let Some(m) = minimized {
-        let state = m["state"].to_string();
-        println!("Minimized state: {state}");
-        assert!(
-            state.contains("Minimized"),
-            "state should be Minimized, got: {state}"
-        );
-    }
+    let m = find_window_by_title(&json_min, &title)
+        .unwrap_or_else(|| panic!("window '{title}' should still be in registry after minimize"));
+    let state = m["state"].to_string();
+    println!("Minimized state: {state}");
+    assert!(
+        state.contains("Minimized"),
+        "state should be Minimized, got: {state}"
+    );
 
     // Restore.
     w.restore();
     std::thread::sleep(Duration::from_millis(1000));
 
     let json_rest = query_windows(&pipe).expect("query restored");
-    let restored = find_window_by_title(&json_rest, &title);
-    if let Some(r) = restored {
-        let state = r["state"].to_string();
-        println!("Restored state: {state}");
-        assert!(
-            state.contains("Active"),
-            "state should be Active after restore, got: {state}"
-        );
-    }
+    let r = find_window_by_title(&json_rest, &title)
+        .unwrap_or_else(|| panic!("window '{title}' should still be in registry after restore"));
+    let state = r["state"].to_string();
+    println!("Restored state: {state}");
+    assert!(
+        state.contains("Active"),
+        "state should be Active after restore, got: {state}"
+    );
 
     drop(w);
-    stop_test_daemon(&pipe);
-    std::thread::sleep(Duration::from_millis(300));
     drop(td);
 }
