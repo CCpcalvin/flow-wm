@@ -6,8 +6,6 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-#[cfg(target_os = "windows")]
-use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -17,10 +15,10 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
-use super::message::{self, PIPE_NAME, SocketMessage, SocketResponse};
+use super::message::{self, SocketMessage, SocketResponse};
 
 /// Read buffer size for pipe I/O (8 KiB).
 const BUF_SIZE: u32 = 8192;
@@ -69,7 +67,7 @@ impl PipeServer {
     /// Returns an error if the pipe cannot be created (e.g., another daemon is
     /// already running).
     pub fn create() -> io::Result<Self> {
-        let name = wide(PIPE_NAME);
+        let name = wide(&message::pipe_name());
 
         // TODO(security): Create a SECURITY_ATTRIBUTES that restricts pipe
         // access to the current user session. Currently any local process can
@@ -260,61 +258,28 @@ pub fn send_message(msg: &SocketMessage) -> io::Result<SocketResponse> {
 
 /// Check if the daemon is running by attempting to open the named pipe.
 ///
+/// Retries up to three times with a 50 ms sleep between attempts. This handles
+/// the brief window after a previous `connect_to_pipe` + drop cycle where the
+/// daemon may be between `DisconnectNamedPipe` and the next `ConnectNamedPipe`.
+///
 /// The handle is RAII-wrapped and closed immediately when dropped — no kernel
 /// handle leak.
 ///
 /// Returns `true` if the pipe exists (daemon is running), `false` otherwise.
 #[must_use]
 pub fn is_daemon_running() -> bool {
-    connect_to_pipe().is_ok()
-}
-
-/// Wait for the daemon's named pipe to become available.
-///
-/// Uses [`WaitNamedPipeW`] to block until the pipe server is ready, avoiding
-/// the overhead of repeated connect/disconnect polling cycles.
-///
-/// # Arguments
-///
-/// * `timeout` — maximum time to wait for the pipe to become available.
-///
-/// # Errors
-///
-/// Returns [`io::ErrorKind::TimedOut`] if the pipe does not become available
-/// within the specified timeout, or [`io::ErrorKind::NotFound`] if the pipe
-/// does not exist at all.
-#[cfg(target_os = "windows")]
-pub fn wait_for_pipe(timeout: Duration) -> io::Result<()> {
-    let name = wide(PIPE_NAME);
-    // Saturate at u32::MAX (~49.7 days) instead of silently truncating.
-    let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-
-    let ok = unsafe { WaitNamedPipeW(windows::core::PCWSTR(name.as_ptr()), timeout_ms) };
-
-    if ok.as_bool() {
-        Ok(())
-    } else {
-        let err = unsafe { GetLastError() };
-        let kind = match err.0 {
-            // ERROR_FILE_NOT_FOUND (2) — pipe does not exist.
-            2 => io::ErrorKind::NotFound,
-            // ERROR_ACCESS_DENIED (5) — permission denied on the pipe.
-            5 => io::ErrorKind::PermissionDenied,
-            // ERROR_INVALID_PARAMETER (87) — bug in timeout/name construction.
-            87 => io::ErrorKind::InvalidInput,
-            // ERROR_SEM_TIMEOUT (121) or any other failure — timed out waiting.
-            _ => io::ErrorKind::TimedOut,
-        };
-        Err(io::Error::new(
-            kind,
-            format!("WaitNamedPipeW failed (code {})", err.0),
-        ))
+    for _ in 0..3 {
+        if connect_to_pipe().is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    false
 }
 
 /// Open the daemon's named pipe, returning an RAII-wrapped handle.
 fn connect_to_pipe() -> io::Result<PipeHandle> {
-    let name = wide(PIPE_NAME);
+    let name = wide(&message::pipe_name());
     let handle = unsafe {
         CreateFileW(
             windows::core::PCWSTR(name.as_ptr()),

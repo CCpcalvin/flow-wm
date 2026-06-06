@@ -128,8 +128,15 @@ fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
 /// Spawn the daemon executable as a background process.
 ///
 /// Uses `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` on native Windows so
-/// the daemon runs fully detached from the terminal. Falls back to a plain
-/// `spawn()` when the detached spawn fails (e.g., under WSL interop).
+/// the daemon runs fully detached from the terminal. No explicit `Stdio` is
+/// set so that Rust's `Command::spawn()` calls `CreateProcessW` with
+/// `bInheritHandles = FALSE` — this prevents the daemon from inheriting the
+/// parent's kernel handles (e.g., stdout/stderr pipes created by test
+/// harnesses like `assert_cmd`), which would otherwise keep those pipes open
+/// after the parent exits.
+///
+/// Falls back to a plain `spawn()` when the detached spawn fails (e.g., under
+/// WSL interop).
 #[cfg(target_os = "windows")]
 fn spawn_daemon() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -172,14 +179,23 @@ fn find_daemon_exe() -> Result<std::path::PathBuf, String> {
     Err(format!("daemon binary not found at {}", daemon.display()))
 }
 
-/// Wait for the daemon's named pipe using [`WaitNamedPipeW`].
+/// Wait for the daemon to finish initialization by polling the named pipe.
 ///
-/// Blocks until the pipe server is ready or the timeout expires, without
-/// polling. This avoids spurious connect/disconnect cycles against the daemon.
+/// Polls [`transport::is_daemon_running`] (which connects and immediately
+/// drops the handle) until the daemon has created the pipe and entered its
+/// accept loop, or the timeout expires.
 #[cfg(target_os = "windows")]
 fn wait_for_daemon() -> Result<(), String> {
-    transport::wait_for_pipe(DAEMON_START_TIMEOUT)
-        .map_err(|e| format!("timed out waiting for daemon to start: {e}"))
+    let deadline = std::time::Instant::now() + DAEMON_START_TIMEOUT;
+    loop {
+        if transport::is_daemon_running() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("timed out waiting for daemon to start".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 #[cfg(test)]

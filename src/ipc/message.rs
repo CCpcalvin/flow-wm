@@ -13,8 +13,23 @@
 use crate::common::Direction;
 use serde::{Deserialize, Serialize};
 
-/// Named pipe path used by the daemon and CLI on Windows.
+/// Default named pipe path used by the daemon and CLI on Windows.
 pub const PIPE_NAME: &str = r"\\.\pipe\stm";
+
+/// Environment variable name for overriding the pipe path.
+const PIPE_ENV: &str = "STM_PIPE_NAME";
+
+/// Return the named pipe path for IPC.
+///
+/// Reads from the `STM_PIPE_NAME` environment variable, falling back to
+/// [`PIPE_NAME`] if not set. This allows integration tests to use isolated
+/// pipe names without interfering with a production daemon.
+///
+/// Both `stmd` and `stm` read the same variable, so spawning the daemon
+/// via `stm start` inherits the variable automatically.
+pub fn pipe_name() -> String {
+    std::env::var(PIPE_ENV).unwrap_or_else(|_| PIPE_NAME.to_owned())
+}
 
 /// A command sent from `stm` CLI to the `stmd` daemon.
 ///
