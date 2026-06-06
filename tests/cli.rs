@@ -8,3 +8,7 @@
 mod common;
 #[path = "cli/daemon_lifecycle.rs"]
 mod daemon_lifecycle;
+#[path = "cli/registry.rs"]
+mod registry;
+#[path = "cli/test_desktop.rs"]
+mod test_desktop;

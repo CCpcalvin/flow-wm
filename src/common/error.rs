@@ -13,6 +13,7 @@ use std::fmt;
 /// - [`Config`](StmError::Config) — produced by [`config`](crate::config) during YAML parsing or validation
 /// - [`Layout`](StmError::Layout) — produced by [`layout`](crate::layout) on invalid state transitions
 /// - [`Io`](StmError::Io) — produced during file I/O or socket operations
+/// - [`Registry`](StmError::Registry) — produced by [`registry`](crate::registry) during Win32 bridge or window tracking
 #[derive(Debug)]
 pub enum StmError {
     /// Configuration parsing or validation failure.
@@ -21,6 +22,8 @@ pub enum StmError {
     Layout(String),
     /// I/O error (file read/write, socket, etc.).
     Io(std::io::Error),
+    /// Registry error (Win32 bridge, window tracking).
+    Registry(String),
 }
 
 impl fmt::Display for StmError {
@@ -29,6 +32,7 @@ impl fmt::Display for StmError {
             Self::Config(s) => write!(f, "config error: {s}"),
             Self::Layout(s) => write!(f, "layout error: {s}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Registry(s) => write!(f, "registry error: {s}"),
         }
     }
 }
@@ -68,5 +72,11 @@ mod tests {
     fn display_layout_error() {
         let err = StmError::Layout("no focused window".into());
         assert_eq!(format!("{err}"), "layout error: no focused window");
+    }
+
+    #[test]
+    fn display_registry_error() {
+        let err = StmError::Registry("window not found".into());
+        assert_eq!(format!("{err}"), "registry error: window not found");
     }
 }

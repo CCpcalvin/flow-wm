@@ -10,4 +10,6 @@ pub mod message;
 pub mod transport;
 
 pub use dispatch::dispatch;
+#[cfg(target_os = "windows")]
+pub use dispatch::dispatch_with_registry;
 pub use message::{SocketMessage, SocketResponse};

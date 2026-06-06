@@ -1,0 +1,388 @@
+//! Safe Win32 wrappers for window metadata queries.
+//!
+//! Every function in this module wraps one or more unsafe Win32 API calls
+//! into a safe Rust interface. The unsafe blocks are kept to the minimum
+//! possible scope — typically a single API call.
+//!
+//! All functions return `Result` types and never panic on Win32 failures.
+
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+
+use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_STYLE, GetClassNameW, GetSystemMetrics, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsZoomed,
+    SM_CXSCREEN, SM_CYSCREEN, WINDOW_STYLE, WS_CAPTION, WS_THICKFRAME,
+};
+use windows::core::PWSTR;
+
+use crate::common::Rect;
+
+// ── WindowInfo struct ───────────────────────────────────────────────
+
+/// Aggregated window metadata gathered from Win32 APIs.
+///
+/// Produced by [`get_window_info`] which calls all individual query
+/// functions and collects their results into a single struct. This is the
+/// primary input to the registry's window classification logic.
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    /// Win32 window handle.
+    pub hwnd: HWND,
+    /// Window title bar text (empty if no title).
+    pub title: String,
+    /// Win32 window class name.
+    pub class: String,
+    /// Screen rectangle of the window (x, y, width, height).
+    pub rect: Rect,
+    /// Executable file name only (e.g. `"code.exe"`).
+    pub exe: String,
+    /// Full path to the executable (empty if unavailable).
+    pub process_path: String,
+    /// Whether the window is visible (`WS_VISIBLE` style).
+    pub is_visible: bool,
+    /// Whether the window is maximized (`WS_MAXIMIZE` style).
+    pub is_maximized: bool,
+    /// Whether the window is in exclusive or borderless fullscreen.
+    pub is_fullscreen: bool,
+}
+
+// ── String conversion helpers ──────────────────────────────────────
+
+/// Convert a Rust `&str` to a null-terminated UTF-16 `Vec<u16>`.
+///
+/// This is the standard pattern for passing strings to Win32 APIs that
+/// accept `PCWSTR` or `PWSTR`. The trailing null is required by Win32.
+#[must_use]
+#[allow(dead_code)] // Utility for future Win32 string-passing wrappers (e.g., SetWindowPos, MoveWindow).
+fn wide(s: &str) -> Vec<u16> {
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Convert a null-terminated UTF-16 slice to a Rust `String`.
+///
+/// Slices returned from Win32 APIs may contain a trailing null character.
+/// This function finds the first null and converts only the content before it,
+/// falling back to the full slice if no null is present (shouldn't happen in
+/// practice).
+fn from_wide(wide: &[u16]) -> String {
+    let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    String::from_utf16(&wide[..len]).unwrap_or_default()
+}
+
+// ── Individual query functions ──────────────────────────────────────
+
+/// Retrieves the window title bar text.
+///
+/// Returns an empty string if the window has no title. Returns an error
+/// only if the Win32 call itself fails unexpectedly.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if `GetWindowTextLengthW` or
+/// `GetWindowTextW` fails.
+pub fn get_window_text(hwnd: HWND) -> Result<String, String> {
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
+    if len <= 0 {
+        return Ok(String::new());
+    }
+    // Allocate `len + 1` to hold the text plus the null terminator.
+    let mut buf = vec![0u16; (len + 1) as usize];
+    let written = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if written == 0 {
+        // Length was positive but write returned 0 — something changed
+        // between the two calls (e.g., window was destroyed).
+        return Ok(String::new());
+    }
+    Ok(from_wide(&buf))
+}
+
+/// Retrieves the Win32 window class name.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the class name cannot be retrieved.
+pub fn get_class_name(hwnd: HWND) -> Result<String, String> {
+    // 256 chars is more than enough for any realistic window class name.
+    let mut buf = vec![0u16; 256];
+    let written = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if written == 0 {
+        return Err("GetClassNameW returned 0".to_owned());
+    }
+    Ok(from_wide(&buf))
+}
+
+/// Retrieves the window's screen rectangle as a [`Rect`].
+///
+/// Converts from Win32's `RECT` (left, top, right, bottom) to stm's
+/// `Rect` (x, y, width, height).
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if `GetWindowRect` fails.
+pub fn get_window_rect(hwnd: HWND) -> Result<Rect, String> {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|e| format!("GetWindowRect failed: {e}"))?;
+
+    Ok(Rect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    })
+}
+
+/// Returns `true` if the window has the `WS_VISIBLE` style.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+#[must_use]
+pub fn is_window_visible(hwnd: HWND) -> bool {
+    let result = unsafe { IsWindowVisible(hwnd) };
+    result.as_bool()
+}
+
+/// Returns `true` if the window is maximized (`WS_MAXIMIZE` style).
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+#[must_use]
+pub fn is_zoomed(hwnd: HWND) -> bool {
+    let result = unsafe { IsZoomed(hwnd) };
+    result.as_bool()
+}
+
+/// Detects whether the window is in exclusive or borderless fullscreen.
+///
+/// This is a basic heuristic:
+/// 1. The window covers the full screen dimensions (`SM_CXSCREEN` × `SM_CYSCREEN`).
+/// 2. The window style does **not** include `WS_CAPTION | WS_THICKFRAME`
+///    (no title bar, no resize border).
+///
+/// A full monitor-aware implementation (using `MonitorFromWindow` /
+/// `GetMonitorInfo`) can replace this in a future iteration.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if any Win32 call fails.
+pub fn is_fullscreen(hwnd: HWND) -> Result<bool, String> {
+    let rect = get_window_rect(hwnd)?;
+
+    let screen_cx = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let screen_cy = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+
+    // Check if window covers the entire screen.
+    if rect.x != 0 || rect.y != 0 || rect.width != screen_cx || rect.height != screen_cy {
+        return Ok(false);
+    }
+
+    // Check window style for absence of caption and thick frame.
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+    let style = WINDOW_STYLE(style as u32);
+    let has_chrome = style & (WS_CAPTION | WS_THICKFRAME) != WINDOW_STYLE(0);
+
+    Ok(!has_chrome)
+}
+
+/// Retrieves the process ID (PID) of the window's owner process.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the PID cannot be retrieved.
+pub fn get_window_thread_process_id(hwnd: HWND) -> Result<u32, String> {
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return Err("GetWindowThreadProcessId returned PID 0".to_owned());
+    }
+    Ok(pid)
+}
+
+/// Retrieves the executable name and full path for a given process ID.
+///
+/// Uses `OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION` (the least
+/// privileged access right that still permits `QueryFullProcessImageNameW`),
+/// then queries the full image path.
+///
+/// # Arguments
+///
+/// * `pid` — Process ID.
+///
+/// # Returns
+///
+/// A tuple of `(exe_name, full_path)` where `exe_name` is just the file
+/// name (e.g. `"code.exe"`) and `full_path` is the complete filesystem
+/// path (e.g. `"C:\\Program Files\\VSCode\\code.exe"`).
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the process cannot be opened
+/// (e.g., access denied, process exited) or the image path cannot be queried.
+pub fn get_process_exe_and_path(pid: u32) -> Result<(String, String), String> {
+    // Open the process with limited query rights. This is the minimum
+    // privilege level needed for QueryFullProcessImageNameW.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
+
+    let handle = handle.map_err(|e| format!("OpenProcess failed for PID {pid}: {e}"))?;
+
+    // Ensure the handle is closed even on early return.
+    let result = get_process_path_from_handle(handle);
+
+    // Close the handle — fire-and-forget the result; nothing meaningful
+    // we can do if CloseHandle fails here.
+    let _ = unsafe { CloseHandle(handle) };
+
+    result
+}
+
+/// Internal helper: queries the full image name from an open process handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the image name cannot be queried.
+fn get_process_path_from_handle(
+    handle: windows::Win32::Foundation::HANDLE,
+) -> Result<(String, String), String> {
+    // MAX_PATH (260) is the classic limit, but modern Windows supports
+    // longer paths. Start with 260 and retry with a larger buffer on truncation.
+    const INITIAL_BUF: u32 = 260;
+    let mut size: u32 = INITIAL_BUF;
+    let mut buf = vec![0u16; size as usize];
+
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+    };
+
+    // If the buffer was too small, retry with the reported required size.
+    if result.is_err() && size > INITIAL_BUF {
+        buf = vec![0u16; size as usize];
+        if unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut size,
+            )
+        }
+        .is_err()
+        {
+            return Err("QueryFullProcessImageNameW failed after retry".to_owned());
+        }
+    } else if result.is_err() {
+        return Err("QueryFullProcessImageNameW failed".to_owned());
+    }
+
+    let path = from_wide(&buf);
+    if path.is_empty() {
+        return Err("QueryFullProcessImageNameW returned empty path".to_owned());
+    }
+
+    // Extract the file name from the full path.
+    let exe = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_owned();
+
+    Ok((exe, path))
+}
+
+// ── Convenience aggregator ─────────────────────────────────────────
+
+/// Queries all available metadata for a window and returns a [`WindowInfo`].
+///
+/// This is the primary entry point for gathering window information during
+/// registry initialization and event handling. It calls each individual
+/// query function and assembles the results into a single struct.
+///
+/// Individual query failures are tolerated where possible:
+/// - `title`, `class`, `exe`, `process_path` fall back to empty/unknown on error.
+/// - `rect`, `is_fullscreen` propagate errors since they are essential for layout.
+/// - `is_visible`, `is_maximized` are direct Win32 boolean checks.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if essential queries fail.
+pub fn get_window_info(hwnd: HWND) -> Result<WindowInfo, String> {
+    let title = get_window_text(hwnd).unwrap_or_default();
+    let class = get_class_name(hwnd).unwrap_or_default();
+    let rect = get_window_rect(hwnd)?;
+    let is_visible = is_window_visible(hwnd);
+    let is_maximized = is_zoomed(hwnd);
+    let is_fullscreen = is_fullscreen(hwnd).unwrap_or(false);
+
+    let pid = match get_window_thread_process_id(hwnd) {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(WindowInfo {
+                hwnd,
+                title,
+                class,
+                rect,
+                exe: "unknown".to_owned(),
+                process_path: String::new(),
+                is_visible,
+                is_maximized,
+                is_fullscreen,
+            });
+        }
+    };
+
+    let (exe, process_path) =
+        get_process_exe_and_path(pid).unwrap_or(("unknown".to_owned(), String::new()));
+
+    Ok(WindowInfo {
+        hwnd,
+        title,
+        class,
+        rect,
+        exe,
+        process_path,
+        is_visible,
+        is_maximized,
+        is_fullscreen,
+    })
+}

@@ -9,6 +9,7 @@
 //! stm stop            Stop the running daemon
 //! stm reload-config   Reload configuration from disk
 //! stm check-config    Validate the current config file
+//! stm query windows   List all tracked windows
 //! ```
 
 #[cfg(target_os = "windows")]
@@ -34,7 +35,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Start the stmd daemon in the background.
     Start,
@@ -44,6 +45,18 @@ enum Commands {
     ReloadConfig,
     /// Validate the current configuration file.
     CheckConfig,
+    /// Query daemon state.
+    Query {
+        #[command(subcommand)]
+        command: QueryCommands,
+    },
+}
+
+/// Query subcommands.
+#[derive(Debug, Subcommand)]
+enum QueryCommands {
+    /// List all tracked windows.
+    Windows,
 }
 
 fn main() {
@@ -54,6 +67,7 @@ fn main() {
         Commands::Stop => cmd_stop(),
         Commands::ReloadConfig => cmd_reload_config(),
         Commands::CheckConfig => cmd_check_config(),
+        Commands::Query { command } => cmd_query(command),
     };
 
     if let Err(e) = result {
@@ -96,6 +110,41 @@ fn cmd_reload_config() -> Result<(), String> {
 /// Send a CheckConfig message to the daemon.
 fn cmd_check_config() -> Result<(), String> {
     send_command(SocketMessage::CheckConfig, "configuration is valid")
+}
+
+/// Dispatch a query subcommand.
+fn cmd_query(command: QueryCommands) -> Result<(), String> {
+    match command {
+        QueryCommands::Windows => cmd_query_windows(),
+    }
+}
+
+/// List all tracked windows from the daemon.
+fn cmd_query_windows() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let response = transport::send_message(&SocketMessage::QueryWindowsAll)
+            .map_err(|e| format!("failed to send command: {e}"))?;
+
+        match response {
+            SocketResponse::Data { payload } => {
+                let formatted =
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+                println!("{formatted}");
+                Ok(())
+            }
+            SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+            SocketResponse::Ok => {
+                println!("stm: ok");
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("IPC commands are only supported on Windows".into())
+    }
 }
 
 /// Send a command to the daemon and print a success message on Ok.
@@ -228,6 +277,17 @@ mod tests {
     fn parse_check_config() {
         let cli = Cli::try_parse_from(["stm", "check-config"]).unwrap();
         assert!(matches!(cli.command, Commands::CheckConfig));
+    }
+
+    #[test]
+    fn parse_query_windows() {
+        let cli = Cli::try_parse_from(["stm", "query", "windows"]).unwrap();
+        match cli.command {
+            Commands::Query {
+                command: QueryCommands::Windows,
+            } => {}
+            other => panic!("expected Query::Windows, got: {other:?}"),
+        }
     }
 
     // --- Negative: invalid invocations ---

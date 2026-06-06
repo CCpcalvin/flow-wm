@@ -1,9 +1,9 @@
 //! Daemon-side command dispatcher.
 //!
 //! Maps [`SocketMessage`] commands to [`SocketResponse`] results.
-//! This module is platform-independent — it only matches on enum variants
-//! and returns response enums. Actual state mutation will be added in
-//! later phases.
+//! The base [`dispatch`] function is platform-independent. The
+//! [`dispatch_with_registry`] function (Windows-only) handles commands that
+//! require access to the [`WindowRegistry`](crate::registry::WindowRegistry).
 
 use super::message::{SocketMessage, SocketResponse};
 
@@ -43,6 +43,31 @@ pub fn dispatch(msg: &SocketMessage) -> SocketResponse {
         SocketMessage::SetConfigValue { .. } => unimplemented_command("set_config_value"),
         SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
         SocketMessage::ForgetAllApps => unimplemented_command("forget_all_apps"),
+    }
+}
+
+/// Dispatch a command that requires access to the window registry.
+///
+/// Handles `QueryWindowsAll` by serialising the registry state to JSON,
+/// and falls through to [`dispatch`] for all other commands.
+///
+/// This function is Windows-only because the registry depends on Win32 APIs.
+#[cfg(target_os = "windows")]
+pub fn dispatch_with_registry(
+    msg: &SocketMessage,
+    registry: &std::sync::Arc<std::sync::Mutex<crate::registry::WindowRegistry>>,
+) -> SocketResponse {
+    match msg {
+        SocketMessage::QueryWindowsAll => match registry.lock() {
+            Ok(reg) => {
+                let payload = reg.to_json_value();
+                SocketResponse::Data { payload }
+            }
+            Err(e) => SocketResponse::Error {
+                message: format!("registry lock failed: {e}"),
+            },
+        },
+        _ => dispatch(msg),
     }
 }
 

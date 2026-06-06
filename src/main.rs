@@ -3,25 +3,49 @@
 //! This is the main daemon process that owns all state, manages windows,
 //! and responds to IPC commands from the `stm` CLI client.
 //!
-//! # Current state
-//!
-//! Phase 1 MVP: the daemon creates a named pipe server and handles `Stop`
-//! commands. Window management and layout will be added in later phases.
+//! The daemon:
+//! 1. Optionally switches to a test desktop (`--desktop` flag)
+//! 2. Loads configuration and creates the shared [`WindowRegistry`](scrolling_tiling_manager::registry::WindowRegistry)
+//! 3. Starts a WinEvent hook thread for window lifecycle tracking
+//! 4. Enters the IPC command loop, processing hook events between messages
 
 #[cfg(target_os = "windows")]
-use scrolling_tiling_manager::ipc::{SocketMessage, dispatch};
+use std::sync::{Arc, Mutex};
+
+#[cfg(target_os = "windows")]
+use clap::Parser;
+
+#[cfg(target_os = "windows")]
+use scrolling_tiling_manager::config::StmConfig;
+#[cfg(target_os = "windows")]
+use scrolling_tiling_manager::ipc::transport::PipeServer;
+#[cfg(target_os = "windows")]
+use scrolling_tiling_manager::ipc::{SocketMessage, dispatch_with_registry};
+#[cfg(target_os = "windows")]
+use scrolling_tiling_manager::registry::{WindowRegistry, desktop, hooks};
+
+/// Daemon CLI arguments.
+#[cfg(target_os = "windows")]
+#[derive(Parser)]
+#[command(name = "stmd", version, about = "ScrollingTilingManager daemon")]
+#[command(propagate_version = true)]
+struct Args {
+    /// Desktop name for test mode (opens and switches to this desktop).
+    #[arg(long)]
+    desktop: Option<String>,
+}
 
 /// Daemon entry point.
 ///
-/// Initializes the named pipe server and enters the command loop.
-/// The loop accepts one client connection at a time, reads commands,
-/// and dispatches them until a `Stop` message is received.
+/// Parses CLI arguments, then runs the daemon on Windows. On non-Windows
+/// platforms, prints an error and exits.
 fn main() {
     env_logger::init();
 
     #[cfg(target_os = "windows")]
     {
-        if let Err(e) = run_daemon() {
+        let args = Args::parse();
+        if let Err(e) = run_daemon(args) {
             log::error!("stmd: fatal error: {e}");
             std::process::exit(1);
         }
@@ -36,16 +60,36 @@ fn main() {
 
 /// Run the daemon command loop.
 ///
-/// Creates the named pipe, then repeatedly:
-/// 1. Waits for a client to connect
-/// 2. Reads and dispatches messages
-/// 3. Disconnects the client
+/// 1. Optionally switches to a test desktop
+/// 2. Creates the shared window registry
+/// 3. Scans existing windows and starts the hook thread
+/// 4. Enters the IPC loop, processing hook events between each message
 ///
 /// Returns on `Stop` command or fatal error.
 #[cfg(target_os = "windows")]
-fn run_daemon() -> Result<(), String> {
-    use scrolling_tiling_manager::ipc::transport::PipeServer;
+fn run_daemon(args: Args) -> Result<(), String> {
+    // 1. Optional: switch to test desktop.
+    if let Some(ref desktop_name) = args.desktop {
+        desktop::switch_to_desktop(desktop_name)?;
+    }
 
+    // 2. Load config (TODO: load from file).
+    let config = StmConfig::default();
+
+    // 3. Create shared registry.
+    let registry = Arc::new(Mutex::new(WindowRegistry::new(&config)));
+
+    // 4. Scan existing windows.
+    registry
+        .lock()
+        .map_err(|e| format!("registry lock: {e}"))?
+        .scan_existing_windows()?;
+
+    // 5. Start hook thread.
+    let (hook_receiver, _hook_handle) =
+        hooks::start_hook_thread().map_err(|e| format!("failed to start hook thread: {e}"))?;
+
+    // 6. IPC server loop.
     let server = PipeServer::create()
         .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
 
@@ -62,9 +106,14 @@ fn run_daemon() -> Result<(), String> {
         // Process messages from this client until they disconnect or send Stop.
         let mut should_stop = false;
         loop {
+            // Process hook events before each message.
+            if let Ok(mut reg) = registry.lock() {
+                reg.process_pending_events(&hook_receiver);
+            }
+
             match server.read_message() {
                 Ok(msg) => {
-                    let response = dispatch(&msg);
+                    let response = dispatch_with_registry(&msg, &registry);
                     let is_stop = matches!(msg, SocketMessage::Stop);
 
                     if let Err(e) = server.write_response(&response) {

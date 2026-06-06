@@ -22,7 +22,7 @@
 /// let b = Rect { x: 100, y: 0, width: 100, height: 100 };
 /// assert!(!a.overlaps(b)); // touching at x=100 → no overlap
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     /// Left edge X coordinate.
     pub x: i32,
@@ -38,7 +38,7 @@ pub struct Rect {
 ///
 /// Used for preferred window sizes and monitor dimensions where position
 /// is not relevant (unlike [`Rect`] which includes position).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Size {
     /// Width in pixels.
     pub w: i32,
