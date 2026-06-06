@@ -6,7 +6,7 @@
 
 - Owns the **Virtual Layout** — the full description of all tiling windows on the infinite canvas
 - Computes the **Actual Layout** — the pixel-mapped on-screen slice of the virtual canvas
-- Processes layout mutation commands (swap, scroll, resize column, merge, etc.)
+- Processes layout mutation commands (swap, scroll, resize column, etc.)
 - Diffs old vs new Actual Layout to produce a `Vec<WindowMove>` batch
 - Passes the batch to `window-animation`
 
@@ -72,10 +72,9 @@ All mutations take the current `VirtualLayout`, compute a new one, re-project to
 | `SwapUp` / `SwapDown` | Swap focused window with sibling row in same column. |
 | `SwapWithOffscreen <direction>` | Focused window swaps with first window in the next off-screen column. Viewport shifts so that column comes into view; the displaced window moves to the vacated off-screen slot. |
 | `ExpandColumn` / `ShrinkColumn` | Increase/decrease focused column's `width_eighths` by 1. Adjacent column adjusts to compensate. |
-| `MergeColumnLeft` / `MergeColumnRight` | Absorb adjacent column's windows into focused column as new rows. Adjacent column disappears; remaining columns shift. |
 | `SetColumnWidth <eighths>` | Set focused column width explicitly. |
 | `ResizeSnap <new_rect>` | Called after a mouse resize gesture. Snaps to nearest eighths width, adjusts neighbor. |
-| `MoveSnap <new_rect>` | Called after a mouse move gesture. Determines target slot (insert or merge), updates virtual layout. |
+| `MoveSnap <new_rect>` | Called after a mouse move gesture. Determines target slot (insert into column), updates virtual layout. |
 | `Promote <hwnd>` | Move a window from above-layout (overlay) layer back into tiling. |
 
 ### Cross-viewport swap detail

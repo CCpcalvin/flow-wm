@@ -50,7 +50,7 @@ Get a working tiling WM with keyboard control. No mouse gestures, no config file
 
 **Tasks:**
 - Add minimize, restore, maximize, and fullscreen handling in `src/registry`
-- Add swap, merge, resize-width logic in `src/layout`
+- Add swap, resize-width logic in `src/layout`
 - Implement recovery snapshot write/read helpers
 - Implement `src/bin/stm-watchdog.rs`
 - Implement `stm restore`

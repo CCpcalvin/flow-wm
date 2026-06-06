@@ -545,51 +545,6 @@ pub fn shrink_column(
 }
 
 // ---------------------------------------------------------------------------
-// Merge mutations (horizontal container join)
-// ---------------------------------------------------------------------------
-
-/// Merge the focused column with its left neighbor.
-///
-/// All rows from the left neighbor are prepended to the focused column.
-/// The left neighbor is then removed.
-#[must_use]
-pub fn merge_column_left(layout: &VirtualLayout, focused: WindowId) -> Option<VirtualLayout> {
-    let (col, _) = layout.find_window(focused)?;
-    if col == 0 {
-        return None;
-    }
-    merge_columns(layout, col - 1, col)
-}
-
-/// Merge the focused column with its right neighbor.
-///
-/// All rows from the right neighbor are appended to the focused column.
-/// The right neighbor is then removed.
-#[must_use]
-pub fn merge_column_right(layout: &VirtualLayout, focused: WindowId) -> Option<VirtualLayout> {
-    let (col, _) = layout.find_window(focused)?;
-    if col + 1 >= layout.columns.len() {
-        return None;
-    }
-    merge_columns(layout, col, col + 1)
-}
-
-/// Merge `absorbed` column's rows into `absorber` column, then remove `absorbed`.
-fn merge_columns(
-    layout: &VirtualLayout,
-    absorber: usize,
-    absorbed: usize,
-) -> Option<VirtualLayout> {
-    let mut new_layout = layout.clone();
-    let absorbed_rows = new_layout.columns[absorbed].rows.clone();
-    let absorber_col = &mut new_layout.columns[absorber];
-    absorber_col.rows.extend(absorbed_rows);
-
-    new_layout.columns.remove(absorbed);
-    Some(new_layout)
-}
-
-// ---------------------------------------------------------------------------
 // Monocle toggle
 // ---------------------------------------------------------------------------
 
@@ -1372,31 +1327,6 @@ mod tests {
         assert_eq!(result.columns[1].width_eighths, 4);
     }
 
-    // --- Merge ---
-
-    #[test]
-    fn merge_column_right_combines_rows() {
-        let layout = three_column_layout();
-        let result = merge_column_right(&layout, WindowId(1)).expect("merge right");
-        assert_eq!(result.columns.len(), 2);
-        assert_eq!(result.columns[0].rows, vec![WindowId(1), WindowId(2)]);
-    }
-
-    #[test]
-    fn merge_column_left_combines_rows() {
-        let layout = three_column_layout();
-        let result = merge_column_left(&layout, WindowId(2)).expect("merge left");
-        assert_eq!(result.columns.len(), 2);
-        assert_eq!(result.columns[0].rows, vec![WindowId(1), WindowId(2)]);
-    }
-
-    #[test]
-    fn merge_at_edge_returns_none() {
-        let layout = three_column_layout();
-        assert!(merge_column_left(&layout, WindowId(1)).is_none());
-        assert!(merge_column_right(&layout, WindowId(3)).is_none());
-    }
-
     // --- Monocle ---
 
     #[test]
@@ -1514,16 +1444,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_columns_combines_all_rows() {
-        // Positive: after merge, all rows are present in the merged column
-        let layout = three_column_layout();
-        let result = merge_column_right(&layout, WindowId(1)).expect("merge");
-        let col = &result.columns[0];
-        assert_eq!(col.rows.len(), 2);
-        assert_eq!(col.rows, vec![WindowId(1), WindowId(2)]);
-    }
-
-    #[test]
     fn toggle_monocle_without_saved_width_uses_default() {
         // Positive: monocle off without saved width → defaults to 4
         let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
@@ -1576,11 +1496,5 @@ mod tests {
         // Negative: can't swap right from last column
         let layout = three_column_layout();
         assert!(swap_column(&layout, WindowId(3), Direction::Right, &test_config()).is_none());
-    }
-
-    #[test]
-    fn merge_right_at_last_column_returns_none() {
-        // Negative: can't merge right from last column (already tested but explicit)
-        assert!(merge_column_right(&three_column_layout(), WindowId(3)).is_none());
     }
 }

@@ -43,7 +43,6 @@ pub enum SocketMessage {
     ScrollLeft, ScrollRight,
     ExpandColumn, ShrinkColumn,
     SetColumnWidth { eighths: u8 },
-    MergeColumnLeft, MergeColumnRight,
     ToggleFloat,
     ToggleMonocle,
     PlaceAbove,

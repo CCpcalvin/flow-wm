@@ -55,7 +55,7 @@ use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, Virtu
 /// - Focus moves with the window, not with the layout slot.
 ///
 /// This is the single entry point for all layout mutations. Call its public
-/// methods to scroll, focus, swap, resize, merge, toggle monocle, or
+/// methods to scroll, focus, swap, resize, toggle monocle, or
 /// add/remove windows. Each call returns a [`LayoutDiff`] containing the
 /// new layouts and animation instructions.
 ///
@@ -301,24 +301,6 @@ impl LayoutEngine {
     }
 
     // -----------------------------------------------------------------------
-    // Merge operations
-    // -----------------------------------------------------------------------
-
-    /// Merge the focused column with its left neighbor.
-    pub fn merge_column_left(&mut self) -> Option<LayoutDiff> {
-        let focused = self.focused?;
-        let new_layout = mutations::merge_column_left(&self.virtual_layout, focused)?;
-        Some(self.apply_mutation(new_layout))
-    }
-
-    /// Merge the focused column with its right neighbor.
-    pub fn merge_column_right(&mut self) -> Option<LayoutDiff> {
-        let focused = self.focused?;
-        let new_layout = mutations::merge_column_right(&self.virtual_layout, focused)?;
-        Some(self.apply_mutation(new_layout))
-    }
-
-    // -----------------------------------------------------------------------
     // Monocle toggle
     // -----------------------------------------------------------------------
 
@@ -470,14 +452,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_merge_columns() {
-        let mut engine = engine_with_three_columns();
-        let diff = engine.merge_column_right().expect("merge");
-        assert_eq!(diff.virtual_layout.columns.len(), 2);
-        assert_eq!(diff.virtual_layout.columns[0].rows.len(), 2);
-    }
-
-    #[test]
     fn engine_monocle_toggle() {
         let mut engine = engine_with_three_columns();
         let diff_on = engine.toggle_monocle().expect("monocle on");
@@ -599,10 +573,6 @@ mod tests {
         let diff2 = engine.shrink_column().expect("shrink single");
         assert_eq!(diff2.virtual_layout.columns[0].width_eighths, 4);
 
-        // Merge — needs neighbor
-        assert!(engine.merge_column_left().is_none());
-        assert!(engine.merge_column_right().is_none());
-
         // Focus vertical — only one row
         assert!(engine.focus(Direction::Up).is_none());
         assert!(engine.focus(Direction::Down).is_none());
@@ -623,8 +593,6 @@ mod tests {
         assert!(engine.swap_column(Direction::Right).is_none());
         assert!(engine.expand_column().is_none());
         assert!(engine.shrink_column().is_none());
-        assert!(engine.merge_column_left().is_none());
-        assert!(engine.merge_column_right().is_none());
         assert!(engine.toggle_monocle().is_none());
     }
 
