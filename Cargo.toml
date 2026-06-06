@@ -24,6 +24,19 @@ schemars = "0.8"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Win32 bindings. Feature flags are transitive gates that enable functions
+# in other modules (e.g., Win32_System_IO gates ReadFile/WriteFile/ConnectNamedPipe;
+# Win32_Security gates CreateFileW/CreateNamedPipeW).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+] }
 
 [profile.release]
 opt-level = 3
@@ -31,4 +44,4 @@ lto = true
 strip = true
 
 [package.metadata.docs.rs]
-targets = ["x86_64-pc-windows-msvc"]
+targets = ["x86_64-pc-windows-gnu"]

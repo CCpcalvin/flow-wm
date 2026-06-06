@@ -62,7 +62,7 @@ pub struct Point {
 ///
 /// - `Left`/`Right` operate on **columns** (horizontal container in [`VirtualLayout`](crate::layout::VirtualLayout))
 /// - `Up`/`Down` operate on **rows** within a column (vertical container in [`Column`](crate::layout::Column))
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     /// Move focus/swap to the left column.
     Left,
@@ -313,5 +313,60 @@ mod tests {
         let id = WindowId(42);
         let copy = id;
         assert_eq!(id, copy);
+    }
+
+    // --- Direction serialization roundtrip tests ---
+
+    #[test]
+    fn direction_serialize_roundtrip_all_variants() {
+        // Positive: all 4 Direction variants roundtrip through JSON
+        for dir in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            let json = serde_json::to_string(&dir).unwrap();
+            let parsed: Direction = serde_json::from_str(&json).unwrap();
+            assert_eq!(dir, parsed, "Direction roundtrip failed for: {dir:?}");
+        }
+    }
+
+    #[test]
+    fn direction_serialized_values() {
+        // Positive: Direction serializes to the expected string form
+        assert_eq!(
+            serde_json::to_string(&Direction::Left).unwrap(),
+            r#""Left""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Direction::Right).unwrap(),
+            r#""Right""#
+        );
+        assert_eq!(serde_json::to_string(&Direction::Up).unwrap(), r#""Up""#);
+        assert_eq!(
+            serde_json::to_string(&Direction::Down).unwrap(),
+            r#""Down""#
+        );
+    }
+
+    #[test]
+    fn direction_deserialize_invalid_returns_none() {
+        // Negative: invalid direction string fails deserialization
+        let result: Result<Direction, _> = serde_json::from_str(r#""diagonal""#);
+        assert!(
+            result.is_err(),
+            "invalid direction should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn direction_deserialize_wrong_type_fails() {
+        // Negative: number instead of string fails deserialization
+        let result: Result<Direction, _> = serde_json::from_str("42");
+        assert!(
+            result.is_err(),
+            "number should not deserialize as Direction"
+        );
     }
 }

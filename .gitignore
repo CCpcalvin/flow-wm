@@ -3,6 +3,7 @@
 
 # My Stuff
 ref/
+.vscode
 
 # OS Stuff
 .DS_Store
