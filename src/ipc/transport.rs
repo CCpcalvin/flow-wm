@@ -239,7 +239,20 @@ fn write_all(handle: HANDLE, data: &[u8]) -> io::Result<()> {
 /// - `InvalidData` if serialisation fails or the daemon sends a malformed response.
 /// - Other I/O errors for transport failures.
 pub fn send_message(msg: &SocketMessage) -> io::Result<SocketResponse> {
-    let handle = connect_to_pipe()?;
+    send_message_to(&message::pipe_name(), msg)
+}
+
+/// Connect to a specific named pipe, send a message, and read the response.
+///
+/// Like [`send_message`] but takes the pipe path directly instead of reading
+/// from the `STM_PIPE_NAME` environment variable. Thread-safe for concurrent
+/// use with different pipe names (no global env-var mutation).
+///
+/// # Errors
+///
+/// Same as [`send_message`].
+pub fn send_message_to(pipe_name: &str, msg: &SocketMessage) -> io::Result<SocketResponse> {
+    let handle = connect_to_named_pipe(pipe_name)?;
 
     // Write the message
     let wire = message::encode_message(msg)?;
@@ -278,8 +291,16 @@ pub fn is_daemon_running() -> bool {
 }
 
 /// Open the daemon's named pipe, returning an RAII-wrapped handle.
+///
+/// Uses the pipe name from the `STM_PIPE_NAME` environment variable
+/// (or the default `\\.\pipe\stm`).
 fn connect_to_pipe() -> io::Result<PipeHandle> {
-    let name = wide(&message::pipe_name());
+    connect_to_named_pipe(&message::pipe_name())
+}
+
+/// Open a named pipe by path, returning an RAII-wrapped handle.
+fn connect_to_named_pipe(pipe_name: &str) -> io::Result<PipeHandle> {
+    let name = wide(pipe_name);
     let handle = unsafe {
         CreateFileW(
             windows::core::PCWSTR(name.as_ptr()),

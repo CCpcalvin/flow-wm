@@ -126,20 +126,29 @@ impl Drop for HookThreadHandle {
 /// Spawns the background hook thread and returns a channel receiver.
 ///
 /// The hook thread:
-/// 1. Reports its OS thread ID back to the caller
-/// 2. Registers WinEvent hooks via `SetWinEventHook`
-/// 3. Runs a `GetMessageW` message loop (required for `WINEVENT_OUTOFCONTEXT`)
-/// 4. The callback sends typed [`HookEvent`]s through the channel
+/// 1. Optionally switches to the named desktop (for test isolation)
+/// 2. Reports its OS thread ID back to the caller
+/// 3. Registers WinEvent hooks via `SetWinEventHook`
+/// 4. Runs a `GetMessageW` message loop (required for `WINEVENT_OUTOFCONTEXT`)
+/// 5. The callback sends typed [`HookEvent`]s through the channel
 ///
 /// Returns a tuple of `(event_receiver, thread_handle)`. The receiver should
 /// be polled periodically via
 /// [`WindowRegistry::process_pending_events`](super::WindowRegistry::process_pending_events).
 ///
+/// # Arguments
+///
+/// * `desktop_name` — If `Some`, the hook thread opens and switches to this
+///   desktop before registering hooks. Used for test isolation so hooks only
+///   fire for windows on the test desktop.
+///
 /// # Errors
 ///
-/// Returns an error if the hook thread has already been started (double-init)
-/// or if the hook thread fails to start and report its thread ID.
-pub fn start_hook_thread() -> Result<(Receiver<HookEvent>, HookThreadHandle), String> {
+/// Returns an error if the hook thread has already been started (double-init),
+/// the hook thread fails to start, or the desktop switch fails.
+pub fn start_hook_thread(
+    desktop_name: Option<String>,
+) -> Result<(Receiver<HookEvent>, HookThreadHandle), String> {
     let (sender, receiver) = mpsc::channel();
     let (tid_tx, tid_rx) = mpsc::channel::<u32>();
 
@@ -149,6 +158,14 @@ pub fn start_hook_thread() -> Result<(Receiver<HookEvent>, HookThreadHandle), St
         .map_err(|_| "start_hook_thread called more than once — this is a bug".to_owned())?;
 
     std::thread::spawn(move || {
+        // Switch to test desktop before any User32/GDI calls.
+        if let Some(ref name) = desktop_name {
+            if let Err(e) = super::desktop::switch_to_desktop(name) {
+                log::error!("hook thread: {e}");
+                return;
+            }
+        }
+
         // Send our OS thread ID back to the caller before registering hooks.
         let os_tid = unsafe { GetCurrentThreadId() };
         let _ = tid_tx.send(os_tid);

@@ -85,9 +85,10 @@ fn run_daemon(args: Args) -> Result<(), String> {
         .map_err(|e| format!("registry lock: {e}"))?
         .scan_existing_windows()?;
 
-    // 5. Start hook thread.
+    // 5. Start hook thread (pass desktop name so it joins the same isolated desktop).
+    let hook_desktop = args.desktop.clone();
     let (hook_receiver, _hook_handle) =
-        hooks::start_hook_thread().map_err(|e| format!("failed to start hook thread: {e}"))?;
+        hooks::start_hook_thread(hook_desktop).map_err(|e| format!("failed to start hook thread: {e}"))?;
 
     // 6. IPC server loop.
     let server = PipeServer::create()

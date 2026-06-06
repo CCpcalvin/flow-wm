@@ -1,7 +1,8 @@
 //! Integrated tests for the WindowRegistry.
 //!
-//! These tests start `stmd` on the current desktop, create dummy windows,
-//! and verify the registry state via IPC queries.
+//! These tests create an isolated desktop, start `stmd` on it, create dummy
+//! windows on it, and verify the registry state via IPC queries. The user's
+//! main desktop is never affected.
 //!
 //! All tests are Windows-only.
 
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{
-    TestWindow, query_windows, start_test_daemon, stop_test_daemon, unique_title,
+    TestDesktop, TestWindow, query_windows, start_test_daemon, stop_test_daemon, unique_title,
 };
 
 /// Helper: find a window by title in the JSON response.
@@ -29,8 +30,9 @@ fn find_window_by_title<'a>(
 /// Event Hooking Test: create windows after daemon starts, verify they appear.
 #[test]
 fn event_hooking_detects_new_windows() {
+    let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
-    let mut _child = start_test_daemon(&pipe).expect("start daemon");
+    let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     std::thread::sleep(Duration::from_millis(500));
 
     let title1 = unique_title("Hook-A");
@@ -72,13 +74,15 @@ fn event_hooking_detects_new_windows() {
     drop(w2);
     stop_test_daemon(&pipe);
     std::thread::sleep(Duration::from_millis(300));
+    drop(td);
 }
 
 /// Event Hooking Test: create and destroy windows, verify removal.
 #[test]
 fn event_hooking_create_and_destroy() {
+    let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
-    let mut _child = start_test_daemon(&pipe).expect("start daemon");
+    let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     std::thread::sleep(Duration::from_millis(500));
 
     let title1 = unique_title("CD-1");
@@ -125,13 +129,15 @@ fn event_hooking_create_and_destroy() {
     drop(w1);
     stop_test_daemon(&pipe);
     std::thread::sleep(Duration::from_millis(300));
+    drop(td);
 }
 
 /// Event Hooking Test: minimize and restore.
 #[test]
 fn event_hooking_minimize_and_restore() {
+    let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
-    let mut _child = start_test_daemon(&pipe).expect("start daemon");
+    let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     std::thread::sleep(Duration::from_millis(500));
 
     let title = unique_title("Min");
@@ -178,4 +184,5 @@ fn event_hooking_minimize_and_restore() {
     drop(w);
     stop_test_daemon(&pipe);
     std::thread::sleep(Duration::from_millis(300));
+    drop(td);
 }
