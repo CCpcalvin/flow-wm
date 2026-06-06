@@ -6,8 +6,8 @@ description: >
   calls, message loops, and workspace tiling logic. Load at the start of every
   Rust implementation phase.
   Do NOT load for Python, TypeScript, or cross-platform crate work.
-  Produces correct, idiomatic Rust that compiles cleanly on a Windows target
-  with `cargo build --target x86_64-pc-windows-msvc`.
+  Produces correct, idiomatic Rust that compiles cleanly on Windows with
+  `cargo build` (native MSVC toolchain, x86_64-pc-windows-msvc).
 version: 1
 ---
 
@@ -16,7 +16,7 @@ version: 1
 ## Tech Stack
 
 - **Rust stable (MSRV 1.78+)**
-- **Target:** `x86_64-pc-windows-msvc` (MSVC toolchain, not GNU)
+- **Target:** `x86_64-pc-windows-msvc` (MSVC toolchain, not GNU). Native build — no `--target` flag needed.
 - **windows-rs** (`windows` crate ≥ 0.58) — Win32 / Windows UI Automation bindings
 - **tokio** (optional, single-threaded `current_thread` runtime) — async I/O only
 - **serde + serde_json** — config serialisation/deserialisation
@@ -99,11 +99,19 @@ Rules:
 [package]
 name = "scrolling-tiling-manager"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+
+[[bin]]
+name = "stmd"
+path = "src/main.rs"
 
 [[bin]]
 name = "stm"
-path = "src/main.rs"
+path = "src/bin/stm.rs"
+
+[[bin]]
+name = "stm-watchdog"
+path = "src/bin/stm-watchdog.rs"
 
 [dependencies]
 windows = { version = "0.58", features = [
@@ -122,14 +130,13 @@ opt-level = 3
 lto = true
 strip = true
 
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-# guard: this crate MUST NOT compile on non-Windows targets
-# Add a compile_error! in build.rs instead of listing deps here
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 ```
 
 Rules:
 - NEVER add features like `"Win32_Everything"` — enumerate exactly the features needed.
-- `edition = "2021"` is mandatory.
+- `edition = "2024"` is mandatory.
 - `strip = true` in release to produce a lean binary.
 - Add a `build.rs` that emits `compile_error!` if target is not Windows (see `references/build-rs.md`).
 
@@ -263,9 +270,9 @@ Rules:
 After every change:
 
 ```powershell
-cargo clippy --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy -- -D warnings
 cargo fmt --check
-cargo test --target x86_64-pc-windows-msvc
+cargo test
 ```
 
 Fix all issues before handoff. Never suppress a Clippy lint without an inline comment explaining why.
@@ -277,8 +284,8 @@ Fix all issues before handoff. Never suppress a Clippy lint without an inline co
 - [ ] Module boundaries respected (`layout/` pure, `win32/` FFI only)
 - [ ] All `unsafe` blocks minimal-scope, single Win32 call each
 - [ ] No `.unwrap()` / `.expect()` outside tests
-- [ ] `cargo clippy --target x86_64-pc-windows-msvc -- -D warnings` exits 0
+- [ ] `cargo clippy -- -D warnings` exits 0
 - [ ] `cargo fmt --check` exits 0
-- [ ] `cargo test` passes (pure layout tests run on host; Win32 tests skipped on non-Windows CI)
+- [ ] `cargo test` passes (pure layout tests + Win32 tests on Windows)
 - [ ] All public items have `///` doc comments
 - [ ] Win32 feature flags are minimal — no blanket feature includes

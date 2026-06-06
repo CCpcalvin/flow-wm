@@ -165,3 +165,46 @@ stm-watchdog --parent-pid <pid> --recovery-path <path>
 ```
 
 This binary is normally launched by `stmd`, not by users directly.
+
+---
+
+## Building
+
+STM is developed and built **natively on Windows** using the MSVC toolchain. No cross-compilation is needed.
+
+### Prerequisites
+
+1. **Rust toolchain** — install via [rustup](https://rustup.rs/):
+   ```powershell
+   rustup default stable-x86_64-pc-windows-msvc
+   ```
+2. **Visual Studio Build Tools** — the MSVC linker is required. Install the
+   "Desktop development with C++" workload from
+   [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+
+### Build Commands
+
+```powershell
+# Debug build (fast compile, useful during development)
+cargo build
+
+# Release build (optimised, stripped binary)
+cargo build --release
+
+# Run all tests
+cargo test
+
+# Lint
+cargo clippy -- -D warnings
+
+# Format check
+cargo fmt --check
+```
+
+The resulting binaries are in `target/debug/` or `target/release/`:
+
+| Binary | Path |
+|--------|------|
+| `stmd.exe` | `target/release/stmd.exe` |
+| `stm.exe` | `target/release/stm.exe` |
+| `stm-watchdog.exe` | `target/release/stm-watchdog.exe` |

@@ -15,7 +15,7 @@ version: 1
 **Scope:** unit tests (inline), integration tests (`tests/`), layout correctness, config round-trips, and full suite run.
 CoderAgent owns per-function inline unit tests. Don't rewrite unless inadequate.
 
-**Test runner:** `cargo test` (and `cargo test --target x86_64-pc-windows-msvc` on Windows CI).
+**Test runner:** `cargo test` (native MSVC toolchain on Windows).
 
 ---
 
@@ -180,10 +180,7 @@ Note: `tempfile` crate is a `[dev-dependencies]` only.
 
 ```powershell
 # On Windows (full suite including Win32 tests)
-cargo test --target x86_64-pc-windows-msvc
-
-# On Linux CI (pure/layout tests only)
-cargo test --target x86_64-unknown-linux-gnu
+cargo test
 
 # With output for failures
 cargo test -- --nocapture
@@ -223,5 +220,5 @@ Report: total / passed / failed / ignored. Full output for every failure. Note a
 - **`#[cfg(target_os = "windows")]` must guard the entire test function, not just the body**: If the function signature references a `windows-rs` type (e.g., `HWND`), the compiler will reject it on Linux even with a body guard. Use the cfg attribute on the `#[test]` item itself.
 - **`tempfile` must stay in `[dev-dependencies]`**: It is easy to accidentally add `tempfile` to `[dependencies]` when copy-pasting. This links it into the release binary — always check `Cargo.toml` after adding config tests.
 - **Layout integer rounding leaves uncovered pixels**: `split_rect` with non-divisible widths silently drops remainder pixels. Tests MUST assert `tiles.iter().map(|r| r.width).sum::<i32>() == parent.width` (when gap=0) to catch this, not just check one tile's width.
-- **`cargo test` on Linux passes but `cargo test --target x86_64-pc-windows-msvc` fails**: Pure layout and config tests must pass on both targets. If a test fails only on Windows CI, it usually means a Win32 type leaked into test setup without a `#[cfg]` guard.
+- **`cargo test` on Linux passes but `cargo test` on Windows fails**: Pure layout and config tests must pass on any OS. If a test fails only on Windows, it usually means a Win32 type leaked into test setup without a `#[cfg]` guard.
 - **Mock structs outside `#[cfg(test)]` inflate binary size**: `MockWindowMover` and similar test doubles MUST be inside `#[cfg(test)]` blocks or in `tests/` — never in `src/` without the cfg guard.

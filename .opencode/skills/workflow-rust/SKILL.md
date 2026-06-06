@@ -107,13 +107,13 @@ TestEngineer (cargo test suite) ────────────────
 ## 6 — Feature Done Checklist
 
 **Rust Binary**
-- [ ] All CoderAgents: `cargo clippy --target x86_64-pc-windows-msvc -- -D warnings` clean
+- [ ] All CoderAgents: `cargo clippy -- -D warnings` clean
 - [ ] All CoderAgents: `cargo fmt --check` clean
 - [ ] All CoderAgents: related inline unit tests passing
 - [ ] TestEngineer: `cargo test` (pure) 0 failures on host
 - [ ] TestEngineer: Win32-dependent tests tagged `#[cfg(target_os = "windows")]`
 - [ ] CodeReviewer: approved
-- [ ] `cargo build --target x86_64-pc-windows-msvc --release` produces `stm.exe` (on Windows)
+- [ ] `cargo build --release` produces `stmd.exe`, `stm.exe`, `stm-watchdog.exe`
 - [ ] No `.unwrap()` / `.expect()` in production code paths
 - [ ] All public items have `///` doc comments
 - [ ] `build.rs` Windows-only guard present

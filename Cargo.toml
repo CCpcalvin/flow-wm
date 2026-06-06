@@ -44,4 +44,4 @@ lto = true
 strip = true
 
 [package.metadata.docs.rs]
-targets = ["x86_64-pc-windows-gnu"]
+targets = ["x86_64-pc-windows-msvc"]
