@@ -4,14 +4,35 @@
 //! the daemon and test infrastructure so all window operations happen on an
 //! isolated desktop instead of the user's real desktop.
 //!
-//! # Typical flow
+//! # Why Isolate?
 //!
-//! 1. Test code calls [`create_desktop`] to create a new isolated desktop.
-//! 2. Test code calls [`set_thread_desktop`] to switch the test thread.
-//! 3. Daemon is spawned with `--desktop <name>` and calls [`switch_to_desktop`].
-//! 4. Hook thread calls [`switch_to_desktop`] before registering hooks.
-//! 5. On cleanup, test code calls [`set_thread_desktop`] to restore the
-//!    original desktop and [`close_desktop`] to release the handle.
+//! Integration tests create and manipulate windows. Without isolation, these
+//! test windows would appear on the user's actual desktop, interfere with
+//! their work, and potentially break their layout. By switching to a dedicated
+//! test desktop, all test window operations are invisible to the user.
+//!
+//! # Typical Flow
+//!
+//! ```text
+//! Test code                    Daemon (stmd)              Hook Thread
+//! ┌──────────────────┐        ┌──────────────────┐      ┌──────────────────┐
+//! │ create_desktop() │        │ switch_to_        │      │ switch_to_        │
+//! │ set_thread_      │        │  desktop(name)    │      │  desktop(name)    │
+//! │  desktop(test)   │───────►│ scan_existing_    │─────►│ SetWinEventHook   │
+//! │ spawn stmd       │        │  windows()        │      │ GetMessageW loop  │
+//! │ ...run tests...  │        │ IPC loop          │      │ callback → send   │
+//! │ set_thread_      │        └──────────────────┘      └──────────────────┘
+//!  desktop(original)
+//! │ close_desktop()  │
+//! └──────────────────┘
+//! ```
+//!
+//! # Handle Lifetime
+//!
+//! - Handles from [`create_desktop`] must be closed via [`close_desktop`].
+//! - Handles from [`current_desktop`] must **not** be closed (managed by Windows).
+//! - The handle opened by [`switch_to_desktop`] is intentionally **leaked**
+//!   (see its docs for rationale).
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;

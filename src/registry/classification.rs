@@ -5,8 +5,34 @@
 //! top-to-bottom with first-match-wins semantics. Maximized and fullscreen
 //! overrides always take precedence over rules.
 //!
-//! This module is intentionally platform-independent so it can be tested without
-//! any Win32 mocking.
+//! # Design: Platform Independence
+//!
+//! This module is intentionally **platform-independent**. It accepts a
+//! [`WindowCandidate`] (a plain Rust struct with no HWND) and produces a
+//! [`WindowAction`] or [`WindowState`]. This means:
+//!
+//! - All classification logic can be **unit-tested without any Win32 mocking**.
+//! - The classification rules are pure functions — same input, same output.
+//! - The Win32 layer (which gathers window metadata) is cleanly separated
+//!   from the decision logic.
+//!
+//! # Classification Pipeline
+//!
+//! ```text
+//! WindowCandidate { exe, title, class, process_path }
+//!          │
+//!          ▼
+//! ┌─ Maximized? ──► Ignored(IgnoredReason::Maximized)    ← always wins
+//! │
+//! ├─ Fullscreen? ─► Ignored(IgnoredReason::Fullscreen)   ← always wins
+//! │
+//! └─ classify_window(candidate, rules, default)
+//!     │
+//!     ├─ Rule 1 matches? ──► rule.action    ← first match wins
+//!     ├─ Rule 2 matches? ──► rule.action
+//!     ├─ ...
+//!     └─ No match ──► default action         ← from config
+//! ```
 
 use crate::common::Rect;
 use crate::config::types::{MatchRule, WindowAction, WindowRule};
@@ -19,6 +45,14 @@ use crate::registry::types::{FloatingState, IgnoredReason, TilingState, WindowSt
 /// This is a platform-independent snapshot of window properties used by
 /// [`classify_window`] to determine the window's [`WindowAction`].
 /// The Win32 layer fills this struct; the classifier never touches HWND.
+///
+/// # Design: Decoupling from Win32
+///
+/// By using a plain data struct instead of querying Win32 directly, we:
+/// - Make classification testable without any OS dependencies.
+/// - Keep the classifier pure (no side effects, no I/O).
+/// - Allow future support for other windowing systems (X11, Wayland) by
+///   just providing a different `WindowCandidate` source.
 #[derive(Debug, Clone)]
 pub struct WindowCandidate {
     /// Executable name (e.g. `"code.exe"`).
@@ -154,17 +188,34 @@ pub fn matches_rule(candidate: &WindowCandidate, rule: &MatchRule) -> bool {
 
 /// Classify a window and produce a full [`WindowState`].
 ///
-/// Maximized and fullscreen overrides **always take precedence** over
-/// config rules — these windows are forced to
-/// [`WindowState::Ignored(IgnoredReason::Maximized)`] or
-/// [`WindowState::Ignored(IgnoredReason::Fullscreen)`] respectively.
+/// This is the high-level classification entry point that combines rule-based
+/// classification with OS-state overrides. The evaluation order is:
 ///
-/// Otherwise, delegates to [`classify_window`] and converts the resulting
-/// [`WindowAction`] into the appropriate [`WindowState`]:
+/// 1. **Maximized check** — If `is_maximized` is `true`, returns
+///    `Ignored(Maximized)` immediately. Maximised windows have their own
+///    layout and shouldn't be tiled.
 ///
-/// - [`WindowAction::Tile`]   → `WindowState::Tiling(TilingState::Active { col: 0, row: 0 })`
-/// - [`WindowAction::Float`]  → `WindowState::Floating(FloatingState::Active { rect: Rect::default() })`
-/// - [`WindowAction::Ignore`] → `WindowState::Ignored(IgnoredReason::ExplicitRule)`
+/// 2. **Fullscreen check** — If `is_fullscreen` is `true`, returns
+///    `Ignored(Fullscreen)`. Fullscreen apps (games, video players) must
+///    not be moved or resized.
+///
+/// 3. **Rule evaluation** — Delegates to [`classify_window`] for config
+///    rule matching. If no rule matches, uses `default`.
+///
+/// 4. **Action → State** — Converts the [`WindowAction`] to an initial
+///    [`WindowState`] with placeholder positions (`col: 0, row: 0` for
+///    tiling, zero-rect for floating). The layout engine will update these
+///    when the window is actually placed.
+///
+/// # Why Maximized/Fullscreen Overrides?
+///
+/// These windows have their own management behavior that conflicts with tiling:
+///
+/// - Maximized windows fill the entire work area.
+/// - Fullscreen windows cover even the taskbar.
+///
+/// Tiling either type would cause visual glitches and break the user's
+/// expectation of how these windows behave.
 #[must_use]
 pub fn classify_with_state(
     candidate: &WindowCandidate,

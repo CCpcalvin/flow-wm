@@ -4,7 +4,30 @@
 //! into a safe Rust interface. The unsafe blocks are kept to the minimum
 //! possible scope — typically a single API call.
 //!
+//! # Safety Strategy
+//!
 //! All functions return `Result` types and never panic on Win32 failures.
+//! This is a deliberate design choice:
+//!
+//! - **Window handles can become invalid at any time.** A window might be
+//!   destroyed between our `GetWindowTextLengthW` and `GetWindowTextW` calls.
+//!   All wrappers handle this gracefully (returning empty strings or errors).
+//!
+//! - **Permissions can vary.** `OpenProcess` might fail with access denied
+//!   for system processes. We handle this by falling back to `"unknown"`.
+//!
+//! - **No raw pointer leaks.** All handles (process handles) are closed via
+//!   `CloseHandle`, even on early returns.
+//!
+//! # Function Categories
+//!
+//! - **String queries**: [`get_window_text`], [`get_class_name`] — convert
+//!   UTF-16 buffers to `String`.
+//! - **Geometry**: [`get_window_rect`], [`is_fullscreen`] — window position
+//!   and size queries.
+//! - **State checks**: [`is_window_visible`], [`is_zoomed`] — boolean checks.
+//! - **Process info**: [`get_process_exe_and_path`] — executable name/path.
+//! - **Aggregator**: [`get_window_info`] — queries all metadata at once.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -29,6 +52,13 @@ use crate::common::Rect;
 /// Produced by [`get_window_info`] which calls all individual query
 /// functions and collects their results into a single struct. This is the
 /// primary input to the registry's window classification logic.
+///
+/// # Design: Single Snapshot
+///
+/// `WindowInfo` represents a point-in-time snapshot of a window's state.
+/// The actual window may change between when this struct is created and
+/// when it's used. This is acceptable for classification purposes — if the
+/// window changes, the next event will trigger re-evaluation.
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
     /// Win32 window handle.
@@ -238,6 +268,20 @@ pub fn get_window_thread_process_id(hwnd: HWND) -> Result<u32, String> {
 /// privileged access right that still permits `QueryFullProcessImageNameW`),
 /// then queries the full image path.
 ///
+/// # Handle Lifetime Management
+///
+/// The process handle is opened, used for the query, and closed within this
+/// function. `CloseHandle` is called even on early return to prevent kernel
+/// handle leaks. The `let _ = CloseHandle(...)` intentionally ignores the
+/// close result — there's nothing meaningful we can do if closing fails
+/// (the query is already complete).
+///
+/// # Why PROCESS_QUERY_LIMITED_INFORMATION?
+///
+/// We use the minimum privilege level needed. This works even for elevated
+/// processes where `PROCESS_QUERY_INFORMATION` would be denied. It's
+/// sufficient for `QueryFullProcessImageNameW`.
+///
 /// # Arguments
 ///
 /// * `pid` — Process ID.
@@ -271,9 +315,12 @@ pub fn get_process_exe_and_path(pid: u32) -> Result<(String, String), String> {
 
 /// Internal helper: queries the full image name from an open process handle.
 ///
-/// # Errors
+/// # Buffer Strategy
 ///
-/// Returns a human-readable error string if the image name cannot be queried.
+/// Starts with a 260-character buffer (classic `MAX_PATH`). If the path is
+/// longer, `QueryFullProcessImageNameW` reports the required size and we
+/// retry with a larger buffer. Modern Windows supports paths longer than
+/// 260 characters, so this retry logic is necessary for correctness.
 fn get_process_path_from_handle(
     handle: windows::Win32::Foundation::HANDLE,
 ) -> Result<(String, String), String> {
@@ -334,10 +381,27 @@ fn get_process_path_from_handle(
 /// registry initialization and event handling. It calls each individual
 /// query function and assembles the results into a single struct.
 ///
-/// Individual query failures are tolerated where possible:
-/// - `title`, `class`, `exe`, `process_path` fall back to empty/unknown on error.
-/// - `rect`, `is_fullscreen` propagate errors since they are essential for layout.
-/// - `is_visible`, `is_maximized` are direct Win32 boolean checks.
+/// # Error Tolerance Strategy
+///
+/// Individual query failures are tolerated where possible, following a
+/// "best-effort" philosophy — we'd rather have a window with partial metadata
+/// than no window at all:
+///
+/// | Query | On failure | Rationale |
+/// |-------|------------|-----------|
+/// | `title` | Empty string | Many windows have no title; not an error |
+/// | `class` | Empty string | Rare but not critical for classification |
+/// | `rect` | **Propagate error** | Essential for layout; can't tile without position |
+/// | `is_fullscreen` | `false` | False negative is better than failing entirely |
+/// | `exe`/`process_path` | `"unknown"`/empty | Access denied for system processes is common |
+///
+/// # Design: Why Aggregate?
+///
+/// Rather than having each consumer call individual query functions, we
+/// aggregate everything into `WindowInfo` once. This:
+/// - Reduces the number of Win32 API calls (each call has overhead).
+/// - Provides a consistent snapshot (no TOCTOU between queries).
+/// - Simplifies the consumer API (one function call, one result type).
 ///
 /// # Arguments
 ///

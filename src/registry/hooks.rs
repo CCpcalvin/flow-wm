@@ -2,8 +2,26 @@
 //!
 //! This module registers Win32 event hooks via [`SetWinEventHook`] on a
 //! dedicated background thread. Events are forwarded to the main thread
-//! through an [`mpsc`](std::sync::mpsc) channel and processed by
+//! through an [`mpsc`] channel and processed by
 //! [`WindowRegistry::process_pending_events`](super::WindowRegistry::process_pending_events).
+//!
+//! # Why a Background Thread?
+//!
+//! `SetWinEventHook` with `WINEVENT_OUTOFCONTEXT` requires the calling thread
+//! to run a Windows message loop (`GetMessageW`). This is incompatible with
+//! the IPC thread's named-pipe message loop. By running the hook on its own
+//! thread, we isolate the two message loops and avoid conflicts.
+//!
+//! # Event Flow
+//!
+//! ```text
+//! Windows OS                    Hook Thread                   IPC Thread
+//! ┌──────────┐    callback    ┌──────────────┐   send()    ┌────────────────┐
+//! │ SetWin-  │──────────────►│ hook_callback │────────────►│ process_pending │
+//! │ EventHook│               │              │             │ _events()       │
+//! └──────────┘               └──────────────┘             │ try_recv()      │
+//!                                                          └────────────────┘
+//! ```
 //!
 //! # Threading Model
 //!
@@ -14,6 +32,29 @@
 //!       ↑ receiver.try_recv()             ↓ callback
 //!       │                           sender.send(HookEvent)
 //! ```
+//!
+//! # Hook Registration
+//!
+//! Three hooks are registered as event ranges:
+//!
+//! | Hook | Event Range | Purpose |
+//! |------|-------------|---------|
+//! | CREATE/DESTROY | `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` | Window lifecycle |
+//! | FOREGROUND | `EVENT_SYSTEM_FOREGROUND` | Focus changes |
+//! | MINIMIZE | `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` | Minimize/restore |
+//!
+//! # Cleanup
+//!
+//! The hook thread runs until [`HookThreadHandle::stop()`] is called (or the
+//! handle is dropped), which posts `WM_QUIT` to the hook thread's message loop.
+//! On exit, all hooks are unregistered via `UnhookWinEvent`.
+//!
+//! # Test Isolation
+//!
+//! The optional `desktop_name` parameter allows the hook thread to switch to
+//! a test desktop before registering hooks. This ensures hooks only fire for
+//! windows on the test desktop, preventing interference with the user's real
+//! windows during integration tests.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -53,9 +94,19 @@ const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 ///
 /// Each variant carries the window handle as an `isize` (the raw HWND value)
 /// for `Send` safety — `HWND` itself is `!Send` because it wraps `*mut c_void`.
+/// The IPC thread converts these back to `HWND` when processing events.
 ///
-/// The main thread drains these events via
-/// [`WindowRegistry::process_pending_events`](super::WindowRegistry::process_pending_events).
+/// # Event Sources
+///
+/// These events are produced by the hook callback on the background thread
+/// and consumed by [`WindowRegistry::process_pending_events`](super::WindowRegistry::process_pending_events)
+/// on the IPC thread via an `mpsc` channel.
+///
+/// # Filtering
+///
+/// The callback filters by `OBJID_WINDOW` to only process events for actual
+/// top-level windows (not child controls like buttons or text fields).
+/// Unrecognized event IDs within the registered ranges are silently ignored.
 #[derive(Debug)]
 pub enum HookEvent {
     /// A new window appeared (`EVENT_OBJECT_CREATE`).
@@ -89,17 +140,31 @@ pub enum HookEvent {
 
 /// Module-level sender used by the hook callback.
 ///
-/// `SetWinEventHook` does not support user-data in its callback, so we
-/// store the sender in a `OnceLock` that the callback reads. This is set
-/// exactly once when the hook thread starts.
+/// `SetWinEventHook` does not support passing user-data in its callback, so
+/// we cannot pass the `Sender<HookEvent>` directly. Instead, we store it in
+/// a `OnceLock` that the callback reads. This is set exactly once when the
+/// hook thread starts (in [`start_hook_thread`]).
+///
+/// # Safety
+///
+/// `OnceLock` provides safe one-time initialization. The sender is set before
+/// any hooks are registered, so the callback will always find it populated.
+/// The sender is `Send + Sync`, so reading it from the hook thread is safe.
 static HOOK_SENDER: OnceLock<Sender<HookEvent>> = OnceLock::new();
 
 // ── HookThreadHandle ─────────────────────────────────────────────────
 
 /// Handle to the background hook thread.
 ///
-/// Dropping this handle signals the hook thread to stop by posting
-/// `WM_QUIT` to its message loop.
+/// Dropping this handle signals the hook thread to stop by posting `WM_QUIT`
+/// to its message loop. The hook thread will then unregister all hooks and
+/// exit cleanly.
+///
+/// # Design: RAII Cleanup
+///
+/// The `Drop` impl ensures the hook thread is always stopped, even if the
+/// daemon crashes or the handle goes out of scope unexpectedly. This prevents
+/// orphaned hook threads from lingering after the daemon exits.
 pub struct HookThreadHandle {
     os_thread_id: u32,
 }

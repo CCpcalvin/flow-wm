@@ -1,9 +1,97 @@
 //! Core window registry — authoritative source of truth for all tracked windows.
 //!
-//! [`WindowRegistry`] maintains a `HashMap` of all windows the daemon is aware
-//! of, keyed by their Win32 `HWND` value (stored as `isize` for `Send` safety).
-//! It provides methods for initialization scanning, event-driven updates, and
-//! JSON serialization for the query API.
+//! [`WindowRegistry`] is the central data structure that tracks every window
+//! the daemon is aware of. It is the **single source of truth** for window
+//! metadata, classification state, and focus tracking.
+//!
+//! # Data Structure
+//!
+//! The registry maintains a `HashMap<isize, Window>` keyed by the Win32 `HWND`
+//! value stored as `isize`. This design choice (rather than using `HWND` directly)
+//! is deliberate:
+//!
+//! - `HWND` wraps `*mut c_void` and is `!Send` — it cannot be transferred
+//!   across thread boundaries.
+//! - `isize` is `Send + Sync + Hash + Eq` — it works as a HashMap key and can
+//!   be sent through channels safely.
+//! - The conversion is trivial: `hwnd.0 as isize` / `HWND(val as *mut _)`.
+//!
+//! # Threading Model
+//!
+//! The registry is wrapped in `Arc<Mutex<WindowRegistry>>` and shared between
+//! two threads:
+//!
+//! ```text
+//! IPC Thread (main):              Hook Thread (background):
+//!   lock(registry)                  SetWinEventHook ×3
+//!   ├─ process_pending_events()     GetMessageW loop
+//!   │    └─ try_recv() from mpsc        ↓ callback
+//!   ├─ dispatch IPC command         sender.send(HookEvent)
+//!   ├─ process_pending_events()
+//!   └─ ... (repeat)
+//! ```
+//!
+//! The **hook thread never locks the mutex**. It sends typed [`HookEvent`]s
+//! through a non-blocking `mpsc` channel. The IPC thread drains these events
+//! under its `MutexGuard` and applies all state transitions. This design:
+//!
+//! - Eliminates deadlocks (only one thread ever holds the lock).
+//! - Keeps HWND dereferencing on the IPC thread (which owns the `MutexGuard`).
+//! - Makes the hook callback fast and non-blocking (`try_recv` on the other end).
+//!
+//! # Initialization Flow
+//!
+//! ```text
+//! 1. WindowRegistry::new(config)
+//!    └─ stores default_action + window_rules from config
+//!
+//! 2. scan_existing_windows()
+//!    └─ EnumWindows → for each visible, top-level, titled window:
+//!       ├─ get_window_info(hwnd)
+//!       └─ register_window_from_info(info)
+//!          ├─ classify_with_state(candidate, is_max, is_fs, rules, default)
+//!          └─ insert into HashMap
+//!
+//! 3. start_hook_thread()
+//!    └─ background thread registers WinEvent hooks
+//!       └─ sends HookEvent::Created/Destroyed/Foreground/MinimizeStart/MinimizeEnd
+//!
+//! 4. IPC loop:
+//!    └─ each iteration:
+//!       ├─ process_pending_events(receiver)  ← drain hook events
+//!       └─ dispatch IPC command              ← handle CLI request
+//! ```
+//!
+//! # State Transitions
+//!
+//! When a hook event arrives, the registry applies a state transition:
+//!
+//! | Event | Method | Transition |
+//! |-------|--------|------------|
+//! | `Created` | `handle_created` | New window → classify → register |
+//! | `Destroyed` | `remove_window` | Remove from HashMap, clear focus if needed |
+//! | `Foreground` | `set_focused` | Update `focused` field (only if tracked) |
+//! | `MinimizeStart` | `minimize_window` | `Active` → `Minimized`, save virtual slot |
+//! | `MinimizeEnd` | `restore_window` | `Minimized` → `Active`, restore virtual slot |
+//!
+//! # Design Decision: No Win32 in State Transitions
+//!
+//! All state transition methods (`minimize_window`, `restore_window`, etc.)
+//! are **pure data transformations** on the `Window` struct. They do not call
+//! any Win32 APIs. This is intentional:
+//!
+//! - State transitions only mutate the registry's in-memory state.
+//! - Win32 calls (`SetWindowPos`, `MoveWindow`) are the compositor's job,
+//!   not the registry's.
+//! - This makes the registry's state machine testable without Win32 mocking.
+//!
+//! # Design Decision: Idempotent Registration
+//!
+//! `register_window_from_info` is idempotent —
+//! if the window is already tracked, it returns early without modifying the
+//! existing entry. This is critical because both the init scan and hook events
+//! can race to register the same window. The first registration wins, and the
+//! window's classification and state are preserved.
 
 use std::collections::HashMap;
 
@@ -19,14 +107,37 @@ use super::win32;
 
 /// The authoritative source of truth for every window the daemon is aware of.
 ///
-/// The registry is updated via two paths:
-/// 1. **Initialization** — [`scan_existing_windows`](Self::scan_existing_windows) enumerates
-///    all current top-level windows on the desktop.
-/// 2. **Events** — [`process_pending_events`](Self::process_pending_events) drains the
-///    WinEvent hook channel and applies state transitions.
+/// `WindowRegistry` owns a `HashMap<isize, Window>` containing every tracked
+/// window, along with the currently focused window handle and the classification
+/// rules loaded from config.
 ///
-/// The registry is shared between the IPC thread (reads for queries) and the
-/// WinEvent hook thread (writes on events) via `Arc<Mutex<WindowRegistry>>`.
+/// # How Windows Enter and Leave the Registry
+///
+/// Windows enter via two paths:
+/// 1. **Initialization scan** — [`scan_existing_windows`](Self::scan_existing_windows)
+///    enumerates all current top-level windows via `EnumWindows`.
+/// 2. **Live events** — [`process_pending_events`](Self::process_pending_events)
+///    receives `HookEvent::Created` from the WinEvent hook thread.
+///
+/// Windows leave when `HookEvent::Destroyed` is received (via
+/// [`remove_window`](Self::remove_window)).
+///
+/// # Threading
+///
+/// Shared via `Arc<Mutex<WindowRegistry>>` between:
+/// - **IPC thread** — locks to process events and answer queries.
+/// - **Hook thread** — never locks; sends events through an `mpsc` channel.
+///
+/// See the [module-level documentation](super) for the full threading diagram.
+///
+/// # Fields
+///
+/// - `windows` — The primary data store. Keyed by `HWND` as `isize` for
+///   `Send` safety (see [module-level docs](super) for rationale).
+/// - `focused` — The HWND value of the currently focused window, or `None`.
+///   Only updated when the focused window is already tracked in the registry.
+/// - `default_action` — From `StmConfig`; used when no window rule matches.
+/// - `window_rules` — Ordered list from `StmConfig`; first match wins.
 pub struct WindowRegistry {
     /// All tracked windows, keyed by HWND value (`isize` for `Send` safety).
     windows: HashMap<isize, Window>,
@@ -55,13 +166,26 @@ impl WindowRegistry {
 
     /// Scans all existing top-level windows and registers them.
     ///
-    /// Called once at daemon startup to build the initial registry state.
-    /// Only registers windows that are visible, have no owner (top-level),
-    /// and have a non-empty title.
+    /// Called once at daemon startup to build the initial registry state
+    /// **before** the hook thread starts. This ensures the registry is
+    /// populated before any live events arrive.
+    ///
+    /// # Filtering
+    ///
+    /// Only registers windows that pass all three filters:
+    /// 1. **Visible** — `IsWindowVisible(hwnd)` returns `true`.
+    /// 2. **No owner** — `GetWindow(hwnd, GW_OWNER)` returns null (top-level only).
+    /// 3. **Non-empty title** — `GetWindowTextW` returns a non-empty string.
+    ///
+    /// These filters exclude dialogs, popups, tool windows, and invisible
+    /// containers (like the Windows desktop window).
+    ///
+    /// # Graceful Degradation
     ///
     /// If `EnumWindows` fails (e.g., on an isolated test desktop where the
     /// process lacks access), logs a warning and returns `Ok(())` — the
-    /// hook thread will still catch windows via events.
+    /// hook thread will still catch windows via live events. This means the
+    /// daemon can function even without a successful init scan.
     pub fn scan_existing_windows(&mut self) -> Result<(), String> {
         match enum_toplevel_windows() {
             Ok(hwnds) => {
@@ -98,8 +222,26 @@ impl WindowRegistry {
 
     /// Classifies and registers a window based on its Win32 metadata.
     ///
-    /// If the window is already registered, this is a no-op (the existing
-    /// entry is preserved).
+    /// This is the shared registration path used by both the init scan and
+    /// live event handling. It:
+    /// 1. Builds a [`WindowCandidate`](super::classification::WindowCandidate) from the window info.
+    /// 2. Classifies it via [`classify_with_state`](super::classification::classify_with_state)
+    ///    (applying rules, maximized/fullscreen overrides).
+    /// 3. Creates a [`Window`] entry and inserts it into the HashMap.
+    ///
+    /// # Idempotency
+    ///
+    /// If the window is already registered, this is a **no-op** — the existing
+    /// entry is preserved unchanged. This is critical because both the init scan
+    /// and `EVENT_OBJECT_CREATE` can race to register the same window. The first
+    /// registration wins.
+    ///
+    /// # Design: Why Separate Classification from Registration?
+    ///
+    /// Classification is done by the [`super::classification`] module,
+    /// which is pure Rust with no Win32 dependencies. Registration is done here,
+    /// where we have access to the HashMap. This separation means classification
+    /// can be unit-tested without any Win32 mocking.
     pub fn register_window_from_info(&mut self, info: &win32::WindowInfo) {
         let key = hwnd_key(info.hwnd);
         if self.windows.contains_key(&key) {
@@ -137,8 +279,15 @@ impl WindowRegistry {
 
     /// Removes a window from the registry.
     ///
-    /// Called when `EVENT_OBJECT_DESTROY` is received. If the window was
-    /// focused, clears the focus.
+    /// Called when `EVENT_OBJECT_DESTROY` is received. If the removed window
+    /// was focused, clears the `focused` field to `None`. This prevents a
+    /// dangling focus reference to a destroyed window.
+    ///
+    /// # Note
+    ///
+    /// This only removes the window from the registry. It does **not** notify
+    /// the layout engine — that coordination happens at a higher level in the
+    /// daemon's event loop.
     pub fn remove_window(&mut self, hwnd_val: isize) {
         if let Some(window) = self.windows.remove(&hwnd_val) {
             log::info!("removed window: (isize={hwnd_val}) ({})", window.exe);
@@ -152,7 +301,16 @@ impl WindowRegistry {
 
     /// Updates the focused window handle.
     ///
-    /// Called when `EVENT_SYSTEM_FOREGROUND` is received.
+    /// Called when `EVENT_SYSTEM_FOREGROUND` is received. Only updates the
+    /// `focused` field if the window is already tracked in the registry —
+    /// untracked windows (e.g., system dialogs) are silently ignored.
+    ///
+    /// # Design Decision: Ignore Untracked Windows
+    ///
+    /// The Windows OS fires `EVENT_SYSTEM_FOREGROUND` for any window that
+    /// gains focus, including windows stm doesn't manage (like the taskbar
+    /// or system dialogs). By checking `contains_key`, we avoid recording
+    /// focus for windows that aren't in our registry.
     pub fn set_focused(&mut self, hwnd_val: isize) {
         if self.windows.contains_key(&hwnd_val) {
             self.focused = Some(hwnd_val);
@@ -164,8 +322,26 @@ impl WindowRegistry {
 
     /// Transitions a window to minimized state.
     ///
-    /// Called when `EVENT_SYSTEM_MINIMIZESTART` is received. Preserves the
-    /// window's virtual slot for future restore.
+    /// Called when `EVENT_SYSTEM_MINIMIZESTART` is received. The transition
+    /// depends on the window's current state:
+    ///
+    /// - **Tiling::Active { col, row }** → saves the virtual slot to
+    ///   `last_virtual_slot`, transitions to `Tiling::Minimized`.
+    /// - **Floating::Active { .. }** → transitions to `Floating::Minimized`.
+    /// - **Already minimized or ignored** → no-op (returns early).
+    ///
+    /// # Design: Why Save the Virtual Slot?
+    ///
+    /// When a tiled window is minimized, its position in the layout grid
+    /// (`col`, `row`) is saved into [`last_virtual_slot`](super::types::Window::last_virtual_slot).
+    /// When the window is restored, this slot is used to place it back at
+    /// its original position — the user doesn't lose their window arrangement.
+    ///
+    /// # Borrow Checker Workaround
+    ///
+    /// The col/row values are copied before the mutable borrow to avoid a
+    /// borrow conflict: we need to read `window.state` and write to
+    /// `window.last_virtual_slot` simultaneously.
     pub fn minimize_window(&mut self, hwnd_val: isize) {
         if let Some(window) = self.windows.get_mut(&hwnd_val) {
             // Copy col/row before mutating to avoid borrow conflict.
@@ -191,8 +367,22 @@ impl WindowRegistry {
 
     /// Transitions a minimized window back to active state.
     ///
-    /// Called when `EVENT_SYSTEM_MINIMIZEEND` is received. Restores the
-    /// window to its previous sub-state (tiling or floating).
+    /// Called when `EVENT_SYSTEM_MINIMIZEEND` is received. The restore logic
+    /// depends on the window's previous state:
+    ///
+    /// - **Tiling::Minimized** → restores to `Tiling::Active { col, row }` using
+    ///   the saved `last_virtual_slot`. If no slot was saved (edge case),
+    ///   defaults to `(0, 0)`.
+    /// - **Floating::Minimized** → restores to `Floating::Active { rect }` using
+    ///   the `pre_manage_rect` (the window's position before stm managed it).
+    /// - **Not minimized** → no-op (returns early).
+    ///
+    /// # Design: Why Default to (0, 0)?
+    ///
+    /// If `last_virtual_slot` is `None` (which shouldn't happen in normal
+    /// operation but could occur due to a race), we default to column 0,
+    /// row 0. This ensures the window always gets a valid tiling position
+    /// rather than being lost.
     pub fn restore_window(&mut self, hwnd_val: isize) {
         if let Some(window) = self.windows.get_mut(&hwnd_val) {
             let new_state = match &window.state {
@@ -277,9 +467,24 @@ impl WindowRegistry {
 
     /// Drains all pending hook events and applies them to the registry.
     ///
-    /// This must be called periodically from the IPC thread (which owns the
-    /// `MutexGuard`) to process events queued by the WinEvent hook thread.
-    /// Uses `try_recv` for non-blocking operation.
+    /// This is the **main event dispatch loop** for the registry. It must be
+    /// called periodically from the IPC thread (which owns the `MutexGuard`)
+    /// to process events queued by the WinEvent hook thread.
+    ///
+    /// Uses `try_recv` for non-blocking operation — if no events are pending,
+    /// returns immediately. This ensures the IPC loop never blocks waiting
+    /// for events; it processes whatever is available and moves on to the
+    /// next IPC command.
+    ///
+    /// # Event Dispatch Table
+    ///
+    /// | Event | Handler | Effect |
+    /// |-------|---------|--------|
+    /// | `Created` | `handle_created` | Query info → classify → register |
+    /// | `Destroyed` | [`remove_window`](Self::remove_window) | Remove from HashMap, clear focus |
+    /// | `Foreground` | [`set_focused`](Self::set_focused) | Update focused HWND |
+    /// | `MinimizeStart` | [`minimize_window`](Self::minimize_window) | Active → Minimized, save slot |
+    /// | `MinimizeEnd` | [`restore_window`](Self::restore_window) | Minimized → Active, restore slot |
     pub fn process_pending_events(&mut self, receiver: &std::sync::mpsc::Receiver<HookEvent>) {
         while let Ok(event) = receiver.try_recv() {
             match event {
@@ -302,9 +507,24 @@ impl WindowRegistry {
         }
     }
 
-    /// Handles a window creation event.
+    /// Handles a window creation event from the WinEvent hook.
     ///
-    /// Gathers window info, classifies, and registers if appropriate.
+    /// This is the live-event counterpart to the init scan's
+    /// [`scan_existing_windows`](Self::scan_existing_windows). It:
+    /// 1. Skips if already tracked (idempotent, same as init scan).
+    /// 2. Skips invisible windows (no `WS_VISIBLE` style).
+    /// 3. Skips windows with empty titles (background containers).
+    /// 4. Skips windows with an owner (dialogs, popups — not top-level).
+    /// 5. Gathers full window info via [`win32::get_window_info`].
+    /// 6. Delegates to [`register_window_from_info`](Self::register_window_from_info).
+    ///
+    /// # Why Re-check Visibility and Title?
+    ///
+    /// The init scan checks these same conditions, but we re-check here because
+    /// a window's state can change between the init scan and the first
+    /// `EVENT_OBJECT_CREATE`. A window might be created invisible and then shown,
+    /// or shown and then hidden. The WinEvent hook catches the creation event
+    /// regardless, so we filter at registration time.
     fn handle_created(&mut self, hwnd_val: isize) {
         if self.windows.contains_key(&hwnd_val) {
             return; // Already tracked.
@@ -339,11 +559,25 @@ impl WindowRegistry {
 }
 
 /// Converts an `HWND` to the `isize` key used in the HashMap.
+///
+/// This is the bridge between the Win32 world (`HWND` = `*mut c_void`) and
+/// the registry's HashMap (`isize` keys). The conversion is lossless because
+/// HWND values fit within `isize` on both 32-bit and 64-bit Windows.
+///
+/// # Why `isize` and not `HWND`?
+///
+/// `HWND` wraps a raw pointer and is `!Send`. Storing `isize` allows the
+/// registry to be shared across threads via `Arc<Mutex<>>`, and allows
+/// window IDs to be sent through `mpsc` channels in [`HookEvent`](super::HookEvent).
 fn hwnd_key(hwnd: HWND) -> isize {
     hwnd.0 as isize
 }
 
 /// Converts a `WindowState` to a JSON value for the query API.
+///
+/// This produces a human-readable JSON representation of each state variant,
+/// suitable for the `QueryWindowsAll` IPC command. The format uses nested
+/// objects to match the Rust enum structure (e.g., `{"Tiling": {"Active": ...}}`).
 fn state_to_json(state: &WindowState) -> serde_json::Value {
     match state {
         WindowState::Tiling(TilingState::Active { col, row }) => {
@@ -372,6 +606,11 @@ fn state_to_json(state: &WindowState) -> serde_json::Value {
 
 /// Checks if a window has an owner (i.e., is not top-level).
 ///
+/// Many Win32 windows are actually child windows or owned dialogs. We only
+/// track top-level windows (those without an owner) because:
+/// - Owned windows (dialogs, popups) have their position managed by their owner.
+/// - Including them would double-count application windows.
+///
 /// `GetWindow(hwnd, GW_OWNER)` may return `Ok(HWND(null))` for ownerless
 /// windows, so we must check the handle value, not just `is_ok()`.
 fn has_owner(hwnd: HWND) -> bool {
@@ -383,11 +622,23 @@ fn has_owner(hwnd: HWND) -> bool {
 
 /// Enumerates all top-level windows using `EnumWindows`.
 ///
-/// Returns a `Vec<HWND>` of all top-level window handles.
+/// `EnumWindows` calls the provided callback once for each top-level window
+/// in the system. We pass a raw pointer to a `Vec<HWND>` through `LPARAM`
+/// to collect all handles.
+///
+/// Returns a `Vec<HWND>` of all top-level window handles, which is then
+/// filtered by [`scan_existing_windows`](WindowRegistry::scan_existing_windows).
 ///
 /// # Errors
 ///
-/// Returns an error string if `EnumWindows` fails.
+/// Returns an error string if `EnumWindows` fails (extremely rare — typically
+/// only happens in sandboxed environments or during system shutdown).
+///
+/// # Safety
+///
+/// The `LPARAM` carries a raw pointer to a `Vec<HWND>` allocated on the
+/// caller's stack. The callback dereferences this pointer — the caller must
+/// ensure the `Vec` outlives the enumeration.
 fn enum_toplevel_windows() -> Result<Vec<HWND>, String> {
     let mut collected: Vec<HWND> = Vec::new();
     let ptr = &mut collected as *mut Vec<HWND>;
@@ -403,9 +654,19 @@ fn enum_toplevel_windows() -> Result<Vec<HWND>, String> {
 
 /// Callback for `EnumWindows`. Appends each `HWND` to the `Vec` passed via `LPARAM`.
 ///
+/// This is called by Windows once per top-level window. The return value
+/// controls whether enumeration continues:
+/// - `BOOL(1)` → continue enumerating.
+/// - `BOOL(0)` → stop enumerating (we never do this).
+///
 /// # Safety
 ///
-/// The `l_param` must be a valid pointer to a `Vec<HWND>` created by the caller.
+/// The `l_param` must be a valid pointer to a `Vec<HWND>` created by the
+/// caller in [`enum_toplevel_windows`]. The pointer is valid for the duration
+/// of the `EnumWindows` call because the `Vec` is on the caller's stack.
+///
+/// This function is `extern "system"` (stdcall calling convention) as required
+/// by the Win32 `EnumWindows` API.
 unsafe extern "system" fn enum_windows_callback(
     hwnd: HWND,
     l_param: LPARAM,
