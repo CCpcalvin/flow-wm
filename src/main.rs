@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
-use scrolling_tiling_manager::config::{StmConfig, dirs, load_default_rules, load_rules_config};
+use scrolling_tiling_manager::config::{
+    dirs, init_config_dir, load_app_config, load_default_rules, load_rules_config,
+};
 use scrolling_tiling_manager::ipc::transport::PipeServer;
 use scrolling_tiling_manager::ipc::{SocketMessage, dispatch_with_registry};
 use scrolling_tiling_manager::registry::{WindowRegistry, hooks};
@@ -26,6 +28,11 @@ use scrolling_tiling_manager::registry::desktop;
 #[command(name = "stmd", version, about = "ScrollingTilingManager daemon")]
 #[command(propagate_version = true)]
 struct Args {
+    /// Config directory path. Overrides `STM_CONFIG_DIR` env var and default path.
+    /// Usually set by `stm start --config` which passes it via `STM_CONFIG_DIR`.
+    #[arg(long)]
+    config: Option<String>,
+
     /// Desktop name for test mode (opens and switches to this desktop).
     /// Only available in debug builds.
     #[cfg(debug_assertions)]
@@ -53,19 +60,35 @@ fn main() {
 ///
 /// Returns on `Stop` command or fatal error.
 fn run_daemon(args: Args) -> Result<(), String> {
-    // In release builds, Args has no fields, so suppress unused-variable warning.
-    let _ = &args;
     // 1. Optional: switch to test desktop (debug builds only).
     #[cfg(debug_assertions)]
     if let Some(ref desktop_name) = args.desktop {
         desktop::switch_to_desktop(desktop_name)?;
     }
 
-    // 2. Load config (TODO: load app config from file).
-    let _app_config = StmConfig::default();
+    // 2. Resolve config directory using the priority chain:
+    //    --config flag > STM_CONFIG_DIR env var > ~/.config/stm/ default.
+    let config_dir = dirs::resolve_config_dir(args.config.as_deref().map(std::path::Path::new));
+    log::info!("using config directory: {}", config_dir.display());
+
+    // Ensure default config files exist (idempotent — safe to call every startup).
+    if let Err(e) = init_config_dir(&config_dir) {
+        log::warn!(
+            "could not initialize config dir {}: {e}",
+            config_dir.display()
+        );
+        // Not fatal — daemon can run with defaults.
+    }
+
+    // Load application config from stm.yml (returns defaults on any error).
+    // TODO(config-wiring): wire _app_config into MutationConfig so layout engine
+    // uses values from the user's stm.yml (column_width, padding, animation, etc.).
+    // Loading is in place; behavioral wiring is tracked separately.
+    let app_config_path = dirs::user_app_config_path_in(&config_dir);
+    let _app_config = load_app_config(&app_config_path);
 
     // Load window rules from user config and bundled defaults.
-    let user_rules_path = dirs::user_rules_path();
+    let user_rules_path = dirs::user_rules_path_in(&config_dir);
     let user_rules = load_rules_config(&user_rules_path);
     let default_rules = load_default_rules();
 

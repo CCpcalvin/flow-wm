@@ -9,10 +9,11 @@
 //! Configuration is split across two YAML files:
 //!
 //! - **`stm.yml`** ([`StmConfig`]) — Application settings (hotkeys, padding,
-//!   animation, etc.). Loaded from `%APPDATA%\stm\stm.yml`.
+//!   animation, etc.). Loaded from `%USERPROFILE%\.config\stm\stm.yml`
+//!   (see [`config::dirs`](crate::config::dirs) for the full resolution chain).
 //!
 //! - **`stm-rules.yml`** ([`WindowRulesConfig`]) — Window classification rules
-//!   and default action. Loaded from `%APPDATA%\stm\stm-rules.yml`.
+//!   and default action. Loaded from `%USERPROFILE%\.config\stm\stm-rules.yml`.
 //!
 //! This separation allows users to edit rules frequently (adding ignore patterns
 //! for new apps) without risk of corrupting their app settings, and vice versa.
@@ -22,8 +23,10 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level application configuration structure.
 ///
-/// Loaded from `%APPDATA%\stm\stm.yml`. Every field has a default, so even an
-/// empty YAML file `{}` produces a valid config.
+/// Loaded from `%USERPROFILE%\.config\stm\stm.yml` (see [`config::dirs`](crate::config::dirs)
+/// for the full resolution chain including `--config` flag and `STM_CONFIG_DIR` env var
+/// overrides). Every field has a default, so even an empty YAML file `{}` produces
+/// a valid config.
 ///
 /// This struct contains **application settings only** — hotkeys, padding,
 /// animation, etc. Window classification rules live in a separate file
@@ -402,7 +405,8 @@ pub enum WindowAction {
 /// This is the user-facing window rules file. Rules are evaluated top-to-bottom,
 /// first match wins. If no rule matches, `default_action` is used.
 ///
-/// Loaded from `%APPDATA%\stm\stm-rules.yml`. If the file doesn't exist,
+/// Loaded from `%USERPROFILE%\.config\stm\stm-rules.yml` (see [`config::dirs`](crate::config::dirs)
+/// for overrides). If the file doesn't exist,
 /// defaults to an empty rule list with `default_action: tile`.
 ///
 /// # Example
