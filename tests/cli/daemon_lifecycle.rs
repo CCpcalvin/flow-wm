@@ -7,9 +7,7 @@
 //! - `stm stop` fails with "not running" when no daemon is present.
 //!
 //! Each test gets a unique pipe name so they can run in parallel without
-//! interference. All tests are Windows-only (named-pipe IPC).
-
-#![cfg(target_os = "windows")]
+//! interference. All tests use named-pipe IPC.
 
 use predicates::prelude::*;
 

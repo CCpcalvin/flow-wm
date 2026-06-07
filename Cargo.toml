@@ -26,7 +26,6 @@ log = "0.4"
 env_logger = "0.11.10"
 clap = { version = "4.6.1", features = ["derive"] }
 
-[target.'cfg(target_os = "windows")'.dependencies]
 # Win32 bindings. Feature flags are transitive gates that enable functions
 # in other modules (e.g., Win32_System_IO gates ReadFile/WriteFile/ConnectNamedPipe;
 # Win32_Security gates CreateFileW/CreateNamedPipeW).

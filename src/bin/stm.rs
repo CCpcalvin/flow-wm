@@ -12,19 +12,17 @@
 //! stm query windows   List all tracked windows
 //! ```
 
-#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
 use scrolling_tiling_manager::ipc::message::SocketMessage;
-#[cfg(target_os = "windows")]
 use scrolling_tiling_manager::ipc::message::SocketResponse;
-#[cfg(target_os = "windows")]
 use scrolling_tiling_manager::ipc::transport;
 
 /// Maximum time to wait for the daemon to become ready after spawning.
-#[cfg(target_os = "windows")]
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
@@ -78,23 +76,15 @@ fn main() {
 
 /// Start the daemon and wait for it to become ready.
 fn cmd_start() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        if transport::is_daemon_running() {
-            return Err("daemon is already running".into());
-        }
-
-        spawn_daemon()?;
-        wait_for_daemon()?;
-
-        println!("stm: daemon started");
-        Ok(())
+    if transport::is_daemon_running() {
+        return Err("daemon is already running".into());
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("stm start is only supported on Windows".into())
-    }
+    spawn_daemon()?;
+    wait_for_daemon()?;
+
+    println!("stm: daemon started");
+    Ok(())
 }
 
 /// Send a Stop message to the daemon.
@@ -121,56 +111,39 @@ fn cmd_query(command: QueryCommands) -> Result<(), String> {
 
 /// List all tracked windows from the daemon.
 fn cmd_query_windows() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let response = transport::send_message(&SocketMessage::QueryWindowsAll)
-            .map_err(|e| format!("failed to send command: {e}"))?;
+    let response = transport::send_message(&SocketMessage::QueryWindowsAll)
+        .map_err(|e| format!("failed to send command: {e}"))?;
 
-        match response {
-            SocketResponse::Data { payload } => {
-                let formatted =
-                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-                println!("{formatted}");
-                Ok(())
-            }
-            SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
-            SocketResponse::Ok => {
-                println!("stm: ok");
-                Ok(())
-            }
+    match response {
+        SocketResponse::Data { payload } => {
+            let formatted =
+                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+            println!("{formatted}");
+            Ok(())
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("IPC commands are only supported on Windows".into())
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Ok => {
+            println!("stm: ok");
+            Ok(())
+        }
     }
 }
 
 /// Send a command to the daemon and print a success message on Ok.
 fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let response =
-            transport::send_message(&msg).map_err(|e| format!("failed to send command: {e}"))?;
+    let response =
+        transport::send_message(&msg).map_err(|e| format!("failed to send command: {e}"))?;
 
-        match response {
-            SocketResponse::Ok => {
-                println!("stm: {success_msg}");
-                Ok(())
-            }
-            SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
-            SocketResponse::Data { .. } => {
-                println!("stm: {success_msg}");
-                Ok(())
-            }
+    match response {
+        SocketResponse::Ok => {
+            println!("stm: {success_msg}");
+            Ok(())
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (msg, success_msg);
-        Err("IPC commands are only supported on Windows".into())
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Data { .. } => {
+            println!("stm: {success_msg}");
+            Ok(())
+        }
     }
 }
 
@@ -186,11 +159,7 @@ fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
 ///
 /// Falls back to a plain `spawn()` when the detached spawn fails (e.g., under
 /// WSL interop).
-#[cfg(target_os = "windows")]
 fn spawn_daemon() -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
     let exe = find_daemon_exe()?;
 
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
@@ -211,7 +180,6 @@ fn spawn_daemon() -> Result<(), String> {
 }
 
 /// Locate the `stmd.exe` binary next to the current executable.
-#[cfg(target_os = "windows")]
 fn find_daemon_exe() -> Result<std::path::PathBuf, String> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("cannot determine current executable: {e}"))?;
@@ -233,7 +201,6 @@ fn find_daemon_exe() -> Result<std::path::PathBuf, String> {
 /// Polls [`transport::is_daemon_running`] (which connects and immediately
 /// drops the handle) until the daemon has created the pipe and entered its
 /// accept loop, or the timeout expires.
-#[cfg(target_os = "windows")]
 fn wait_for_daemon() -> Result<(), String> {
     let deadline = std::time::Instant::now() + DAEMON_START_TIMEOUT;
     loop {
@@ -320,10 +287,9 @@ mod tests {
         assert!(result.is_err(), "empty args should fail");
     }
 
-    // --- WaitNamedPipeW / wait_for_daemon wiring tests ---
+    // --- DAEMON_START_TIMEOUT wiring tests ---
 
     // Positive: DAEMON_START_TIMEOUT is a reasonable bounded value
-    #[cfg(target_os = "windows")]
     #[test]
     fn daemon_start_timeout_is_reasonable() {
         // Arrange — the constant exists and is accessible
@@ -340,7 +306,6 @@ mod tests {
     }
 
     // Negative: DAEMON_START_TIMEOUT is not zero (would mean no wait)
-    #[cfg(target_os = "windows")]
     #[test]
     fn daemon_start_timeout_is_not_zero() {
         assert_ne!(
@@ -351,20 +316,16 @@ mod tests {
     }
 
     // Positive: wait_for_daemon() correctly wraps transport::wait_for_pipe errors.
-    // On Windows CI, this verifies the error-mapping wrapper; on Linux it is
-    // compile-skipped via cfg guard because transport::wait_for_pipe doesn't exist.
-    #[cfg(target_os = "windows")]
+    // Verifies the error-formatting wrapper in wait_for_daemon().
+    // It cannot call wait_for_daemon() directly (would block on pipe),
+    // but we verify the function exists and is callable by confirming it
+    // compiles and its signature returns Result<(), String>.
     #[test]
     fn wait_for_daemon_maps_not_found_error() {
-        // This test exercises the error-formatting wrapper in wait_for_daemon().
-        // It cannot call wait_for_daemon() directly (would block on pipe),
-        // but we verify the function exists and is callable by confirming it
-        // compiles and its signature returns Result<(), String>.
         let _: fn() -> Result<(), String> = wait_for_daemon;
     }
 
     // Note: Testing wait_for_pipe() itself (WaitNamedPipeW success/failure/timeout)
-    // requires a real Windows named pipe server. Those integration tests must run
-    // in Windows CI. On Linux, the function is #[cfg(target_os = "windows")] and
-    // is not compiled.
+    // requires a real Windows named pipe server. Those integration tests run in
+    // tests/cli/daemon_lifecycle.rs.
 }

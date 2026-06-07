@@ -3,10 +3,6 @@
 //! These tests create an isolated desktop, start `stmd` on it, create dummy
 //! windows on it, and verify the registry state via IPC queries. The user's
 //! main desktop is never affected.
-//!
-//! All tests are Windows-only.
-
-#![cfg(target_os = "windows")]
 
 use std::time::Duration;
 

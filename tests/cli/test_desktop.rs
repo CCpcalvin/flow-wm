@@ -3,10 +3,6 @@
 //! Provides a [`TestDesktop`] RAII guard that creates an isolated Windows
 //! desktop for testing. All dummy windows and the daemon's hook thread
 //! operate on this desktop, leaving the user's main desktop untouched.
-//!
-//! All functions are Windows-only and gated with `#[cfg(target_os = "windows")]`.
-
-#![cfg(target_os = "windows")]
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;

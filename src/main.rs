@@ -9,23 +9,16 @@
 //! 3. Starts a WinEvent hook thread for window lifecycle tracking
 //! 4. Enters the IPC command loop, processing hook events between messages
 
-#[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_os = "windows")]
 use clap::Parser;
 
-#[cfg(target_os = "windows")]
 use scrolling_tiling_manager::config::StmConfig;
-#[cfg(target_os = "windows")]
 use scrolling_tiling_manager::ipc::transport::PipeServer;
-#[cfg(target_os = "windows")]
 use scrolling_tiling_manager::ipc::{SocketMessage, dispatch_with_registry};
-#[cfg(target_os = "windows")]
 use scrolling_tiling_manager::registry::{WindowRegistry, desktop, hooks};
 
 /// Daemon CLI arguments.
-#[cfg(target_os = "windows")]
 #[derive(Parser)]
 #[command(name = "stmd", version, about = "ScrollingTilingManager daemon")]
 #[command(propagate_version = true)]
@@ -36,24 +29,12 @@ struct Args {
 }
 
 /// Daemon entry point.
-///
-/// Parses CLI arguments, then runs the daemon on Windows. On non-Windows
-/// platforms, prints an error and exits.
 fn main() {
     env_logger::init();
 
-    #[cfg(target_os = "windows")]
-    {
-        let args = Args::parse();
-        if let Err(e) = run_daemon(args) {
-            log::error!("stmd: fatal error: {e}");
-            std::process::exit(1);
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        log::error!("stmd: this daemon only runs on Windows");
+    let args = Args::parse();
+    if let Err(e) = run_daemon(args) {
+        log::error!("stmd: fatal error: {e}");
         std::process::exit(1);
     }
 }
@@ -66,7 +47,6 @@ fn main() {
 /// 4. Enters the IPC loop, processing hook events between each message
 ///
 /// Returns on `Stop` command or fatal error.
-#[cfg(target_os = "windows")]
 fn run_daemon(args: Args) -> Result<(), String> {
     // 1. Optional: switch to test desktop.
     if let Some(ref desktop_name) = args.desktop {

@@ -50,9 +50,6 @@ pub fn dispatch(msg: &SocketMessage) -> SocketResponse {
 ///
 /// Handles `QueryWindowsAll` by serialising the registry state to JSON,
 /// and falls through to [`dispatch`] for all other commands.
-///
-/// This function is Windows-only because the registry depends on Win32 APIs.
-#[cfg(target_os = "windows")]
 pub fn dispatch_with_registry(
     msg: &SocketMessage,
     registry: &std::sync::Arc<std::sync::Mutex<crate::registry::WindowRegistry>>,

@@ -1,15 +1,13 @@
 //! IPC message types shared between `stmd` daemon and `stm` CLI.
 //!
 //! All IPC uses newline-delimited JSON over a Windows named pipe (`\\.\pipe\stm`).
-//! This module defines the message and response enums — platform-independent,
-//! testable on any OS.
+//! This module defines the message and response enums, the transport layer,
+//! and the command dispatcher.
 
 pub mod dispatch;
 pub mod message;
-#[cfg(target_os = "windows")]
 pub mod transport;
 
 pub use dispatch::dispatch;
-#[cfg(target_os = "windows")]
 pub use dispatch::dispatch_with_registry;
 pub use message::{SocketMessage, SocketResponse};
