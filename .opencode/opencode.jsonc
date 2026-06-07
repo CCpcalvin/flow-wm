@@ -1,19 +1,8 @@
 {
     "$schema": "https://opencode.ai/config.json",
-    "lsp": {
-        "rust": {
-            "command": ["rust-analyzer"],
-            "initialization": {
-                "cargo": {
-                    "target": "x86_64-pc-windows-gnu",
-                    "targetDir": true
-                }
-            }
-        }
-    }, 
     "permission": {
         "bash": {
-            "./target/x86_64-pc-windows-gnu/debug/stm.exe": "allow",
+            ".\\target\\debug\\stm.exe*": "allow",
         }
     }
 }
