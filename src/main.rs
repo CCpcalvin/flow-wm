@@ -16,7 +16,10 @@ use clap::Parser;
 use scrolling_tiling_manager::config::StmConfig;
 use scrolling_tiling_manager::ipc::transport::PipeServer;
 use scrolling_tiling_manager::ipc::{SocketMessage, dispatch_with_registry};
-use scrolling_tiling_manager::registry::{WindowRegistry, desktop, hooks};
+use scrolling_tiling_manager::registry::{WindowRegistry, hooks};
+
+#[cfg(debug_assertions)]
+use scrolling_tiling_manager::registry::desktop;
 
 /// Daemon CLI arguments.
 #[derive(Parser)]
@@ -24,6 +27,8 @@ use scrolling_tiling_manager::registry::{WindowRegistry, desktop, hooks};
 #[command(propagate_version = true)]
 struct Args {
     /// Desktop name for test mode (opens and switches to this desktop).
+    /// Only available in debug builds.
+    #[cfg(debug_assertions)]
     #[arg(long)]
     desktop: Option<String>,
 }
@@ -48,7 +53,10 @@ fn main() {
 ///
 /// Returns on `Stop` command or fatal error.
 fn run_daemon(args: Args) -> Result<(), String> {
-    // 1. Optional: switch to test desktop.
+    // In release builds, Args has no fields, so suppress unused-variable warning.
+    let _ = &args;
+    // 1. Optional: switch to test desktop (debug builds only).
+    #[cfg(debug_assertions)]
     if let Some(ref desktop_name) = args.desktop {
         desktop::switch_to_desktop(desktop_name)?;
     }
@@ -66,7 +74,10 @@ fn run_daemon(args: Args) -> Result<(), String> {
         .scan_existing_windows()?;
 
     // 5. Start hook thread (pass desktop name so it joins the same isolated desktop).
+    #[cfg(debug_assertions)]
     let hook_desktop = args.desktop.clone();
+    #[cfg(not(debug_assertions))]
+    let hook_desktop = None;
     let (hook_receiver, _hook_handle) = hooks::start_hook_thread(hook_desktop)
         .map_err(|e| format!("failed to start hook thread: {e}"))?;
 

@@ -214,6 +214,17 @@ impl Drop for HookThreadHandle {
 pub fn start_hook_thread(
     desktop_name: Option<String>,
 ) -> Result<(Receiver<HookEvent>, HookThreadHandle), String> {
+    // In release builds, desktop_name must always be None.
+    // This is a defense-in-depth check — the CLI arg is gated by debug_assertions
+    // so this should never happen, but if it does, fail loudly.
+    #[cfg(not(debug_assertions))]
+    if desktop_name.is_some() {
+        return Err(
+            "--desktop is not supported in release builds (desktop isolation is debug-only)"
+                .to_owned(),
+        );
+    }
+
     let (sender, receiver) = mpsc::channel();
     let (tid_tx, tid_rx) = mpsc::channel::<u32>();
 
@@ -223,13 +234,18 @@ pub fn start_hook_thread(
         .map_err(|_| "start_hook_thread called more than once — this is a bug".to_owned())?;
 
     std::thread::spawn(move || {
-        // Switch to test desktop before any User32/GDI calls.
+        // Switch to test desktop before any User32/GDI calls (debug builds only).
+        #[cfg(debug_assertions)]
         if let Some(ref name) = desktop_name
             && let Err(e) = super::desktop::switch_to_desktop(name)
         {
             log::error!("hook thread: {e}");
             return;
         }
+
+        // Suppress unused-variable warning in release builds.
+        #[cfg(not(debug_assertions))]
+        let _ = desktop_name;
 
         // Send our OS thread ID back to the caller before registering hooks.
         let os_tid = unsafe { GetCurrentThreadId() };

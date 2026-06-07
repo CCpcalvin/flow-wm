@@ -89,14 +89,21 @@
 //! | [`classification`] | Window rule classification (pure logic, no Win32) |
 //! | [`core`] | Core [`WindowRegistry`] struct with init scan and state transitions |
 //! | [`hooks`] | WinEvent hook setup on a background thread |
-//! | [`desktop`] | Desktop management for test isolation |
+//! | [`desktop`] | Desktop switching for debug/test builds (excluded from release) |
 
 pub mod classification;
 pub mod core;
-pub mod desktop;
 pub mod hooks;
 pub mod types;
 pub mod win32;
+
+/// Desktop switching for debug/test builds only.
+///
+/// Provides `switch_to_desktop` so the daemon can join an isolated test desktop.
+/// Excluded from release builds entirely (`#[cfg(debug_assertions)]`).
+/// Desktop creation/cleanup lives in `tests/cli/test_desktop.rs`.
+#[cfg(debug_assertions)]
+pub mod desktop;
 
 pub use classification::{WindowCandidate, classify_window, classify_with_state, matches_rule};
 pub use core::WindowRegistry;
@@ -105,4 +112,5 @@ pub use types::{FloatingState, IgnoredReason, TilingState, VirtualSlot, Window, 
 pub use win32::WindowInfo;
 
 // `desktop` is not re-exported — it's used internally by `main.rs` and the hook
-// thread for test-mode isolation, not by external consumers.
+// thread for debug/test-mode isolation, not by external consumers.
+// Excluded from release builds via `#[cfg(debug_assertions)]`.

@@ -1,8 +1,12 @@
-//! Desktop management for test mode.
+//! Desktop management for debug/test builds.
 //!
 //! Provides functions to create, open, and switch Windows desktops. Used by
 //! the daemon and test infrastructure so all window operations happen on an
 //! isolated desktop instead of the user's real desktop.
+//!
+//! **Only compiled in debug builds** (`#[cfg(debug_assertions)]`).
+//! Excluded from release builds entirely — no desktop code ships in the
+//! production binary.
 //!
 //! # Why Isolate?
 //!
@@ -16,13 +20,13 @@
 //! ```text
 //! Test code                    Daemon (stmd)              Hook Thread
 //! ┌──────────────────┐        ┌──────────────────┐      ┌──────────────────┐
-//! │ create_desktop() │        │ switch_to_        │      │ switch_to_        │
-//! │ set_thread_      │        │  desktop(name)    │      │  desktop(name)    │
-//! │  desktop(test)   │───────►│ scan_existing_    │─────►│ SetWinEventHook   │
-//! │ spawn stmd       │        │  windows()        │      │ GetMessageW loop  │
-//! │ ...run tests...  │        │ IPC loop          │      │ callback → send   │
+//! │ create_desktop() │        │ switch_to_       │      │ switch_to_       │
+//! │ set_thread_      │        │  desktop(name)   │      │  desktop(name)   │
+//! │  desktop(test)   │───────►│ scan_existing_   │─────►│ SetWinEventHook  │
+//! │ spawn stmd       │        │  windows()       │      │ GetMessageW loop │
+//! │ ...run tests...  │        │ IPC loop         │      │ callback → send  │
 //! │ set_thread_      │        └──────────────────┘      └──────────────────┘
-//!  desktop(original)
+//! │desktop(original) │
 //! │ close_desktop()  │
 //! └──────────────────┘
 //! ```
