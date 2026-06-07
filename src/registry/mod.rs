@@ -105,7 +105,7 @@ pub mod win32;
 #[cfg(debug_assertions)]
 pub mod desktop;
 
-pub use classification::{WindowCandidate, classify_window, classify_with_state, matches_rule};
+pub use classification::{ClassificationPipeline, WindowCandidate, matches_rule};
 pub use core::WindowRegistry;
 pub use hooks::HookEvent;
 pub use types::{FloatingState, IgnoredReason, TilingState, VirtualSlot, Window, WindowState};

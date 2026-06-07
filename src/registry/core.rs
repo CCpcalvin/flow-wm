@@ -229,8 +229,8 @@ impl WindowRegistry {
     /// This is the shared registration path used by both the init scan and
     /// live event handling. It:
     /// 1. Builds a [`WindowCandidate`](super::classification::WindowCandidate) from the window info.
-    /// 2. Classifies it via [`classify_with_state`](super::classification::classify_with_state)
-    ///    (applying rules, maximized/fullscreen overrides).
+    /// 2. Classifies it via [`classify_with_state_pipeline`](super::classification::classify_with_state_pipeline)
+    ///    (applying pipeline rules, maximized/fullscreen overrides).
     /// 3. Creates a [`Window`] entry and inserts it into the HashMap.
     ///
     /// # Idempotency

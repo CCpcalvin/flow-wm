@@ -298,7 +298,7 @@ pub enum FloatingState {
 /// # Override Priority
 ///
 /// Maximized and fullscreen checks happen **before** config rule evaluation
-/// in [`classify_with_state`](super::classification::classify_with_state).
+/// in [`classify_with_state_pipeline`](super::classification::classify_with_state_pipeline).
 /// This means a window that is maximized will always be `Ignored(Maximized)`,
 /// even if a config rule says to tile it. This is intentional — maximized and
 /// fullscreen windows have their own window management behavior that conflicts

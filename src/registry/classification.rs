@@ -27,15 +27,16 @@
 //! ├─ Fullscreen? ─► Ignored(IgnoredReason::Fullscreen)   ← always wins
 //! │
 //! └─ ClassificationPipeline
-//!     ├─ User rules (first match wins)
+//!     ├─ User rules (first match wins, regex pre-compiled)
 //!     ├─ Learned rules (future, first match wins)
-//!     ├─ Default rules (first match wins)
+//!     ├─ Default rules (first match wins, regex pre-compiled)
 //!     └─ Default action (fallback)
 //! ```
 //!
 //! The [`ClassificationPipeline`] provides multi-layer classification with a
-//! single entry point. The legacy [`classify_window`] function is kept for
-//! backward compatibility with existing tests.
+//! single entry point. All regex patterns are pre-compiled at construction
+//! time for performance. The [`matches_rule`] function is kept as a public
+//! utility for testing individual rule matching logic.
 
 use crate::common::Rect;
 use crate::config::types::{MatchRule, WindowAction, WindowRule, WindowRulesConfig};
@@ -46,8 +47,9 @@ use crate::registry::types::{FloatingState, IgnoredReason, TilingState, WindowSt
 /// Window metadata used for rule classification.
 ///
 /// This is a platform-independent snapshot of window properties used by
-/// [`classify_window`] to determine the window's [`WindowAction`].
-/// The Win32 layer fills this struct; the classifier never touches HWND.
+/// [`ClassificationPipeline`] and [`matches_rule`] to determine the window's
+/// [`WindowAction`]. The Win32 layer fills this struct; the classifier never
+/// touches HWND.
 ///
 /// # Design: Decoupling from Win32
 ///
@@ -66,49 +68,6 @@ pub struct WindowCandidate {
     pub class: String,
     /// Full path to the executable.
     pub process_path: String,
-}
-
-// ── classify_window ──────────────────────────────────────────────────
-
-/// Classify a window candidate against an ordered rule list.
-///
-/// Evaluates `rules` top-to-bottom; the **first matching rule wins**.
-/// If no rule matches, returns `default`.
-///
-/// # Example
-///
-/// ```
-/// # use scrolling_tiling_manager::config::types::{MatchRule, WindowAction, WindowRule};
-/// # use scrolling_tiling_manager::registry::classification::WindowCandidate;
-/// # use scrolling_tiling_manager::registry::classification::classify_window;
-/// let rules = vec![
-///     WindowRule {
-///         match_: MatchRule { exe: Some("explorer.exe".into()), ..Default::default() },
-///         action: WindowAction::Ignore,
-///         initial_width_eighths: None,
-///         override_persist: false,
-///     },
-/// ];
-/// let candidate = WindowCandidate {
-///     exe: "explorer.exe".into(),
-///     title: String::new(),
-///     class: String::new(),
-///     process_path: String::new(),
-/// };
-/// assert_eq!(classify_window(&candidate, &rules, WindowAction::Tile), WindowAction::Ignore);
-/// ```
-#[must_use]
-pub fn classify_window(
-    candidate: &WindowCandidate,
-    rules: &[WindowRule],
-    default: WindowAction,
-) -> WindowAction {
-    for rule in rules {
-        if matches_rule(candidate, &rule.match_) {
-            return rule.action;
-        }
-    }
-    default
 }
 
 // ── matches_rule ────────────────────────────────────────────────────
@@ -249,57 +208,6 @@ pub fn matches_rule(candidate: &WindowCandidate, rule: &MatchRule) -> bool {
     true
 }
 
-// ── classify_with_state ─────────────────────────────────────────────
-
-/// Classify a window and produce a full [`WindowState`].
-///
-/// This is the high-level classification entry point that combines rule-based
-/// classification with OS-state overrides. The evaluation order is:
-///
-/// 1. **Maximized check** — If `is_maximized` is `true`, returns
-///    `Ignored(Maximized)` immediately. Maximised windows have their own
-///    layout and shouldn't be tiled.
-///
-/// 2. **Fullscreen check** — If `is_fullscreen` is `true`, returns
-///    `Ignored(Fullscreen)`. Fullscreen apps (games, video players) must
-///    not be moved or resized.
-///
-/// 3. **Rule evaluation** — Delegates to [`classify_window`] for config
-///    rule matching. If no rule matches, uses `default`.
-///
-/// 4. **Action → State** — Converts the [`WindowAction`] to an initial
-///    [`WindowState`] with placeholder positions (`col: 0, row: 0` for
-///    tiling, zero-rect for floating). The layout engine will update these
-///    when the window is actually placed.
-///
-/// # Why Maximized/Fullscreen Overrides?
-///
-/// These windows have their own management behavior that conflicts with tiling:
-///
-/// - Maximized windows fill the entire work area.
-/// - Fullscreen windows cover even the taskbar.
-///
-/// Tiling either type would cause visual glitches and break the user's
-/// expectation of how these windows behave.
-#[must_use]
-pub fn classify_with_state(
-    candidate: &WindowCandidate,
-    is_maximized: bool,
-    is_fullscreen: bool,
-    rules: &[WindowRule],
-    default: WindowAction,
-) -> WindowState {
-    if is_maximized {
-        return WindowState::Ignored(IgnoredReason::Maximized);
-    }
-    if is_fullscreen {
-        return WindowState::Ignored(IgnoredReason::Fullscreen);
-    }
-
-    let action = classify_window(candidate, rules, default);
-    action_to_state(action)
-}
-
 /// Convert a [`WindowAction`] to its corresponding initial [`WindowState`].
 ///
 /// This produces placeholder positions (`col: 0, row: 0` / zero-rect) that
@@ -320,9 +228,204 @@ fn action_to_state(action: WindowAction) -> WindowState {
     }
 }
 
+// ── CompiledRegex ─────────────────────────────────────────────────────
+
+/// Pre-compiled regex with three possible states.
+///
+/// Used by [`CompiledRule`] to avoid recompiling regex patterns on every
+/// classification call. Each regex field from a [`MatchRule`] is compiled
+/// once at pipeline construction time.
+///
+/// # Variants
+///
+/// - `Unspecified` — The original pattern was `None`; skip this field entirely.
+/// - `Valid(Regex)` — Pattern compiled successfully; use it for matching.
+/// - `Invalid` — Pattern failed to compile; treat as non-match (same as
+///   the runtime behaviour in [`matches_rule`], but logged once at startup).
+enum CompiledRegex {
+    /// Pattern was `None` — field not specified, skip check.
+    Unspecified,
+    /// Pattern compiled successfully.
+    Valid(regex::Regex),
+    /// Pattern failed to compile — treat as non-match.
+    Invalid,
+}
+
+// ── CompiledRule ──────────────────────────────────────────────────────
+
+/// A [`WindowRule`] with all regex patterns pre-compiled.
+///
+/// Created at pipeline construction time so that repeated calls to
+/// [`ClassificationPipeline::classify`] avoid the cost of compiling regex
+/// patterns on every match attempt.
+///
+/// # Performance
+///
+/// Without caching, each call to [`matches_rule`] rebuilds up to 4 regex
+/// objects (`exe_regex`, `title_regex`, `class_regex`, `process_path_regex`).
+/// For a daemon that classifies hundreds of windows and re-classifies on
+/// config reload, this is measurable overhead. Pre-compiling once at
+/// construction time makes every subsequent `classify()` call pure matching
+/// with zero allocations.
+///
+/// # Fallback for Invalid Patterns
+///
+/// If a regex pattern fails to compile, the corresponding [`CompiledRegex`]
+/// is set to `Invalid`. At match time, this causes the field to return
+/// `false` (non-match), exactly matching the runtime behaviour of
+/// [`matches_rule`].
+struct CompiledRule {
+    /// The original rule (holds action, non-regex fields, etc.).
+    rule: WindowRule,
+    /// Pre-compiled `exe_regex` (case-insensitive).
+    exe_regex: CompiledRegex,
+    /// Pre-compiled `title_regex` (case-sensitive).
+    title_regex: CompiledRegex,
+    /// Pre-compiled `class_regex` (case-sensitive).
+    class_regex: CompiledRegex,
+    /// Pre-compiled `process_path_regex` (case-insensitive).
+    process_path_regex: CompiledRegex,
+}
+
+/// Compile a single regex pattern into a [`CompiledRegex`].
+///
+/// - `None` → `Unspecified`
+/// - Valid pattern → `Valid(Regex)` with the given case sensitivity
+/// - Invalid pattern → logs a warning → `Invalid`
+fn compile_regex(pattern: Option<&str>, case_insensitive: bool, field_name: &str) -> CompiledRegex {
+    match pattern {
+        None => CompiledRegex::Unspecified,
+        Some(p) => {
+            let mut builder = regex::RegexBuilder::new(p);
+            builder.case_insensitive(case_insensitive);
+            match builder.build() {
+                Ok(re) => CompiledRegex::Valid(re),
+                Err(e) => {
+                    log::warn!(
+                        "{field_name} pattern '{p}' failed to compile: {e}; treating as non-match"
+                    );
+                    CompiledRegex::Invalid
+                }
+            }
+        }
+    }
+}
+
+/// Test whether a window candidate matches a compiled rule.
+///
+/// Uses AND logic identical to [`matches_rule`]: every specified (non-`None`)
+/// field must match. The difference is that regex fields use pre-compiled
+/// [`CompiledRegex`] values instead of building a new `Regex` per call.
+#[must_use]
+fn matches_compiled_rule(candidate: &WindowCandidate, compiled: &CompiledRule) -> bool {
+    let rule = &compiled.rule.match_;
+
+    // exe — exact, case-insensitive (Windows paths are case-insensitive)
+    if let Some(ref exe) = rule.exe
+        && !candidate.exe.eq_ignore_ascii_case(exe)
+    {
+        return false;
+    }
+
+    // exe_regex — pre-compiled, case-insensitive
+    match &compiled.exe_regex {
+        CompiledRegex::Valid(re) => {
+            if !re.is_match(&candidate.exe) {
+                return false;
+            }
+        }
+        CompiledRegex::Invalid => return false,
+        CompiledRegex::Unspecified => {}
+    }
+
+    // title — exact, case-sensitive
+    if let Some(ref title) = rule.title
+        && candidate.title != *title
+    {
+        return false;
+    }
+
+    // title_contains — substring, case-sensitive
+    if let Some(ref substr) = rule.title_contains
+        && !candidate.title.contains(substr)
+    {
+        return false;
+    }
+
+    // title_regex — pre-compiled, case-sensitive
+    match &compiled.title_regex {
+        CompiledRegex::Valid(re) => {
+            if !re.is_match(&candidate.title) {
+                return false;
+            }
+        }
+        CompiledRegex::Invalid => return false,
+        CompiledRegex::Unspecified => {}
+    }
+
+    // class — exact, case-sensitive
+    if let Some(ref class) = rule.class
+        && candidate.class != *class
+    {
+        return false;
+    }
+
+    // class_regex — pre-compiled, case-sensitive
+    match &compiled.class_regex {
+        CompiledRegex::Valid(re) => {
+            if !re.is_match(&candidate.class) {
+                return false;
+            }
+        }
+        CompiledRegex::Invalid => return false,
+        CompiledRegex::Unspecified => {}
+    }
+
+    // process_path — exact, case-insensitive (Windows paths)
+    if let Some(ref path) = rule.process_path
+        && !candidate.process_path.eq_ignore_ascii_case(path)
+    {
+        return false;
+    }
+
+    // process_path_regex — pre-compiled, case-insensitive
+    match &compiled.process_path_regex {
+        CompiledRegex::Valid(re) => {
+            if !re.is_match(&candidate.process_path) {
+                return false;
+            }
+        }
+        CompiledRegex::Invalid => return false,
+        CompiledRegex::Unspecified => {}
+    }
+
+    true
+}
+
+/// Compile all regex patterns in a list of [`WindowRule`]s into [`CompiledRule`]s.
+fn compile_rules(rules: Vec<WindowRule>) -> Vec<CompiledRule> {
+    rules
+        .into_iter()
+        .map(|rule| {
+            let m = &rule.match_;
+            CompiledRule {
+                exe_regex: compile_regex(m.exe_regex.as_deref(), true, "exe_regex"),
+                title_regex: compile_regex(m.title_regex.as_deref(), false, "title_regex"),
+                class_regex: compile_regex(m.class_regex.as_deref(), false, "class_regex"),
+                process_path_regex: compile_regex(
+                    m.process_path_regex.as_deref(),
+                    true,
+                    "process_path_regex",
+                ),
+                rule,
+            }
+        })
+        .collect()
+}
+
 // ── ClassificationPipeline ───────────────────────────────────────────
 
-/// Multi-layer classification pipeline.
+/// Multi-layer classification pipeline with pre-compiled regex patterns.
 ///
 /// Evaluates window rules in priority order:
 ///
@@ -341,18 +444,26 @@ fn action_to_state(action: WindowAction) -> WindowState {
 /// - Future ML-based auto-classification to sit between user and default rules.
 /// - Hot-reload of user rules without restarting the daemon.
 ///
+/// # Regex Caching
+///
+/// All regex patterns (`exe_regex`, `title_regex`, `class_regex`,
+/// `process_path_regex`) are pre-compiled at construction time.
+/// This avoids the overhead of compiling regex patterns on
+/// every [`classify()`](Self::classify) call — significant when the daemon
+/// processes hundreds of window events.
+///
 /// # Usage in the Registry
 ///
 /// The [`WindowRegistry`](crate::registry::core::WindowRegistry) stores a single
 /// `ClassificationPipeline` instance and delegates all classification to it.
 /// Maximized/fullscreen checks happen before the pipeline is consulted.
 pub struct ClassificationPipeline {
-    /// User-defined rules (highest priority after OS overrides).
-    user_rules: Vec<WindowRule>,
+    /// User-defined rules with pre-compiled regexes (highest priority after OS overrides).
+    user_rules: Vec<CompiledRule>,
     /// Default rules bundled with the application (lowest rule priority).
-    default_rules: Vec<WindowRule>,
+    default_rules: Vec<CompiledRule>,
     /// Machine-learned rules from user behavior (future; currently empty).
-    learned_rules: Vec<WindowRule>,
+    learned_rules: Vec<CompiledRule>,
     /// Fallback action when no rule matches at any layer.
     default_action: WindowAction,
 }
@@ -360,8 +471,14 @@ pub struct ClassificationPipeline {
 impl ClassificationPipeline {
     /// Creates a new classification pipeline from user and default rule configs.
     ///
-    /// User rules take priority over default rules. The `default_action` from
-    /// the user config is used as the final fallback.
+    /// All regex patterns are pre-compiled at this point. Invalid patterns
+    /// are logged as warnings and treated as non-matching at classification
+    /// time (identical to the runtime fallback in [`matches_rule`]).
+    ///
+    /// The fallback action used when no rule at any layer matches is taken
+    /// from `user_rules.default_action`. The `default_rules.default_action`
+    /// field is intentionally ignored — the user's preference always governs
+    /// the final fallback.
     ///
     /// # Arguments
     ///
@@ -371,8 +488,8 @@ impl ClassificationPipeline {
     pub fn new(user_rules: WindowRulesConfig, default_rules: WindowRulesConfig) -> Self {
         let default_action = user_rules.default_action;
         Self {
-            user_rules: user_rules.rules,
-            default_rules: default_rules.rules,
+            user_rules: compile_rules(user_rules.rules),
+            default_rules: compile_rules(default_rules.rules),
             learned_rules: Vec::new(),
             default_action,
         }
@@ -387,26 +504,31 @@ impl ClassificationPipeline {
     /// This returns a [`WindowAction`] (not [`WindowState`]) — OS overrides
     /// (maximized/fullscreen) are handled separately by
     /// [`classify_with_state_pipeline`].
+    ///
+    /// # Performance
+    ///
+    /// All regex patterns are pre-compiled at construction time, so this
+    /// method performs only matching — no regex compilation or allocation.
     #[must_use]
     pub fn classify(&self, candidate: &WindowCandidate) -> WindowAction {
         // 1. User rules (first match wins)
-        for rule in &self.user_rules {
-            if matches_rule(candidate, &rule.match_) {
-                return rule.action;
+        for compiled in &self.user_rules {
+            if matches_compiled_rule(candidate, compiled) {
+                return compiled.rule.action;
             }
         }
 
         // 2. Learned rules (currently empty, first match wins)
-        for rule in &self.learned_rules {
-            if matches_rule(candidate, &rule.match_) {
-                return rule.action;
+        for compiled in &self.learned_rules {
+            if matches_compiled_rule(candidate, compiled) {
+                return compiled.rule.action;
             }
         }
 
         // 3. Default rules (first match wins)
-        for rule in &self.default_rules {
-            if matches_rule(candidate, &rule.match_) {
-                return rule.action;
+        for compiled in &self.default_rules {
+            if matches_compiled_rule(candidate, compiled) {
+                return compiled.rule.action;
             }
         }
 
@@ -424,6 +546,11 @@ impl ClassificationPipeline {
 /// 2. Multi-layer rule evaluation via [`ClassificationPipeline`].
 /// 3. Action → [`WindowState`] conversion.
 ///
+/// Visibility is `pub(super)` — this function is called by
+/// [`core::WindowRegistry`](super::core::WindowRegistry) and is not part of
+/// the public API of the registry module. External callers should interact
+/// with the registry directly, not with the classification internals.
+///
 /// # Arguments
 ///
 /// * `candidate` - Window metadata for classification.
@@ -436,7 +563,7 @@ impl ClassificationPipeline {
 /// A [`WindowState`] — `Ignored(Maximized)` or `Ignored(Fullscreen)` for OS
 /// overrides, or the pipeline's result converted to a state.
 #[must_use]
-pub fn classify_with_state_pipeline(
+pub(super) fn classify_with_state_pipeline(
     candidate: &WindowCandidate,
     is_maximized: bool,
     is_fullscreen: bool,
@@ -480,175 +607,208 @@ mod tests {
         }
     }
 
-    // --- classify_window tests ---
+    /// Helper to build a [`ClassificationPipeline`] from user rules and a default action.
+    ///
+    /// Creates a pipeline with the given rules as user rules, no default rules,
+    /// and the given `default_action`. Useful for testing single-layer classification
+    /// without boilerplate.
+    fn pipeline_from(
+        rules: Vec<WindowRule>,
+        default_action: WindowAction,
+    ) -> ClassificationPipeline {
+        ClassificationPipeline::new(
+            WindowRulesConfig {
+                default_action,
+                rules,
+            },
+            WindowRulesConfig::default(),
+        )
+    }
+
+    // --- Pipeline classification tests (single-layer) ---
 
     #[test]
-    fn exact_exe_match() {
-        let r = rule(
-            MatchRule {
-                exe: Some("notepad.exe".into()),
-                ..Default::default()
-            },
-            WindowAction::Tile,
+    fn pipeline_exact_exe_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("notepad.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
         );
         let c = candidate("notepad.exe", "", "", "");
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Ignore),
-            WindowAction::Tile
-        );
+        assert_eq!(p.classify(&c), WindowAction::Tile);
     }
 
     #[test]
-    fn case_insensitive_exe_match_windows_paths() {
-        let r = rule(
-            MatchRule {
-                exe: Some("Explorer.EXE".into()),
-                ..Default::default()
-            },
-            WindowAction::Ignore,
-        );
-        let c = candidate("explorer.exe", "", "", "");
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Tile),
-            WindowAction::Ignore
-        );
-    }
-
-    #[test]
-    fn title_contains_case_sensitive() {
-        let r = rule(
-            MatchRule {
-                title_contains: Some("Open File".into()),
-                ..Default::default()
-            },
-            WindowAction::Ignore,
-        );
-        let c = candidate("explorer.exe", "Open File - Explorer", "", "");
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Tile),
-            WindowAction::Ignore
-        );
-    }
-
-    #[test]
-    fn title_contains_case_sensitive_mismatch() {
-        // "SETTINGS" should NOT match "Settings" (case-sensitive)
-        let r = rule(
-            MatchRule {
-                title_contains: Some("SETTINGS".into()),
-                ..Default::default()
-            },
-            WindowAction::Float,
-        );
-        let c = candidate("settings.exe", "Windows Settings", "", "");
-        // Should NOT match because title_contains is now case-sensitive
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Tile),
-            WindowAction::Tile
-        );
-    }
-
-    #[test]
-    fn all_fields_and_logic() {
-        // All specified fields must match (AND)
-        let r = rule(
-            MatchRule {
-                exe: Some("chrome.exe".into()),
-                class: Some("Chrome_WidgetWin_1".into()),
-                title: Some("New Tab - Google Chrome".into()),
-                ..Default::default()
-            },
+    fn pipeline_case_insensitive_exe_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("Explorer.EXE".into()),
+                    ..Default::default()
+                },
+                WindowAction::Ignore,
+            )],
             WindowAction::Tile,
         );
-        // Fully matching candidate
+        let c = candidate("explorer.exe", "", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    #[test]
+    fn pipeline_title_contains_case_sensitive() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    title_contains: Some("Open File".into()),
+                    ..Default::default()
+                },
+                WindowAction::Ignore,
+            )],
+            WindowAction::Tile,
+        );
+        let c = candidate("explorer.exe", "Open File - Explorer", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    #[test]
+    fn pipeline_title_contains_case_sensitive_mismatch() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    title_contains: Some("SETTINGS".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
+        );
+        let c = candidate("settings.exe", "Windows Settings", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    #[test]
+    fn pipeline_all_fields_and_logic() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("chrome.exe".into()),
+                    class: Some("Chrome_WidgetWin_1".into()),
+                    title: Some("New Tab - Google Chrome".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
         let c = candidate(
             "chrome.exe",
             "New Tab - Google Chrome",
             "Chrome_WidgetWin_1",
             "C:\\Program Files\\Google\\Chrome\\chrome.exe",
         );
-        assert_eq!(
-            classify_window(&c, &[r.clone()], WindowAction::Ignore),
-            WindowAction::Tile
-        );
+        assert_eq!(p.classify(&c), WindowAction::Tile);
 
-        // Partially matching — wrong class → no match
         let c2 = candidate(
             "chrome.exe",
             "New Tab - Google Chrome",
             "SomeOtherClass",
             "",
         );
-        assert_eq!(
-            classify_window(&c2, &[r], WindowAction::Ignore),
-            WindowAction::Ignore
-        );
+        assert_eq!(p.classify(&c2), WindowAction::Ignore);
     }
 
     #[test]
-    fn first_match_wins() {
-        let rules = vec![
-            rule(
+    fn pipeline_first_match_wins() {
+        let p = pipeline_from(
+            vec![
+                rule(
+                    MatchRule {
+                        exe: Some("chrome.exe".into()),
+                        ..Default::default()
+                    },
+                    WindowAction::Ignore,
+                ),
+                rule(
+                    MatchRule {
+                        exe: Some("chrome.exe".into()),
+                        ..Default::default()
+                    },
+                    WindowAction::Tile,
+                ),
+            ],
+            WindowAction::Float,
+        );
+        let c = candidate("chrome.exe", "", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    #[test]
+    fn pipeline_default_action_when_no_rule_matches() {
+        let p = pipeline_from(vec![], WindowAction::Tile);
+        let c = candidate("unknown.exe", "Some Title", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+
+        let p2 = pipeline_from(vec![], WindowAction::Float);
+        assert_eq!(p2.classify(&c), WindowAction::Float);
+    }
+
+    #[test]
+    fn pipeline_window_candidate_with_empty_strings_no_match() {
+        let p = pipeline_from(
+            vec![rule(
                 MatchRule {
-                    exe: Some("chrome.exe".into()),
-                    ..Default::default()
-                },
-                WindowAction::Ignore,
-            ),
-            rule(
-                MatchRule {
-                    exe: Some("chrome.exe".into()),
+                    exe: Some("notepad.exe".into()),
                     ..Default::default()
                 },
                 WindowAction::Tile,
-            ),
-        ];
-        let c = candidate("chrome.exe", "", "", "");
-        // First rule wins — should be Ignore, not Tile
-        assert_eq!(
-            classify_window(&c, &rules, WindowAction::Float),
-            WindowAction::Ignore
-        );
-    }
-
-    #[test]
-    fn default_action_when_no_rule_matches() {
-        let rules: Vec<WindowRule> = vec![];
-        let c = candidate("unknown.exe", "Some Title", "", "");
-        assert_eq!(
-            classify_window(&c, &rules, WindowAction::Tile),
-            WindowAction::Tile
-        );
-        assert_eq!(
-            classify_window(&c, &rules, WindowAction::Float),
-            WindowAction::Float
-        );
-    }
-
-    #[test]
-    fn empty_rules_list_returns_default() {
-        let rules: Vec<WindowRule> = vec![];
-        let c = candidate("code.exe", "main.rs - VS Code", "", "");
-        assert_eq!(
-            classify_window(&c, &rules, WindowAction::Ignore),
-            WindowAction::Ignore
-        );
-    }
-
-    #[test]
-    fn window_candidate_with_empty_strings_no_match() {
-        let r = rule(
-            MatchRule {
-                exe: Some("notepad.exe".into()),
-                ..Default::default()
-            },
-            WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
         );
         let c = candidate("", "", "", "");
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Ignore),
-            WindowAction::Ignore
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    #[test]
+    fn pipeline_rule_with_all_fields_specified_matches() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("app.exe".into()),
+                    title: Some("Main Window".into()),
+                    class: Some("AppClass".into()),
+                    process_path: Some("C:\\Apps\\app.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
         );
+        let c = candidate("app.exe", "Main Window", "AppClass", "C:\\Apps\\app.exe");
+        assert_eq!(p.classify(&c), WindowAction::Float);
+    }
+
+    #[test]
+    fn pipeline_rule_with_all_fields_specified_partial_mismatch() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("app.exe".into()),
+                    title: Some("Main Window".into()),
+                    class: Some("AppClass".into()),
+                    process_path: Some("C:\\Apps\\app.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
+        );
+        let c = candidate("app.exe", "Main Window", "AppClass", "D:\\Other\\app.exe");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
     }
 
     // --- matches_rule field-specific tests ---
@@ -859,13 +1019,13 @@ mod tests {
         assert!(matches_rule(&c, &rule));
     }
 
-    // --- classify_with_state tests ---
+    // --- classify_with_state_pipeline tests ---
 
     #[test]
-    fn maximized_override_forces_ignored_maximized() {
-        let rules: Vec<WindowRule> = vec![];
+    fn classify_with_state_pipeline_maximized_override() {
+        let pipeline = pipeline_from(vec![], WindowAction::Tile);
         let c = candidate("code.exe", "main.rs", "", "");
-        let state = classify_with_state(&c, true, false, &rules, WindowAction::Tile);
+        let state = classify_with_state_pipeline(&c, true, false, &pipeline);
         assert!(matches!(
             state,
             WindowState::Ignored(IgnoredReason::Maximized)
@@ -873,10 +1033,10 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_override_forces_ignored_fullscreen() {
-        let rules: Vec<WindowRule> = vec![];
+    fn classify_with_state_pipeline_fullscreen_override() {
+        let pipeline = pipeline_from(vec![], WindowAction::Tile);
         let c = candidate("game.exe", "Game", "", "");
-        let state = classify_with_state(&c, false, true, &rules, WindowAction::Tile);
+        let state = classify_with_state_pipeline(&c, false, true, &pipeline);
         assert!(matches!(
             state,
             WindowState::Ignored(IgnoredReason::Fullscreen)
@@ -884,10 +1044,10 @@ mod tests {
     }
 
     #[test]
-    fn maximize_takes_precedence_over_fullscreen_check() {
-        let rules: Vec<WindowRule> = vec![];
+    fn classify_with_state_pipeline_maximize_takes_precedence_over_fullscreen() {
+        let pipeline = pipeline_from(vec![], WindowAction::Tile);
         let c = candidate("code.exe", "", "", "");
-        let state = classify_with_state(&c, true, true, &rules, WindowAction::Tile);
+        let state = classify_with_state_pipeline(&c, true, true, &pipeline);
         assert!(matches!(
             state,
             WindowState::Ignored(IgnoredReason::Maximized)
@@ -895,16 +1055,19 @@ mod tests {
     }
 
     #[test]
-    fn classify_with_state_tile_action() {
-        let r = rule(
-            MatchRule {
-                exe: Some("code.exe".into()),
-                ..Default::default()
-            },
-            WindowAction::Tile,
+    fn classify_with_state_pipeline_tile_action() {
+        let pipeline = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("code.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
         );
         let c = candidate("code.exe", "", "", "");
-        let state = classify_with_state(&c, false, false, &[r], WindowAction::Ignore);
+        let state = classify_with_state_pipeline(&c, false, false, &pipeline);
         assert!(matches!(
             state,
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 })
@@ -912,16 +1075,19 @@ mod tests {
     }
 
     #[test]
-    fn classify_with_state_float_action() {
-        let r = rule(
-            MatchRule {
-                exe: Some("steam.exe".into()),
-                ..Default::default()
-            },
-            WindowAction::Float,
+    fn classify_with_state_pipeline_float_action() {
+        let pipeline = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("steam.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
         );
         let c = candidate("steam.exe", "", "", "");
-        let state = classify_with_state(&c, false, false, &[r], WindowAction::Tile);
+        let state = classify_with_state_pipeline(&c, false, false, &pipeline);
         assert!(matches!(
             state,
             WindowState::Floating(FloatingState::Active { rect: _ })
@@ -929,16 +1095,19 @@ mod tests {
     }
 
     #[test]
-    fn classify_with_state_ignore_action() {
-        let r = rule(
-            MatchRule {
-                exe: Some("explorer.exe".into()),
-                ..Default::default()
-            },
-            WindowAction::Ignore,
+    fn classify_with_state_pipeline_ignore_action() {
+        let pipeline = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("explorer.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Ignore,
+            )],
+            WindowAction::Tile,
         );
         let c = candidate("explorer.exe", "", "", "");
-        let state = classify_with_state(&c, false, false, &[r], WindowAction::Tile);
+        let state = classify_with_state_pipeline(&c, false, false, &pipeline);
         assert!(matches!(
             state,
             WindowState::Ignored(IgnoredReason::ExplicitRule)
@@ -946,10 +1115,21 @@ mod tests {
     }
 
     #[test]
-    fn classify_with_state_default_used() {
-        let rules: Vec<WindowRule> = vec![];
+    fn classify_with_state_pipeline_default_used() {
+        let pipeline = pipeline_from(vec![], WindowAction::Tile);
         let c = candidate("unknown.exe", "", "", "");
-        let state = classify_with_state(&c, false, false, &rules, WindowAction::Tile);
+        let state = classify_with_state_pipeline(&c, false, false, &pipeline);
+        assert!(matches!(
+            state,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 })
+        ));
+    }
+
+    #[test]
+    fn classify_with_state_pipeline_empty_candidate() {
+        let pipeline = pipeline_from(vec![], WindowAction::Tile);
+        let c = candidate("", "", "", "");
+        let state = classify_with_state_pipeline(&c, false, false, &pipeline);
         assert!(matches!(
             state,
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 })
@@ -992,71 +1172,7 @@ mod tests {
         ));
     }
 
-    // --- Edge cases ---
-
-    #[test]
-    fn empty_candidate_all_empty_strings() {
-        let rules: Vec<WindowRule> = vec![];
-        let c = candidate("", "", "", "");
-        assert_eq!(
-            classify_window(&c, &rules, WindowAction::Tile),
-            WindowAction::Tile
-        );
-        let state = classify_with_state(&c, false, false, &rules, WindowAction::Tile);
-        assert!(matches!(
-            state,
-            WindowState::Tiling(TilingState::Active { col: 0, row: 0 })
-        ));
-    }
-
-    #[test]
-    fn rule_with_all_fields_specified_matches() {
-        let r = rule(
-            MatchRule {
-                exe: Some("app.exe".into()),
-                title: Some("Main Window".into()),
-                title_contains: None,
-                title_regex: None,
-                class: Some("AppClass".into()),
-                process_path: Some("C:\\Apps\\app.exe".into()),
-                exe_regex: None,
-                class_regex: None,
-                process_path_regex: None,
-            },
-            WindowAction::Float,
-        );
-        let c = candidate("app.exe", "Main Window", "AppClass", "C:\\Apps\\app.exe");
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Tile),
-            WindowAction::Float
-        );
-    }
-
-    #[test]
-    fn rule_with_all_fields_specified_partial_mismatch() {
-        let r = rule(
-            MatchRule {
-                exe: Some("app.exe".into()),
-                title: Some("Main Window".into()),
-                title_contains: None,
-                title_regex: None,
-                class: Some("AppClass".into()),
-                process_path: Some("C:\\Apps\\app.exe".into()),
-                exe_regex: None,
-                class_regex: None,
-                process_path_regex: None,
-            },
-            WindowAction::Float,
-        );
-        // Wrong process_path (case-insensitive won't save us — path is different)
-        let c = candidate("app.exe", "Main Window", "AppClass", "D:\\Other\\app.exe");
-        assert_eq!(
-            classify_window(&c, &[r], WindowAction::Tile),
-            WindowAction::Tile
-        );
-    }
-
-    // --- ClassificationPipeline tests ---
+    // --- ClassificationPipeline multi-layer tests ---
 
     #[test]
     fn pipeline_user_rule_takes_priority_over_default() {
@@ -1126,57 +1242,6 @@ mod tests {
         assert_eq!(pipeline.classify(&c), WindowAction::Float);
     }
 
-    #[test]
-    fn classify_with_state_pipeline_maximized() {
-        let user_rules = WindowRulesConfig::default();
-        let default_rules = WindowRulesConfig::default();
-        let pipeline = ClassificationPipeline::new(user_rules, default_rules);
-
-        let c = candidate("code.exe", "", "", "");
-        let state = classify_with_state_pipeline(&c, true, false, &pipeline);
-        assert!(matches!(
-            state,
-            WindowState::Ignored(IgnoredReason::Maximized)
-        ));
-    }
-
-    #[test]
-    fn classify_with_state_pipeline_fullscreen() {
-        let user_rules = WindowRulesConfig::default();
-        let default_rules = WindowRulesConfig::default();
-        let pipeline = ClassificationPipeline::new(user_rules, default_rules);
-
-        let c = candidate("game.exe", "", "", "");
-        let state = classify_with_state_pipeline(&c, false, true, &pipeline);
-        assert!(matches!(
-            state,
-            WindowState::Ignored(IgnoredReason::Fullscreen)
-        ));
-    }
-
-    #[test]
-    fn classify_with_state_pipeline_normal_classification() {
-        let user_rules = WindowRulesConfig {
-            default_action: WindowAction::Tile,
-            rules: vec![rule(
-                MatchRule {
-                    exe: Some("explorer.exe".into()),
-                    ..Default::default()
-                },
-                WindowAction::Ignore,
-            )],
-        };
-        let default_rules = WindowRulesConfig::default();
-        let pipeline = ClassificationPipeline::new(user_rules, default_rules);
-
-        let c = candidate("explorer.exe", "", "", "");
-        let state = classify_with_state_pipeline(&c, false, false, &pipeline);
-        assert!(matches!(
-            state,
-            WindowState::Ignored(IgnoredReason::ExplicitRule)
-        ));
-    }
-
     // --- Pipeline learned rules slot tests ---
 
     /// The pipeline's learned rules layer is currently always empty, but
@@ -1219,5 +1284,634 @@ mod tests {
         let pipeline = ClassificationPipeline::new(user_rules, default_rules);
         let c = candidate("unknown.exe", "Some Title", "SomeClass", "");
         assert_eq!(pipeline.classify(&c), WindowAction::Ignore);
+    }
+
+    // --- Pipeline regex rule tests (pre-compiled via ClassificationPipeline) ---
+
+    /// Positive: pipeline classifies correctly when `exe_regex` is used.
+    ///
+    /// Verifies that pre-compiled regex patterns work through the pipeline's
+    /// [`CompiledRule`] path, not just the runtime [`matches_rule`] path.
+    #[test]
+    fn pipeline_exe_regex_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe_regex: Some("chrome\\.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("chrome.exe", "", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Positive: `exe_regex` is case-insensitive by default through the pipeline.
+    #[test]
+    fn pipeline_exe_regex_case_insensitive() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe_regex: Some("CHROME\\.EXE".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("chrome.exe", "", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Negative: `exe_regex` that doesn't match falls through to default action.
+    #[test]
+    fn pipeline_exe_regex_mismatch_falls_through() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe_regex: Some("firefox\\.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("chrome.exe", "", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Positive: pipeline classifies correctly when `title_regex` is used.
+    #[test]
+    fn pipeline_title_regex_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    title_regex: Some("^Settings".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
+        );
+        let c = candidate("settings.exe", "Settings - Display", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Float);
+    }
+
+    /// Negative: `title_regex` is case-sensitive — lowercase won't match `^Settings`.
+    #[test]
+    fn pipeline_title_regex_case_sensitive_mismatch() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    title_regex: Some("^Settings".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
+        );
+        let c = candidate("settings.exe", "settings - display", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Positive: pipeline classifies correctly when `class_regex` is used.
+    #[test]
+    fn pipeline_class_regex_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    class_regex: Some("Chrome.*".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("chrome.exe", "", "Chrome_WidgetWin_1", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Negative: `class_regex` is case-sensitive — lowercase won't match `Chrome.*`.
+    #[test]
+    fn pipeline_class_regex_case_sensitive_mismatch() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    class_regex: Some("Chrome.*".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("chrome.exe", "", "chrome_widgetwin_1", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Positive: pipeline classifies correctly when `process_path_regex` is used.
+    #[test]
+    fn pipeline_process_path_regex_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    process_path_regex: Some(".*\\\\Google\\\\Chrome\\\\.*".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate(
+            "chrome.exe",
+            "",
+            "",
+            "C:\\Program Files\\Google\\Chrome\\chrome.exe",
+        );
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Positive: `process_path_regex` is case-insensitive by default.
+    #[test]
+    fn pipeline_process_path_regex_case_insensitive() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    process_path_regex: Some(".*\\\\google\\\\chrome\\\\.*".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate(
+            "chrome.exe",
+            "",
+            "",
+            "C:\\Program Files\\Google\\Chrome\\chrome.exe",
+        );
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Negative: `process_path_regex` that doesn't match falls through.
+    #[test]
+    fn pipeline_process_path_regex_mismatch_falls_through() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    process_path_regex: Some(".*\\\\Firefox\\\\.*".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate(
+            "chrome.exe",
+            "",
+            "",
+            "C:\\Program Files\\Google\\Chrome\\chrome.exe",
+        );
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    // --- Pipeline with invalid regex patterns (pre-compiled) ---
+
+    /// Negative: invalid `exe_regex` pattern in pipeline is treated as non-match,
+    /// not a panic. The regex is pre-compiled at pipeline construction time.
+    #[test]
+    fn pipeline_invalid_exe_regex_treated_as_non_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe_regex: Some("[invalid(".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("anything.exe", "", "", "");
+        // Invalid regex → CompiledRegex::Invalid → non-match → falls through
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Negative: invalid `title_regex` pattern in pipeline is treated as non-match.
+    #[test]
+    fn pipeline_invalid_title_regex_treated_as_non_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    title_regex: Some("[invalid(".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("anything.exe", "Some Title", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Negative: invalid `class_regex` pattern in pipeline is treated as non-match.
+    #[test]
+    fn pipeline_invalid_class_regex_treated_as_non_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    class_regex: Some("[invalid(".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("anything.exe", "", "SomeClass", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Negative: invalid `process_path_regex` pattern in pipeline is treated as non-match.
+    #[test]
+    fn pipeline_invalid_process_path_regex_treated_as_non_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    process_path_regex: Some("[invalid(".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("anything.exe", "", "", "C:\\path\\anything.exe");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Negative: rule with ALL regex fields invalid still falls through gracefully.
+    #[test]
+    fn pipeline_all_invalid_regex_fields_treated_as_non_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe_regex: Some("[bad[".into()),
+                    title_regex: Some("(?broken".into()),
+                    class_regex: Some("[[[".into()),
+                    process_path_regex: Some("*invalid".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("test.exe", "Title", "Class", "C:\\path\\test.exe");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    // --- Pipeline with mixed exact + regex fields in a single rule ---
+
+    /// Positive: rule with both exact (`exe`) and regex (`title_regex`) fields
+    /// matches when both conditions are satisfied.
+    #[test]
+    fn pipeline_mixed_exact_and_regex_both_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("code.exe".into()),
+                    title_regex: Some(".*\\.rs - .+".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("code.exe", "main.rs - My Project", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Negative: rule with both exact and regex fields fails when exact matches
+    /// but regex doesn't (AND logic).
+    #[test]
+    fn pipeline_mixed_exact_and_regex_regex_mismatch() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("code.exe".into()),
+                    title_regex: Some(".*\\.rs - .+".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("code.exe", "settings.json - My Project", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Negative: rule with both exact and regex fields fails when regex matches
+    /// but exact doesn't (AND logic).
+    #[test]
+    fn pipeline_mixed_exact_and_regex_exact_mismatch() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("code.exe".into()),
+                    title_regex: Some(".*\\.rs - .+".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate("other.exe", "main.rs - My Project", "", "");
+        assert_eq!(p.classify(&c), WindowAction::Ignore);
+    }
+
+    /// Positive: rule combining all four regex fields with two exact fields
+    /// matches when every condition is satisfied.
+    #[test]
+    fn pipeline_all_regex_fields_plus_exact_match() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("chrome.exe".into()),
+                    title_regex: Some("New Tab.*".into()),
+                    exe_regex: Some("chrome\\.exe".into()),
+                    class_regex: Some("Chrome_WidgetWin_\\d+".into()),
+                    process_path_regex: Some(".*\\\\Chrome\\\\.*".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+            WindowAction::Ignore,
+        );
+        let c = candidate(
+            "chrome.exe",
+            "New Tab - Google Chrome",
+            "Chrome_WidgetWin_1",
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        );
+        assert_eq!(p.classify(&c), WindowAction::Tile);
+    }
+
+    /// Positive: rule with `title_contains` (exact substring) AND `class_regex`
+    /// matches when both are satisfied.
+    #[test]
+    fn pipeline_mixed_title_contains_and_class_regex() {
+        let p = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    title_contains: Some("Visual Studio Code".into()),
+                    class_regex: Some("Chrome_WidgetWin_1".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+            WindowAction::Tile,
+        );
+        let c = candidate(
+            "code.exe",
+            "main.rs - Visual Studio Code",
+            "Chrome_WidgetWin_1",
+            "",
+        );
+        assert_eq!(p.classify(&c), WindowAction::Float);
+    }
+
+    // --- Equivalence: matches_compiled_rule == matches_rule for regex fields ---
+
+    /// Helper to compile a single rule and compare `matches_rule` vs
+    /// `matches_compiled_rule`. Returns `true` if both produce the same result.
+    fn check_equivalence(match_rule: &MatchRule, c: &WindowCandidate) -> bool {
+        let r = rule(match_rule.clone(), WindowAction::Tile);
+        let compiled_rules = compile_rules(vec![r]);
+        assert_eq!(
+            compiled_rules.len(),
+            1,
+            "compile_rules should return exactly 1 rule"
+        );
+
+        let runtime = matches_rule(c, match_rule);
+        let compiled = matches_compiled_rule(c, &compiled_rules[0]);
+        runtime == compiled
+    }
+
+    /// Equivalence: `exe_regex` produces identical results from both paths.
+    #[test]
+    fn equivalence_exe_regex_positive() {
+        let mr = MatchRule {
+            exe_regex: Some("chrome\\.exe".into()),
+            ..Default::default()
+        };
+        let c = candidate("chrome.exe", "", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(matches_rule(&c, &mr), "guard: should match");
+    }
+
+    #[test]
+    fn equivalence_exe_regex_negative() {
+        let mr = MatchRule {
+            exe_regex: Some("firefox\\.exe".into()),
+            ..Default::default()
+        };
+        let c = candidate("chrome.exe", "", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(!matches_rule(&c, &mr), "guard: should not match");
+    }
+
+    #[test]
+    fn equivalence_exe_regex_case_insensitive() {
+        let mr = MatchRule {
+            exe_regex: Some("CHROME\\.EXE".into()),
+            ..Default::default()
+        };
+        let c = candidate("chrome.exe", "", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(
+            matches_rule(&c, &mr),
+            "guard: case-insensitive should match"
+        );
+    }
+
+    /// Equivalence: `title_regex` produces identical results from both paths.
+    #[test]
+    fn equivalence_title_regex_positive() {
+        let mr = MatchRule {
+            title_regex: Some("^Settings.*".into()),
+            ..Default::default()
+        };
+        let c = candidate("app.exe", "Settings - Display", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(matches_rule(&c, &mr), "guard: should match");
+    }
+
+    #[test]
+    fn equivalence_title_regex_negative() {
+        let mr = MatchRule {
+            title_regex: Some("^Settings.*".into()),
+            ..Default::default()
+        };
+        let c = candidate("app.exe", "Display - Settings", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(
+            !matches_rule(&c, &mr),
+            "guard: should not match (not at start)"
+        );
+    }
+
+    /// Equivalence: `class_regex` produces identical results from both paths.
+    #[test]
+    fn equivalence_class_regex_positive() {
+        let mr = MatchRule {
+            class_regex: Some("Chrome_WidgetWin_\\d+".into()),
+            ..Default::default()
+        };
+        let c = candidate("chrome.exe", "", "Chrome_WidgetWin_1", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(matches_rule(&c, &mr), "guard: should match");
+    }
+
+    #[test]
+    fn equivalence_class_regex_negative() {
+        let mr = MatchRule {
+            class_regex: Some("Chrome_WidgetWin_\\d+".into()),
+            ..Default::default()
+        };
+        let c = candidate("chrome.exe", "", "Chrome_WidgetWin_", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(!matches_rule(&c, &mr), "guard: should not match (no digit)");
+    }
+
+    /// Equivalence: `process_path_regex` produces identical results from both paths.
+    #[test]
+    fn equivalence_process_path_regex_positive() {
+        let mr = MatchRule {
+            process_path_regex: Some(".*\\\\Chrome\\\\.*".into()),
+            ..Default::default()
+        };
+        let c = candidate(
+            "chrome.exe",
+            "",
+            "",
+            "C:\\Program Files\\Chrome\\chrome.exe",
+        );
+        assert!(check_equivalence(&mr, &c));
+        assert!(matches_rule(&c, &mr), "guard: should match");
+    }
+
+    #[test]
+    fn equivalence_process_path_regex_negative() {
+        let mr = MatchRule {
+            process_path_regex: Some(".*\\\\Chrome\\\\.*".into()),
+            ..Default::default()
+        };
+        let c = candidate(
+            "chrome.exe",
+            "",
+            "",
+            "C:\\Program Files\\Firefox\\firefox.exe",
+        );
+        assert!(check_equivalence(&mr, &c));
+        assert!(!matches_rule(&c, &mr), "guard: should not match");
+    }
+
+    #[test]
+    fn equivalence_process_path_regex_case_insensitive() {
+        let mr = MatchRule {
+            process_path_regex: Some(".*\\\\chrome\\\\.*".into()),
+            ..Default::default()
+        };
+        let c = candidate(
+            "chrome.exe",
+            "",
+            "",
+            "C:\\Program Files\\Chrome\\chrome.exe",
+        );
+        assert!(check_equivalence(&mr, &c));
+        assert!(
+            matches_rule(&c, &mr),
+            "guard: case-insensitive should match"
+        );
+    }
+
+    /// Equivalence: invalid regex patterns produce `false` from both paths.
+    #[test]
+    fn equivalence_invalid_regex_both_return_false() {
+        let mr = MatchRule {
+            exe_regex: Some("[invalid(".into()),
+            ..Default::default()
+        };
+        let c = candidate("test.exe", "", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(
+            !matches_rule(&c, &mr),
+            "guard: invalid regex should return false"
+        );
+    }
+
+    /// Equivalence: all regex fields invalid still produces same result from both paths.
+    #[test]
+    fn equivalence_all_invalid_regex_fields_both_return_false() {
+        let mr = MatchRule {
+            exe_regex: Some("[bad[".into()),
+            title_regex: Some("(?broken".into()),
+            class_regex: Some("[[[".into()),
+            process_path_regex: Some("*invalid".into()),
+            ..Default::default()
+        };
+        let c = candidate("test.exe", "Title", "Class", "C:\\path\\test.exe");
+        assert!(check_equivalence(&mr, &c));
+        assert!(!matches_rule(&c, &mr), "guard: all invalid → false");
+    }
+
+    /// Equivalence: mixed exact + regex fields produce identical results.
+    #[test]
+    fn equivalence_mixed_exact_and_regex_both_match() {
+        let mr = MatchRule {
+            exe: Some("code.exe".into()),
+            title_regex: Some(".*\\.rs - .+".into()),
+            ..Default::default()
+        };
+        let c = candidate("code.exe", "main.rs - My Project", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(matches_rule(&c, &mr), "guard: both fields match");
+    }
+
+    #[test]
+    fn equivalence_mixed_exact_and_regex_partial_mismatch() {
+        let mr = MatchRule {
+            exe: Some("code.exe".into()),
+            title_regex: Some(".*\\.rs - .+".into()),
+            ..Default::default()
+        };
+        // exe matches but title_regex doesn't
+        let c = candidate("code.exe", "settings.json - My Project", "", "");
+        assert!(check_equivalence(&mr, &c));
+        assert!(!matches_rule(&c, &mr), "guard: AND logic → false");
+    }
+
+    /// Equivalence: comprehensive rule with all fields specified produces
+    /// identical results from both `matches_rule` and `matches_compiled_rule`.
+    #[test]
+    fn equivalence_comprehensive_all_fields() {
+        let mr = MatchRule {
+            exe: Some("chrome.exe".into()),
+            exe_regex: Some("chrome\\.exe".into()),
+            title: Some("New Tab - Google Chrome".into()),
+            title_contains: Some("New Tab".into()),
+            title_regex: Some("New Tab.*Chrome".into()),
+            class: Some("Chrome_WidgetWin_1".into()),
+            class_regex: Some("Chrome_WidgetWin_\\d+".into()),
+            process_path: Some("C:\\Program Files\\Google\\Chrome\\chrome.exe".into()),
+            process_path_regex: Some(".*\\\\Chrome\\\\.*".into()),
+        };
+        let c = candidate(
+            "chrome.exe",
+            "New Tab - Google Chrome",
+            "Chrome_WidgetWin_1",
+            "C:\\Program Files\\Google\\Chrome\\chrome.exe",
+        );
+        assert!(check_equivalence(&mr, &c));
+        assert!(matches_rule(&c, &mr), "guard: all fields should match");
     }
 }

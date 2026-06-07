@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
-use scrolling_tiling_manager::config::{StmConfig, load_default_rules, load_rules_config};
+use scrolling_tiling_manager::config::{StmConfig, dirs, load_default_rules, load_rules_config};
 use scrolling_tiling_manager::ipc::transport::PipeServer;
 use scrolling_tiling_manager::ipc::{SocketMessage, dispatch_with_registry};
 use scrolling_tiling_manager::registry::{WindowRegistry, hooks};
@@ -65,7 +65,8 @@ fn run_daemon(args: Args) -> Result<(), String> {
     let _app_config = StmConfig::default();
 
     // Load window rules from user config and bundled defaults.
-    let user_rules = load_rules_config(std::path::Path::new("stm-rules.yml"));
+    let user_rules_path = dirs::user_rules_path();
+    let user_rules = load_rules_config(&user_rules_path);
     let default_rules = load_default_rules();
 
     // 3. Create shared registry.
