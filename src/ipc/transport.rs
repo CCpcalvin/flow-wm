@@ -309,7 +309,7 @@ fn connect_to_named_pipe(pipe_name: &str) -> io::Result<PipeHandle> {
             None,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            HANDLE::default(),
+            None,
         )
     }
     .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, "daemon not running"))?;

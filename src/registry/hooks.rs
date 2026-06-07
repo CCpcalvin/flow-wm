@@ -18,7 +18,7 @@
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_QUIT};
@@ -110,7 +110,7 @@ impl HookThreadHandle {
     /// The hook thread will clean up all hooks and exit its message loop.
     pub fn stop(&self) {
         unsafe {
-            let _ = PostThreadMessageW(self.os_thread_id, WM_QUIT, None, None);
+            let _ = PostThreadMessageW(self.os_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
         }
     }
 }

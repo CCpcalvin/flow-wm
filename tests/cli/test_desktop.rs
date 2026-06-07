@@ -251,7 +251,7 @@ fn is_pipe_available(pipe: &str) -> bool {
             None,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            HANDLE::default(),
+            None,
         )
     };
 

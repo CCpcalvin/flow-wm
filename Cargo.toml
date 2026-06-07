@@ -30,7 +30,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 # Win32 bindings. Feature flags are transitive gates that enable functions
 # in other modules (e.g., Win32_System_IO gates ReadFile/WriteFile/ConnectNamedPipe;
 # Win32_Security gates CreateFileW/CreateNamedPipeW).
-windows = { version = "0.58", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Pipes",
     "Win32_System_IO",

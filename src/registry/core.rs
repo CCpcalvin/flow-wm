@@ -409,11 +409,11 @@ fn enum_toplevel_windows() -> Result<Vec<HWND>, String> {
 unsafe extern "system" fn enum_windows_callback(
     hwnd: HWND,
     l_param: LPARAM,
-) -> windows::Win32::Foundation::BOOL {
+) -> windows::core::BOOL {
     // SAFETY: l_param is a valid pointer to Vec<HWND> created in enum_toplevel_windows.
     let vec = unsafe { &mut *(l_param.0 as *mut Vec<HWND>) };
     vec.push(hwnd);
-    windows::Win32::Foundation::BOOL(1) // Continue enumeration.
+    windows::core::BOOL(1) // Continue enumeration.
 }
 
 #[cfg(test)]
