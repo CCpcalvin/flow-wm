@@ -1,0 +1,86 @@
+# Default window classification rules for ScrollingTilingManager.
+#
+# This file ships alongside stmd.exe and provides sensible defaults for common
+# Windows system windows that should NOT be tiled. Users can override any of
+# these rules by adding their own rules in stm-rules.yml (which is checked first).
+#
+# Format: first match wins. Each rule has a "match" clause (AND logic) and
+# an "action" (tile, float, or ignore).
+#
+# For match field documentation, see the MatchRule docstring in src/config/types.rs.
+
+default_action: tile
+
+rules:
+  # ── Windows Shell ────────────────────────────────────────────────────
+
+  # Windows taskbar
+  - match:
+      class: "Shell_TrayWnd"
+    action: ignore
+
+  # Desktop wallpaper host process (Windows 10+)
+  - match:
+      exe: "ApplicationFrameHost.exe"
+      class: "Windows.UI.Core.CoreWindow"
+    action: ignore
+
+  # Windows Search overlay
+  - match:
+      exe: "SearchUI.exe"
+    action: ignore
+
+  # Start Menu
+  - match:
+      exe: "ShellExperienceHost.exe"
+    action: ignore
+
+  # Windows Action Center / Quick Settings / notification toasts
+  - match:
+      exe: "ShellExperienceHost.exe"
+      class: "Windows.UI.Core.CoreWindow"
+    action: ignore
+
+  # ── System Dialogs ──────────────────────────────────────────────────
+
+  # Common Win32 dialog boxes (Open/Save As, Properties, etc.)
+  - match:
+      class: "#32770"
+    action: float
+
+  # Run dialog
+  - match:
+      class: "ComboBox"
+      exe: "Explorer.exe"
+    action: float
+
+  # ── Explorer ────────────────────────────────────────────────────────
+
+  # Windows Explorer file open/save dialogs
+  - match:
+      exe: "explorer.exe"
+      class: "CabinetWClass"
+    action: ignore
+
+  # ── Task Manager ────────────────────────────────────────────────────
+
+  - match:
+      exe: "Taskmgr.exe"
+    action: float
+
+  # ── Accessibility ───────────────────────────────────────────────────
+
+  # On-Screen Keyboard
+  - match:
+      class: "OSKMainClass"
+    action: ignore
+
+  # Magnifier
+  - match:
+      exe: "Magnify.exe"
+    action: ignore
+
+  # Narrator
+  - match:
+      exe: "Narrator.exe"
+    action: ignore

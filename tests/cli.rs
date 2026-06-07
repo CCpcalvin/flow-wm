@@ -13,8 +13,8 @@ mod common;
 #[path = "cli/daemon_lifecycle.rs"]
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]
-#[path = "cli/test_desktop.rs"]
-mod test_desktop;
-#[cfg(debug_assertions)]
 #[path = "cli/registry.rs"]
 mod registry;
+#[cfg(debug_assertions)]
+#[path = "cli/test_desktop.rs"]
+mod test_desktop;

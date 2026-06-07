@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
-use scrolling_tiling_manager::config::StmConfig;
+use scrolling_tiling_manager::config::{StmConfig, load_default_rules, load_rules_config};
 use scrolling_tiling_manager::ipc::transport::PipeServer;
 use scrolling_tiling_manager::ipc::{SocketMessage, dispatch_with_registry};
 use scrolling_tiling_manager::registry::{WindowRegistry, hooks};
@@ -61,11 +61,15 @@ fn run_daemon(args: Args) -> Result<(), String> {
         desktop::switch_to_desktop(desktop_name)?;
     }
 
-    // 2. Load config (TODO: load from file).
-    let config = StmConfig::default();
+    // 2. Load config (TODO: load app config from file).
+    let _app_config = StmConfig::default();
+
+    // Load window rules from user config and bundled defaults.
+    let user_rules = load_rules_config(std::path::Path::new("stm-rules.yml"));
+    let default_rules = load_default_rules();
 
     // 3. Create shared registry.
-    let registry = Arc::new(Mutex::new(WindowRegistry::new(&config)));
+    let registry = Arc::new(Mutex::new(WindowRegistry::new(&user_rules, &default_rules)));
 
     // 4. Scan existing windows.
     registry

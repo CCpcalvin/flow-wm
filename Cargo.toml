@@ -41,6 +41,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_StationsAndDesktops",
     "Win32_Graphics_Gdi",
 ] }
+regex = "1.12.3"
 
 [profile.release]
 opt-level = 3
@@ -53,3 +54,4 @@ targets = ["x86_64-pc-windows-msvc"]
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
+tempfile = "3.27.0"

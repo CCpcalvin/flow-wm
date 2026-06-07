@@ -42,14 +42,14 @@
 //! # Initialization Flow
 //!
 //! ```text
-//! 1. WindowRegistry::new(config)
-//!    └─ stores default_action + window_rules from config
+//! 1. WindowRegistry::new(user_rules, default_rules)
+//!    └─ builds ClassificationPipeline from user and default rule configs
 //!
 //! 2. scan_existing_windows()
 //!    └─ EnumWindows → for each visible, top-level, titled window:
 //!       ├─ get_window_info(hwnd)
 //!       └─ register_window_from_info(info)
-//!          ├─ classify_with_state(candidate, is_max, is_fs, rules, default)
+//!          ├─ classify_with_state_pipeline(candidate, is_max, is_fs, pipeline)
 //!          └─ insert into HashMap
 //!
 //! 3. start_hook_thread()
@@ -98,7 +98,7 @@ use std::collections::HashMap;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GW_OWNER, GetWindow};
 
-use crate::config::types::{StmConfig, WindowAction, WindowRule};
+use crate::config::types::WindowRulesConfig;
 
 use super::classification;
 use super::hooks::HookEvent;
@@ -109,7 +109,7 @@ use super::win32;
 ///
 /// `WindowRegistry` owns a `HashMap<isize, Window>` containing every tracked
 /// window, along with the currently focused window handle and the classification
-/// rules loaded from config.
+/// pipeline loaded from config.
 ///
 /// # How Windows Enter and Leave the Registry
 ///
@@ -136,8 +136,8 @@ use super::win32;
 ///   `Send` safety (see [module-level docs](super) for rationale).
 /// - `focused` — The HWND value of the currently focused window, or `None`.
 ///   Only updated when the focused window is already tracked in the registry.
-/// - `default_action` — From `StmConfig`; used when no window rule matches.
-/// - `window_rules` — Ordered list from `StmConfig`; first match wins.
+/// - `pipeline` — The multi-layer classification pipeline that combines
+///   user rules, default rules, and the default action.
 pub struct WindowRegistry {
     /// All tracked windows, keyed by HWND value (`isize` for `Send` safety).
     windows: HashMap<isize, Window>,
@@ -145,22 +145,26 @@ pub struct WindowRegistry {
     /// Currently focused window handle value.
     focused: Option<isize>,
 
-    /// Default classification action for windows not matching any rule.
-    default_action: WindowAction,
-
-    /// Window classification rules (evaluated top-to-bottom, first match wins).
-    window_rules: Vec<WindowRule>,
+    /// Multi-layer classification pipeline (user rules → learned → default → fallback).
+    pipeline: classification::ClassificationPipeline,
 }
 
 impl WindowRegistry {
-    /// Creates a new empty registry with classification settings from config.
+    /// Creates a new empty registry with classification settings from both configs.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_rules` - User-defined window rules from `stm-rules.yml`.
+    /// * `default_rules` - Bundled default rules from `default-stm-rules.yml`.
     #[must_use]
-    pub fn new(config: &StmConfig) -> Self {
+    pub fn new(user_rules: &WindowRulesConfig, default_rules: &WindowRulesConfig) -> Self {
         Self {
             windows: HashMap::new(),
             focused: None,
-            default_action: config.default_window_action,
-            window_rules: config.window_rules.clone(),
+            pipeline: classification::ClassificationPipeline::new(
+                user_rules.clone(),
+                default_rules.clone(),
+            ),
         }
     }
 
@@ -255,12 +259,11 @@ impl WindowRegistry {
             process_path: info.process_path.clone(),
         };
 
-        let state = classification::classify_with_state(
+        let state = classification::classify_with_state_pipeline(
             &candidate,
             info.is_maximized,
             info.is_fullscreen,
-            &self.window_rules,
-            self.default_action,
+            &self.pipeline,
         );
 
         let window = Window::new(
@@ -680,12 +683,17 @@ unsafe extern "system" fn enum_windows_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::StmConfig;
+    use crate::config::types::{WindowAction, WindowRulesConfig};
+
+    /// Helper to create a default user rules config and empty default rules.
+    fn default_rules() -> (WindowRulesConfig, WindowRulesConfig) {
+        (WindowRulesConfig::default(), WindowRulesConfig::default())
+    }
 
     #[test]
     fn new_registry_is_empty() {
-        let config = StmConfig::default();
-        let reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
         assert!(reg.focused.is_none());
@@ -693,8 +701,8 @@ mod tests {
 
     #[test]
     fn to_json_value_empty_registry() {
-        let config = StmConfig::default();
-        let reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
         let json = reg.to_json_value();
 
         assert_eq!(json["count"], 0);
@@ -704,8 +712,8 @@ mod tests {
 
     #[test]
     fn to_json_value_has_correct_structure() {
-        let config = StmConfig::default();
-        let reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
         let json = reg.to_json_value();
 
         assert!(json.get("windows").is_some());
@@ -715,10 +723,8 @@ mod tests {
 
     #[test]
     fn remove_window_clears_focus() {
-        let mut config = StmConfig::default();
-        config.default_window_action = WindowAction::Tile;
-
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 12345isize;
         let hwnd = HWND(hwnd_val as *mut _);
 
@@ -750,8 +756,8 @@ mod tests {
 
     #[test]
     fn minimize_and_restore_tiling_window() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 99999isize;
         let hwnd = HWND(hwnd_val as *mut _);
 
@@ -818,8 +824,8 @@ mod tests {
 
     #[test]
     fn set_focused_on_tracked_window() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 42isize;
 
         insert_test_window(
@@ -835,8 +841,8 @@ mod tests {
 
     #[test]
     fn set_focused_ignores_untracked_window() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
 
         // No windows in registry — focus should remain None.
         reg.set_focused(99999);
@@ -845,8 +851,8 @@ mod tests {
 
     #[test]
     fn set_focused_changes_between_windows() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
 
         insert_test_window(
             &mut reg,
@@ -870,8 +876,8 @@ mod tests {
 
     #[test]
     fn register_window_from_info_inserts_new_window() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 5555isize;
 
         let info = win32::WindowInfo {
@@ -902,8 +908,8 @@ mod tests {
 
     #[test]
     fn register_window_from_info_is_noop_for_existing() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 7777isize;
 
         let info = win32::WindowInfo {
@@ -941,9 +947,12 @@ mod tests {
 
     #[test]
     fn register_window_from_info_maximized_becomes_ignored() {
-        let mut config = StmConfig::default();
-        config.default_window_action = WindowAction::Tile;
-        let mut reg = WindowRegistry::new(&config);
+        let user = WindowRulesConfig {
+            default_action: WindowAction::Tile,
+            rules: vec![],
+        };
+        let default = WindowRulesConfig::default();
+        let mut reg = WindowRegistry::new(&user, &default);
 
         let info = win32::WindowInfo {
             hwnd: HWND(8888 as *mut _),
@@ -974,8 +983,8 @@ mod tests {
 
     #[test]
     fn process_pending_events_handles_created() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
 
         let (tx, rx) = std::sync::mpsc::channel();
         // Created event for an HWND that doesn't exist — will be ignored
@@ -989,8 +998,8 @@ mod tests {
 
     #[test]
     fn process_pending_events_handles_destroyed() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 33isize;
 
         insert_test_window(
@@ -1008,8 +1017,8 @@ mod tests {
 
     #[test]
     fn process_pending_events_handles_foreground() {
-        let config = StmConfig::default();
-        let mut reg = WindowRegistry::new(&config);
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 44isize;
 
         insert_test_window(

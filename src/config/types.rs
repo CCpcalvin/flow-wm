@@ -3,20 +3,36 @@
 //! Every field has `#[serde(default = "...")]` so partial YAML configs fill in
 //! missing fields with defaults. Full YAML round-trip is tested: every field
 //! survives `StmConfig → YAML → StmConfig`.
+//!
+//! # Config File Split
+//!
+//! Configuration is split across two YAML files:
+//!
+//! - **`stm.yml`** ([`StmConfig`]) — Application settings (hotkeys, padding,
+//!   animation, etc.). Loaded from `%APPDATA%\stm\stm.yml`.
+//!
+//! - **`stm-rules.yml`** ([`WindowRulesConfig`]) — Window classification rules
+//!   and default action. Loaded from `%APPDATA%\stm\stm-rules.yml`.
+//!
+//! This separation allows users to edit rules frequently (adding ignore patterns
+//! for new apps) without risk of corrupting their app settings, and vice versa.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Top-level configuration structure.
+/// Top-level application configuration structure.
 ///
 /// Loaded from `%APPDATA%\stm\stm.yml`. Every field has a default, so even an
 /// empty YAML file `{}` produces a valid config.
+///
+/// This struct contains **application settings only** — hotkeys, padding,
+/// animation, etc. Window classification rules live in a separate file
+/// ([`WindowRulesConfig`]) to allow independent editing.
 ///
 /// # Example
 ///
 /// ```yaml
 /// super_key: VK_F24
-/// default_window_action: tile
 /// column_width: 960
 /// min_column_width_px: 320
 /// padding:
@@ -26,11 +42,6 @@ use serde::{Deserialize, Serialize};
 /// hotkeys:
 ///   focus_left: Super+H
 ///   focus_right: Super+L
-/// window_rules:
-///   - match:
-///       exe: "explorer.exe"
-///       title_contains: "Open"
-///     action: ignore
 /// animation:
 ///   enabled: true
 ///   duration_ms: 180
@@ -43,10 +54,6 @@ pub struct StmConfig {
     /// The virtual key code treated as the Super/modifier key.
     #[serde(default = "default_super_key")]
     pub super_key: String,
-
-    /// Default action for windows not matching any rule.
-    #[serde(default = "default_window_action")]
-    pub default_window_action: WindowAction,
 
     /// Default column width in pixels. Default: 960.
     #[serde(default = "default_column_width")]
@@ -64,10 +71,6 @@ pub struct StmConfig {
     /// Hotkey bindings.
     #[serde(default)]
     pub hotkeys: Hotkeys,
-
-    /// Window classification rules (first match wins).
-    #[serde(default)]
-    pub window_rules: Vec<WindowRule>,
 
     /// Animation settings.
     #[serde(default)]
@@ -100,12 +103,10 @@ impl Default for StmConfig {
     fn default() -> Self {
         Self {
             super_key: default_super_key(),
-            default_window_action: default_window_action(),
             column_width: default_column_width(),
             min_column_width_px: default_min_column_width_px(),
             padding: Padding::default(),
             hotkeys: Hotkeys::default(),
-            window_rules: Vec::new(),
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
         }
@@ -279,7 +280,7 @@ default_hotkey!(default_place_above, "Super+A");
 /// A single window classification rule.
 ///
 /// Rules are evaluated **top-to-bottom, first match wins** against new windows.
-/// If no rule matches, [`StmConfig::default_window_action`] is used.
+/// If no rule matches, [`WindowRulesConfig::default_action`] is used.
 ///
 /// The `match` field uses `#[serde(rename = "match")]` so the YAML key is
 /// `match` while the Rust field is `match_` (avoiding the reserved word).
@@ -300,29 +301,84 @@ pub struct WindowRule {
 
 /// Match criteria for a window rule.
 ///
-/// All fields are optional — a rule matches if **all specified fields** match.
-/// Fields like `title_contains` are case-insensitive; `title_regex` uses full
-/// regex matching.
+/// All fields are optional — a rule matches if **all specified fields** match
+/// (AND logic). Unspecified (`None`) fields are ignored entirely.
+///
+/// Each field supports a different matching mode:
+///
+/// - **Exact match** (`exe`, `title`, `class`, `process_path`) — the candidate
+///   string must equal the rule value exactly.
+///
+/// - **Substring match** (`title_contains`) — the rule value must appear as a
+///   contiguous substring of the candidate string.
+///
+/// - **Regex match** (`exe_regex`, `title_regex`, `class_regex`,
+///   `process_path_regex`) — the rule value is compiled as a Rust regex and the
+///   full candidate string must match (not just a substring). Uses the `regex`
+///   crate's syntax.
+///
+/// # Case Sensitivity
+///
+/// | Field               | Semantics                                         |
+/// |---------------------|---------------------------------------------------|
+/// | `exe`               | Case-insensitive (Windows paths are case-insensitive) |
+/// | `exe_regex`         | Case-insensitive by default (Windows paths)       |
+/// | `title`             | Case-sensitive                                    |
+/// | `title_contains`    | Case-sensitive                                    |
+/// | `title_regex`       | Case-sensitive (use `(?i)` for case-insensitive)  |
+/// | `class`             | Case-sensitive                                    |
+/// | `class_regex`       | Case-sensitive (use `(?i)` for case-insensitive)  |
+/// | `process_path`      | Case-insensitive (Windows paths)                  |
+/// | `process_path_regex` | Case-insensitive by default (Windows paths)      |
+///
+/// **Why are `exe` and `process_path` case-insensitive?**
+///
+/// On Windows, the filesystem is case-insensitive — `chrome.exe` and `Chrome.exe`
+/// refer to the same file. Window class names (`class`) and titles (`title`) are
+/// case-sensitive strings that applications control, so they are matched exactly.
+/// Regex fields use the `(?i)` / `(?-i)` inline flags if the user needs different
+/// behavior.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct MatchRule {
-    /// Exact executable name (e.g., `"code.exe"`).
+    /// Exact executable name (e.g., `"code.exe"`). Case-insensitive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
-    /// Exact window title.
+
+    /// Exact window title. Case-sensitive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Case-insensitive substring match on title.
+
+    /// Case-sensitive substring match on title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_contains: Option<String>,
-    /// Full regex match on title.
+
+    /// Full regex match on title. Case-sensitive.
+    /// Use `(?i)` inline flag for case-insensitive matching.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_regex: Option<String>,
-    /// Win32 window class name.
+
+    /// Exact Win32 window class name. Case-sensitive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
-    /// Full executable path (glob pattern).
+
+    /// Exact full executable path. Case-insensitive (Windows filesystem).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_path: Option<String>,
+
+    /// Regex on executable name. Case-insensitive by default.
+    /// Use `(?-i)` inline flag to opt into case-sensitive matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_regex: Option<String>,
+
+    /// Regex on Win32 window class name. Case-sensitive.
+    /// Use `(?i)` inline flag for case-insensitive matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_regex: Option<String>,
+
+    /// Regex on full executable path. Case-insensitive by default.
+    /// Use `(?-i)` inline flag to opt into case-sensitive matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_path_regex: Option<String>,
 }
 
 /// Action to apply when a window rule matches.
@@ -339,6 +395,49 @@ pub enum WindowAction {
     Float,
     /// Excluded from tiling entirely (e.g., fullscreen apps).
     Ignore,
+}
+
+/// Window classification configuration, loaded from `stm-rules.yml`.
+///
+/// This is the user-facing window rules file. Rules are evaluated top-to-bottom,
+/// first match wins. If no rule matches, `default_action` is used.
+///
+/// Loaded from `%APPDATA%\stm\stm-rules.yml`. If the file doesn't exist,
+/// defaults to an empty rule list with `default_action: tile`.
+///
+/// # Example
+///
+/// ```yaml
+/// default_action: tile
+/// rules:
+///   - match:
+///       exe: "explorer.exe"
+///       title_contains: "Open"
+///     action: ignore
+///   - match:
+///       class: "Chrome_WidgetWin_1"
+///     action: tile
+///     initial_width_eighths: 4
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WindowRulesConfig {
+    /// Default action for windows not matching any rule.
+    #[serde(default = "default_window_action")]
+    pub default_action: WindowAction,
+
+    /// Window classification rules (first match wins).
+    #[serde(default)]
+    pub rules: Vec<WindowRule>,
+}
+
+impl Default for WindowRulesConfig {
+    /// Returns a default config with `tile` as the default action and no rules.
+    fn default() -> Self {
+        Self {
+            default_action: default_window_action(),
+            rules: Vec::new(),
+        }
+    }
 }
 
 /// Animation configuration for layout transitions.
@@ -428,7 +527,6 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).expect("serialize");
         let parsed: StmConfig = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(parsed.super_key, "VK_F24");
-        assert_eq!(parsed.default_window_action, WindowAction::Tile);
         assert_eq!(parsed.column_width, 960);
         assert_eq!(parsed.min_column_width_px, 320);
         assert_eq!(parsed.padding.window, 4);
@@ -439,23 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn config_from_yaml_with_rules() {
+    fn config_from_yaml_with_settings() {
         let yaml = r#"
 super_key: VK_F24
-default_window_action: tile
 padding:
   window: 8
   up: 10
   down: 40
-window_rules:
-  - match:
-      exe: "explorer.exe"
-      title_contains: "Open"
-    action: ignore
-  - match:
-      class: "Chrome_WidgetWin_1"
-    action: tile
-    initial_width_eighths: 4
 animation:
   enabled: false
 "#;
@@ -463,8 +551,6 @@ animation:
         assert_eq!(config.padding.window, 8);
         assert_eq!(config.padding.up, 10);
         assert_eq!(config.padding.down, 40);
-        assert_eq!(config.window_rules.len(), 2);
-        assert_eq!(config.window_rules[0].action, WindowAction::Ignore);
         assert!(!config.animation.enabled);
     }
 
@@ -475,7 +561,6 @@ animation:
         let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.padding.window, 4);
-        assert!(config.window_rules.is_empty());
     }
 
     // --- Integration: Full field preservation through round-trip ---
@@ -485,7 +570,6 @@ animation:
         // Positive: every field survives YAML → StmConfig → YAML
         let config = StmConfig {
             super_key: "VK_LWIN".into(),
-            default_window_action: WindowAction::Float,
             column_width: 1200,
             min_column_width_px: 400,
             padding: Padding {
@@ -508,34 +592,6 @@ animation:
                 reload_config: "Alt+Shift+R".into(),
                 place_above: "Alt+A".into(),
             },
-            window_rules: vec![
-                WindowRule {
-                    match_: MatchRule {
-                        exe: Some("firefox.exe".into()),
-                        title: None,
-                        title_contains: Some("YouTube".into()),
-                        title_regex: None,
-                        class: Some("MozillaWindowClass".into()),
-                        process_path: None,
-                    },
-                    action: WindowAction::Tile,
-                    initial_width_eighths: Some(6),
-                    override_persist: true,
-                },
-                WindowRule {
-                    match_: MatchRule {
-                        exe: None,
-                        title: Some("Calculator".into()),
-                        title_contains: None,
-                        title_regex: Some("^Settings".into()),
-                        class: None,
-                        process_path: Some("C:\\Windows\\System32\\calc.exe".into()),
-                    },
-                    action: WindowAction::Ignore,
-                    initial_width_eighths: None,
-                    override_persist: false,
-                },
-            ],
             animation: AnimationConfig {
                 enabled: false,
                 duration_ms: 250,
@@ -550,7 +606,6 @@ animation:
         let parsed: StmConfig = serde_yaml::from_str(&yaml).expect("deserialize all fields");
 
         assert_eq!(parsed.super_key, "VK_LWIN");
-        assert_eq!(parsed.default_window_action, WindowAction::Float);
         assert_eq!(parsed.column_width, 1200);
         assert_eq!(parsed.min_column_width_px, 400);
         assert_eq!(parsed.padding.window, 6);
@@ -558,14 +613,6 @@ animation:
         assert_eq!(parsed.padding.down, 40);
         assert_eq!(parsed.hotkeys.focus_left, "Alt+H");
         assert_eq!(parsed.hotkeys.place_above, "Alt+A");
-        assert_eq!(parsed.window_rules.len(), 2);
-        assert_eq!(parsed.window_rules[0].action, WindowAction::Tile);
-        assert_eq!(parsed.window_rules[0].initial_width_eighths, Some(6));
-        assert!(parsed.window_rules[0].override_persist);
-        assert_eq!(
-            parsed.window_rules[1].match_.process_path,
-            Some("C:\\Windows\\System32\\calc.exe".into())
-        );
         assert!(!parsed.animation.enabled);
         assert_eq!(parsed.animation.duration_ms, 250);
         assert_eq!(parsed.animation.easing, "ease-in-out-cubic");
@@ -576,55 +623,7 @@ animation:
     }
 
     #[test]
-    fn config_with_skip_serializing_if_false_defaults() {
-        // Positive: fields with skip_serializing_if serialize when set
-        let yaml = r#"
-super_key: VK_RWIN
-window_rules:
-  - match:
-      exe: "notepad.exe"
-    action: tile
-    initial_width_eighths: 5
-    override_persist: true
-"#;
-        let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(config.window_rules.len(), 1);
-        assert_eq!(config.window_rules[0].initial_width_eighths, Some(5));
-        assert!(config.window_rules[0].override_persist);
-    }
-
-    #[test]
-    fn config_invalid_enum_rejects() {
-        // Negative: invalid window_action value returns parse error
-        let yaml = r#"
-default_window_action: foobar
-"#;
-        let result = serde_yaml::from_str::<StmConfig>(yaml);
-        assert!(result.is_err(), "invalid enum value should reject");
-    }
-
-    #[test]
-    fn config_all_window_actions_parse() {
-        // Positive: all three window actions parse correctly
-        for action_str in ["tile", "float", "ignore"] {
-            let yaml = format!("default_window_action: {action_str}");
-            let config: StmConfig = serde_yaml::from_str(&yaml).expect(&yaml);
-            assert_eq!(
-                config.default_window_action,
-                match action_str {
-                    "tile" => WindowAction::Tile,
-                    "float" => WindowAction::Float,
-                    "ignore" => WindowAction::Ignore,
-                    _ => unreachable!(),
-                },
-                "action mismatch for {action_str}"
-            );
-        }
-    }
-
-    #[test]
     fn config_validate_rejects_negative_window_padding() {
-        // Negative: padding.window < 0 should fail validation
         let mut config = StmConfig::default();
         config.padding.window = -1;
         assert!(config.validate().is_err());
@@ -633,7 +632,6 @@ default_window_action: foobar
 
     #[test]
     fn config_validate_rejects_negative_up_padding() {
-        // Negative: padding.up < 0 should fail validation
         let mut config = StmConfig::default();
         config.padding.up = -5;
         assert!(config.validate().is_err());
@@ -642,7 +640,6 @@ default_window_action: foobar
 
     #[test]
     fn config_validate_rejects_negative_down_padding() {
-        // Negative: padding.down < 0 should fail validation
         let mut config = StmConfig::default();
         config.padding.down = -10;
         assert!(config.validate().is_err());
@@ -651,7 +648,6 @@ default_window_action: foobar
 
     #[test]
     fn config_validate_accepts_zero_padding() {
-        // Positive: all zeros is valid
         let mut config = StmConfig::default();
         config.padding.window = 0;
         config.padding.up = 0;
@@ -661,13 +657,11 @@ default_window_action: foobar
 
     #[test]
     fn config_validate_accepts_default_config() {
-        // Positive: default config should always validate
         assert!(StmConfig::default().validate().is_ok());
     }
 
     #[test]
     fn config_validate_rejects_zero_min_column_width() {
-        // Negative: min_column_width_px = 0 should fail
         let mut config = StmConfig::default();
         config.min_column_width_px = 0;
         assert!(config.validate().is_err());
@@ -681,7 +675,6 @@ default_window_action: foobar
 
     #[test]
     fn config_validate_rejects_min_exceeding_column_width() {
-        // Negative: min_column_width_px > column_width should fail
         let mut config = StmConfig::default();
         config.min_column_width_px = 1000;
         config.column_width = 960;
@@ -696,10 +689,130 @@ default_window_action: foobar
 
     #[test]
     fn config_validate_accepts_min_equal_to_column_width() {
-        // Positive: min_column_width_px == column_width is valid (single-width columns only)
         let mut config = StmConfig::default();
         config.min_column_width_px = 960;
         config.column_width = 960;
         assert!(config.validate().is_ok());
+    }
+
+    // --- WindowRulesConfig tests ---
+
+    #[test]
+    fn window_rules_config_default_roundtrips() {
+        let config = WindowRulesConfig::default();
+        let yaml = serde_yaml::to_string(&config).expect("serialize");
+        let parsed: WindowRulesConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(parsed.default_action, WindowAction::Tile);
+        assert!(parsed.rules.is_empty());
+    }
+
+    #[test]
+    fn window_rules_config_from_yaml() {
+        let yaml = r#"
+default_action: float
+rules:
+  - match:
+      exe: "explorer.exe"
+      title_contains: "Open"
+    action: ignore
+  - match:
+      class: "Chrome_WidgetWin_1"
+    action: tile
+    initial_width_eighths: 4
+"#;
+        let config: WindowRulesConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(config.default_action, WindowAction::Float);
+        assert_eq!(config.rules.len(), 2);
+        assert_eq!(config.rules[0].action, WindowAction::Ignore);
+        assert_eq!(config.rules[1].initial_width_eighths, Some(4));
+    }
+
+    #[test]
+    fn window_rules_config_empty_yaml() {
+        let yaml = "{}";
+        let config: WindowRulesConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(config.default_action, WindowAction::Tile);
+        assert!(config.rules.is_empty());
+    }
+
+    #[test]
+    fn window_rules_config_with_regex_fields_roundtrips() {
+        let config = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![WindowRule {
+                match_: MatchRule {
+                    exe: None,
+                    title: None,
+                    title_contains: None,
+                    title_regex: Some("^Settings".into()),
+                    class: Some("SettingsApp".into()),
+                    class_regex: Some("Settings.*".into()),
+                    process_path: None,
+                    exe_regex: Some("chrome\\.exe".into()),
+                    process_path_regex: Some(".*\\\\Google\\\\Chrome\\\\.*".into()),
+                },
+                action: WindowAction::Float,
+                initial_width_eighths: None,
+                override_persist: false,
+            }],
+        };
+
+        let yaml = serde_yaml::to_string(&config).expect("serialize");
+        let parsed: WindowRulesConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(parsed.default_action, WindowAction::Ignore);
+        assert_eq!(parsed.rules.len(), 1);
+        assert_eq!(
+            parsed.rules[0].match_.exe_regex,
+            Some("chrome\\.exe".into())
+        );
+        assert_eq!(
+            parsed.rules[0].match_.class_regex,
+            Some("Settings.*".into())
+        );
+        assert_eq!(
+            parsed.rules[0].match_.process_path_regex,
+            Some(".*\\\\Google\\\\Chrome\\\\.*".into())
+        );
+    }
+
+    #[test]
+    fn window_rules_config_all_window_actions_parse() {
+        for action_str in ["tile", "float", "ignore"] {
+            let yaml = format!("default_action: {action_str}");
+            let config: WindowRulesConfig = serde_yaml::from_str(&yaml).expect(&yaml);
+            assert_eq!(
+                config.default_action,
+                match action_str {
+                    "tile" => WindowAction::Tile,
+                    "float" => WindowAction::Float,
+                    "ignore" => WindowAction::Ignore,
+                    _ => unreachable!(),
+                },
+                "action mismatch for {action_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_rules_config_invalid_enum_rejects() {
+        let yaml = r#"
+default_action: foobar
+"#;
+        let result = serde_yaml::from_str::<WindowRulesConfig>(yaml);
+        assert!(result.is_err(), "invalid enum value should reject");
+    }
+
+    #[test]
+    fn match_rule_with_new_regex_fields_serializes_correctly() {
+        let rule = MatchRule {
+            exe_regex: Some("msedge\\.exe".into()),
+            class_regex: Some("Edge.*".into()),
+            process_path_regex: Some(".*\\\\Microsoft\\\\Edge.*".into()),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&rule).expect("serialize");
+        assert!(yaml.contains("exe_regex: msedge\\.exe"));
+        assert!(yaml.contains("class_regex: Edge.*"));
+        assert!(yaml.contains("process_path_regex:"));
     }
 }

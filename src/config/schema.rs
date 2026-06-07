@@ -1,15 +1,14 @@
 //! JSON Schema generation for config editor autocomplete.
 //!
-//! Generates a JSON Schema from [`super::types::StmConfig`] via
-//! `schemars`. Write the output to `%APPDATA%\stm\stm-config-schema.json`
-//! for VS Code / Neovim YAML autocomplete.
+//! Generates JSON Schemas from both [`super::types::StmConfig`] (app settings)
+//! and [`super::types::WindowRulesConfig`] (window rules) via `schemars`.
 
 use crate::common::{StmError, StmResult};
 use schemars::schema_for;
 
-use super::types::StmConfig;
+use super::types::{StmConfig, WindowRulesConfig};
 
-/// Generate the JSON Schema for `StmConfig`.
+/// Generate the JSON Schema for [`StmConfig`] (app settings).
 ///
 /// The schema can be written to `%APPDATA%\stm\stm-config-schema.json`
 /// for editor autocomplete support (VS Code, Neovim with yaml-language-server).
@@ -17,6 +16,16 @@ pub fn generate_config_schema() -> StmResult<String> {
     let schema = schema_for!(StmConfig);
     serde_json::to_string_pretty(&schema)
         .map_err(|e| StmError::Config(format!("schema generation failed: {e}")))
+}
+
+/// Generate the JSON Schema for [`WindowRulesConfig`] (window rules).
+///
+/// The schema can be written to `%APPDATA%\stm\stm-rules-schema.json`
+/// for editor autocomplete support on the rules file.
+pub fn generate_rules_schema() -> StmResult<String> {
+    let schema = schema_for!(WindowRulesConfig);
+    serde_json::to_string_pretty(&schema)
+        .map_err(|e| StmError::Config(format!("rules schema generation failed: {e}")))
 }
 
 #[cfg(test)]
@@ -41,7 +50,6 @@ mod tests {
         assert!(json.contains("column_width"));
         assert!(json.contains("padding"));
         assert!(json.contains("hotkeys"));
-        assert!(json.contains("window_rules"));
         assert!(json.contains("animation"));
     }
 
@@ -58,12 +66,10 @@ mod tests {
 
         let expected_keys = [
             "super_key",
-            "default_window_action",
             "column_width",
             "min_column_width_px",
             "padding",
             "hotkeys",
-            "window_rules",
             "animation",
             "minimize_restore",
         ];
@@ -77,7 +83,6 @@ mod tests {
 
     #[test]
     fn schema_padding_has_window_up_down() {
-        // Positive: nested Padding schema must have window/up/down
         let json = generate_config_schema().expect("schema gen");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
 
@@ -85,7 +90,6 @@ mod tests {
             .pointer("/properties/padding")
             .expect("has /properties/padding");
 
-        // schemars wraps $ref in allOf; resolve to definitions
         let ref_path = padding_schema
             .get("allOf")
             .and_then(|v| v.get(0))
@@ -107,7 +111,6 @@ mod tests {
 
     #[test]
     fn schema_hotkeys_has_all_bindings() {
-        // Positive: Hotkeys schema must list every binding
         let json = generate_config_schema().expect("schema gen");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
 
@@ -149,20 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_window_rules_is_array() {
-        // Positive: window_rules must be typed as an array
-        let json = generate_config_schema().expect("schema gen");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
-        let wr_type = parsed
-            .pointer("/properties/window_rules")
-            .and_then(|v| v.get("type"))
-            .expect("window_rules has a type");
-        assert_eq!(wr_type.as_str(), Some("array"));
-    }
-
-    #[test]
     fn schema_animation_has_enabled_duration_easing() {
-        // Positive: AnimationConfig schema must list all three fields
         let json = generate_config_schema().expect("schema gen");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
 
@@ -188,5 +178,66 @@ mod tests {
         assert!(obj.contains_key("enabled"));
         assert!(obj.contains_key("duration_ms"));
         assert!(obj.contains_key("easing"));
+    }
+
+    // --- Rules schema tests ---
+
+    #[test]
+    fn rules_schema_is_valid_json() {
+        let json = generate_rules_schema().expect("rules schema gen");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("schema should be valid JSON");
+        assert!(parsed.is_object());
+        let obj = parsed.as_object().expect("schema is an object");
+        assert!(obj.contains_key("properties"));
+    }
+
+    #[test]
+    fn rules_schema_has_default_action_and_rules() {
+        let json = generate_rules_schema().expect("rules schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+        let props = parsed
+            .pointer("/properties")
+            .expect("has /properties")
+            .as_object()
+            .expect("properties is object");
+
+        assert!(props.contains_key("default_action"));
+        assert!(props.contains_key("rules"));
+    }
+
+    #[test]
+    fn rules_schema_rules_is_array() {
+        let json = generate_rules_schema().expect("rules schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+        let rules_type = parsed
+            .pointer("/properties/rules")
+            .and_then(|v| v.get("type"))
+            .expect("rules has a type");
+        assert_eq!(rules_type.as_str(), Some("array"));
+    }
+
+    #[test]
+    fn rules_schema_match_rule_has_regex_fields() {
+        let json = generate_rules_schema().expect("rules schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+
+        // Navigate to the MatchRule properties via definitions
+        let match_ref = parsed
+            .pointer("/definitions/MatchRule/properties")
+            .expect("has MatchRule definition with properties");
+
+        let obj = match_ref
+            .as_object()
+            .expect("MatchRule properties is object");
+        assert!(obj.contains_key("exe"));
+        assert!(obj.contains_key("exe_regex"));
+        assert!(obj.contains_key("title"));
+        assert!(obj.contains_key("title_contains"));
+        assert!(obj.contains_key("title_regex"));
+        assert!(obj.contains_key("class"));
+        assert!(obj.contains_key("class_regex"));
+        assert!(obj.contains_key("process_path"));
+        assert!(obj.contains_key("process_path_regex"));
     }
 }
