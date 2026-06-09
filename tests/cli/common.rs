@@ -26,57 +26,14 @@ pub fn unique_pipe_name() -> String {
 /// Build an [`assert_cmd::Command`] for the `stm` CLI binary pre-configured with the given
 /// pipe name and a default command timeout.
 ///
-/// Suitable for commands that do **not** spawn a daemon (`stop`, `reload-config`, etc.).
-/// For `stm start`, use [`daemon_start`] instead — it avoids capturing stdout/stderr via
-/// pipes, which would be held open by the spawned daemon process.
+/// Suitable for CLI commands that do **not** spawn a daemon (`stop`,
+/// `reload-config`, etc.). For spawning the daemon in tests, use
+/// [`crate::test_desktop::start_test_daemon`] which runs it on an isolated
+/// desktop.
 pub fn stm(pipe: &str) -> Command {
     let mut cmd = Command::cargo_bin("stm").expect("stm binary should be built by cargo test");
     cmd.env(PIPE_ENV, pipe).timeout(COMMAND_TIMEOUT);
     cmd
-}
-
-/// Run `stm start` without capturing stdout/stderr.
-///
-/// `stm start` spawns `stmd.exe` as a child process. If stdout/stderr were captured via
-/// pipes (as `assert_cmd` does), the daemon would inherit the write end of those pipes
-/// and keep them open after `stm` exits, preventing the test from reading EOF. Using
-/// `.status()` avoids pipe capture entirely.
-///
-/// # Panics
-///
-/// Panics if the `stm` binary cannot be found, the process fails to spawn, the command
-/// exits with a non-zero status, or the timeout expires.
-pub fn daemon_start(pipe: &str) {
-    let exe = assert_cmd::cargo_bin!("stm");
-
-    let mut child = std::process::Command::new(&exe)
-        .arg("start")
-        .env(PIPE_ENV, pipe)
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn stm: {e}"));
-
-    let deadline = std::time::Instant::now() + COMMAND_TIMEOUT;
-    loop {
-        match child
-            .try_wait()
-            .unwrap_or_else(|e| panic!("failed to wait on stm: {e}"))
-        {
-            Some(status) => {
-                assert!(
-                    status.success(),
-                    "stm start exited with {status} (pipe={pipe})"
-                );
-                return;
-            }
-            None => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "stm start timed out after {COMMAND_TIMEOUT:?} (pipe={pipe})"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
 }
 
 /// Ensure the daemon for the given pipe is stopped, ignoring errors if it was not running.
