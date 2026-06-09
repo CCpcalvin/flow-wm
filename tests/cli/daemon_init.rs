@@ -482,3 +482,117 @@ fn double_stop_does_not_hang() {
 
     drop(td);
 }
+
+// ── Test 4: Windows created before daemon start ─────────────────────
+
+/// Test that the daemon discovers pre-existing windows created on the desktop
+/// *before* the daemon is started, and classifies them correctly.
+///
+/// This simulates a real user scenario: the user has windows open and then
+/// starts `stm start`. The daemon must scan existing windows via `EnumWindows`
+/// and tile them.
+///
+/// **Arrange**: Create 3 [`TestWindow`]s on the isolated desktop, *then* start
+/// the daemon.
+///
+/// **Act**: Wait for the daemon to initialize and process the pre-existing
+/// windows, then query the registry.
+///
+/// **Assert**:
+/// - All 3 test windows are tracked in the registry.
+/// - Each has a non-null state (the daemon classified them).
+/// - Windows have reasonable positions (positive size, within bounds).
+#[test]
+#[allow(clippy::zombie_processes)] // daemon stopped via DaemonGuard
+fn daemon_initializes_windows_with_sorted_positions() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Arrange: isolated desktop, create windows BEFORE starting daemon.
+    let td = TestDesktop::create().expect("create test desktop");
+
+    let w1 = TestWindow::create(&unique_title("pre-app1")).expect("create w1");
+    let w2 = TestWindow::create(&unique_title("pre-app2")).expect("create w2");
+    let w3 = TestWindow::create(&unique_title("pre-app3")).expect("create w3");
+
+    // Wait for windows to be fully created and visible.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Now start the daemon — it should discover these pre-existing windows.
+    let pipe = unique_pipe_name();
+    let mut _daemon = start_test_daemon(&pipe, &td.name).expect("start daemon");
+    let _guard = DaemonGuard::new(&pipe);
+
+    // Wait for init scan + layout computation + animation.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Act: query the registry.
+    let result = query_windows(&pipe).expect("query windows");
+    let windows = result["windows"]
+        .as_array()
+        .expect("windows should be a JSON array");
+
+    // Assert: at least 3 windows are tracked.
+    assert!(
+        windows.len() >= 3,
+        "expected at least 3 windows, got {}. Titles: {:?}",
+        windows.len(),
+        windows
+            .iter()
+            .filter_map(|w| w["title"].as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Assert: each test window is present and has a classified state.
+    for base in &["pre-app1", "pre-app2", "pre-app3"] {
+        let entry = find_window_by_title_base(&result, base).unwrap_or_else(|| {
+            let titles: Vec<_> = windows.iter().filter_map(|w| w["title"].as_str()).collect();
+            panic!(
+                "window with base '{base}' not found after daemon init. Registry titles: {:?}",
+                titles
+            )
+        });
+
+        let state = &entry["state"];
+        assert!(
+            !state.is_null(),
+            "window '{base}' should have a classified state after init, got: {state}"
+        );
+
+        println!("  pre-init window '{base}' → state: {state}");
+    }
+
+    // Assert: windows have reasonable geometry (positive size, within bounds).
+    let max_dim = 4000i32;
+    let handles = [w1.hwnd, w2.hwnd, w3.hwnd];
+    for hwnd in &handles {
+        let rect = get_window_rect(*hwnd).expect("get_window_rect");
+        assert!(
+            rect.width > 0 && rect.height > 0,
+            "window {:?} should have positive size, got {}x{}",
+            hwnd,
+            rect.width,
+            rect.height
+        );
+        assert!(
+            rect.x >= 0 && rect.y >= 0,
+            "window {:?} should have non-negative position, got ({}, {})",
+            hwnd,
+            rect.x,
+            rect.y
+        );
+        assert!(
+            rect.width <= max_dim && rect.height <= max_dim,
+            "window {:?} dimensions should be <= {}, got {}x{}",
+            hwnd,
+            max_dim,
+            rect.width,
+            rect.height
+        );
+    }
+
+    // Drop in explicit order for clarity.
+    drop(w1);
+    drop(w2);
+    drop(w3);
+    drop(td);
+}

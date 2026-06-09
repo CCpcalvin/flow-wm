@@ -37,18 +37,19 @@ pub trait WindowBackend: Send + 'static {
     /// interpolated position when an animation is interrupted.
     fn get_window_rect(&self, window: WindowRef) -> Result<Rect>;
 
-    /// Atomically reposition all windows in one deferred batch.
+    /// Reposition all windows in `updates` via individual [`SetWindowPos`]
+    /// calls.
     ///
-    /// Wraps the Win32 deferred-window-position API:
-    /// 1. [`BeginDeferWindowPos(n)`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-begindeferwindowpos)
-    ///    — allocate a handle for `n` window moves.
-    /// 2. [`DeferWindowPos`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-deferwindowpos)
-    ///    — queue each `(WindowRef, Rect)` pair into the handle.
-    /// 3. [`EndDeferWindowPos`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-enddeferwindowpos)
-    ///    — flush all moves atomically in a single WM_WINDOWPOSCHANGED round.
+    /// Each window is moved independently so that a failure on one window
+    /// (e.g. UIPI access denied for an elevated process) does not prevent
+    /// the remaining windows from being repositioned. Per-window errors are
+    /// logged at `warn` level; the first error encountered is returned, but
+    /// every window in the batch is attempted regardless.
     ///
-    /// Using a deferred batch avoids partial-frame visual tearing that would
-    /// occur if windows were moved one at a time.
+    /// Wraps
+    /// [`SetWindowPos`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
+    /// for the Win32 backend. The `SWP_NOZORDER` flag preserves each
+    /// window's existing Z-order.
     fn apply_batch(&self, updates: &[(WindowRef, Rect)]) -> Result<()>;
 
     /// Block until the Desktop Window Manager (DWM) completes its current

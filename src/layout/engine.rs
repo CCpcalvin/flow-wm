@@ -379,12 +379,18 @@ impl LayoutEngine {
     /// # Arguments
     ///
     /// * `ids` — Window IDs to place in the layout, one per column, in order.
+    /// * `focus_col_idx` — Optional index of the column to center in the viewport.
+    ///   Passed through to [`mutations::initialize_windows`].
     ///
     /// # Returns
     ///
     /// A [`LayoutDiff`] describing the new layout and all window positions.
-    pub fn initialize_windows(&mut self, ids: Vec<WindowId>) -> LayoutDiff {
-        let new_layout = mutations::initialize_windows(&ids, &self.config);
+    pub fn initialize_windows(
+        &mut self,
+        ids: Vec<WindowId>,
+        focus_col_idx: Option<usize>,
+    ) -> LayoutDiff {
+        let new_layout = mutations::initialize_windows(&ids, &self.config, focus_col_idx);
         self.focused = ids.last().copied();
         self.apply_mutation(new_layout)
     }
@@ -831,7 +837,7 @@ mod tests {
     fn engine_initialize_windows_empty() {
         // Positive: empty vec → empty layout, no focus
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
-        let diff = engine.initialize_windows(vec![]);
+        let diff = engine.initialize_windows(vec![], None);
         assert!(diff.virtual_layout.columns.is_empty());
         assert!(engine.focused().is_none());
     }
@@ -840,7 +846,7 @@ mod tests {
     fn engine_initialize_windows_single() {
         // Positive: single window → single column, focused
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
-        let diff = engine.initialize_windows(vec![WindowId(1)]);
+        let diff = engine.initialize_windows(vec![WindowId(1)], None);
         assert_eq!(diff.virtual_layout.columns.len(), 1);
         assert_eq!(engine.focused(), Some(WindowId(1)));
         // Should produce moves (new window appeared)
@@ -851,7 +857,7 @@ mod tests {
     fn engine_initialize_windows_multiple() {
         // Positive: multiple windows → multiple columns, focus on last
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
-        let diff = engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)]);
+        let diff = engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], None);
         assert_eq!(diff.virtual_layout.columns.len(), 3);
         assert_eq!(diff.virtual_layout.columns[0].rows[0], WindowId(10));
         assert_eq!(diff.virtual_layout.columns[1].rows[0], WindowId(20));

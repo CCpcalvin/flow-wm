@@ -251,10 +251,13 @@ fn run_worker(
                 .collect();
 
             // Apply the batch — best-effort; backend errors are non-fatal here.
-            let _ = backend.apply_batch(&updates);
+            if let Err(e) = backend.apply_batch(&updates) {
+                log::warn!("apply_batch error at t={t:.3}: {e}");
+            }
 
             if active.batch.is_complete() {
                 // Animation complete — clear the active batch.
+                log::trace!("animation complete: batch finished at t={t:.3}");
                 state.active = None;
                 animating.store(false, Ordering::Release);
 
@@ -367,8 +370,32 @@ fn start_batch(
 
     let tweens = build_tweens(&pending.targets, &from_rects, &pending.config);
 
+    log::debug!(
+        "start_batch: {} targets, {} from_rects, {} tweens built, duration={:?}",
+        pending.targets.len(),
+        from_rects.len(),
+        tweens.len(),
+        pending.config.duration,
+    );
+    for (i, tw) in tweens.iter().enumerate() {
+        log::trace!(
+            "  tween[{}]: win={:?} from=({},{},{},{}) to=({},{},{},{})",
+            i,
+            tw.window_ref,
+            tw.from_rect.x,
+            tw.from_rect.y,
+            tw.from_rect.w,
+            tw.from_rect.h,
+            tw.to_rect.x,
+            tw.to_rect.y,
+            tw.to_rect.w,
+            tw.to_rect.h,
+        );
+    }
+
     // All tweens are no-ops — nothing to animate.
     if tweens.is_empty() {
+        log::warn!("start_batch: all tweens are no-ops, skipping animation");
         return;
     }
 

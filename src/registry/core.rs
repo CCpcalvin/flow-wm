@@ -500,6 +500,37 @@ impl WindowRegistry {
             .collect()
     }
 
+    /// Returns tiling window IDs sorted by their current x-coordinate (ascending).
+    ///
+    /// This is used during initialization to assign columns left-to-right,
+    /// matching the spatial arrangement of windows on screen. Sorting minimizes
+    /// the total travel distance when windows animate to their tiling positions.
+    ///
+    /// Without sorting, [`tiling_window_ids`](Self::tiling_window_ids) returns IDs
+    /// in arbitrary `HashMap` iteration order, which can cause windows to animate
+    /// diagonally across the screen — e.g., the rightmost window could be assigned
+    /// to column 0 while the leftmost gets column 2.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<WindowId>` sorted by `pre_manage_rect.x` in ascending order.
+    /// Only includes windows in `TilingState::Active`.
+    #[must_use]
+    pub fn tiling_window_ids_sorted_by_x(&self) -> Vec<crate::common::WindowId> {
+        let mut ids: Vec<(crate::common::WindowId, i32)> = self
+            .windows
+            .iter()
+            .filter_map(|(key, w)| match &w.state {
+                WindowState::Tiling(TilingState::Active { .. }) => {
+                    Some((crate::common::WindowId(*key), w.pre_manage_rect.x))
+                }
+                _ => None,
+            })
+            .collect();
+        ids.sort_by_key(|(_, x)| *x);
+        ids.into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Check if a window is in tiling state (before removal).
     ///
     /// Used by the orchestrator to determine if removing a window
@@ -824,6 +855,19 @@ mod tests {
 
     /// Inserts a minimal window into the registry for testing.
     fn insert_test_window(reg: &mut WindowRegistry, hwnd_val: isize, state: WindowState) {
+        insert_test_window_with_rect(reg, hwnd_val, state, 0);
+    }
+
+    /// Inserts a test window with a custom `pre_manage_rect.x` position.
+    ///
+    /// Used to test spatial sorting (e.g., `tiling_window_ids_sorted_by_x`).
+    /// All other rect fields use defaults (width=100, height=100, y=0).
+    fn insert_test_window_with_rect(
+        reg: &mut WindowRegistry,
+        hwnd_val: isize,
+        state: WindowState,
+        x: i32,
+    ) {
         let hwnd = HWND(hwnd_val as *mut _);
         let window = Window::new(
             hwnd,
@@ -832,7 +876,7 @@ mod tests {
             "TestClass".into(),
             std::path::PathBuf::from("C:\\test.exe"),
             crate::common::Rect {
-                x: 0,
+                x,
                 y: 0,
                 width: 100,
                 height: 100,
@@ -1137,6 +1181,133 @@ mod tests {
         // HWND 0 is typically invalid — handle_created should return None.
         let result = reg.handle_created(0);
         assert!(result.is_none());
+    }
+
+    // ── tiling_window_ids_sorted_by_x tests ──────────────────────────
+
+    #[test]
+    fn sorted_by_x_returns_ascending_order() {
+        // Positive: 3 tiling windows at x=300, x=100, x=500 (unsorted).
+        // The sorted version should return IDs in ascending x order:
+        // [x=100, x=300, x=500].
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        insert_test_window_with_rect(
+            &mut reg,
+            300,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            300,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            100,
+            WindowState::Tiling(TilingState::Active { col: 1, row: 0 }),
+            100,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            500,
+            WindowState::Tiling(TilingState::Active { col: 2, row: 0 }),
+            500,
+        );
+
+        let sorted = reg.tiling_window_ids_sorted_by_x();
+        assert_eq!(sorted.len(), 3);
+        // Ascending x: 100, 300, 500
+        assert_eq!(sorted[0], crate::common::WindowId(100));
+        assert_eq!(sorted[1], crate::common::WindowId(300));
+        assert_eq!(sorted[2], crate::common::WindowId(500));
+    }
+
+    #[test]
+    fn sorted_by_x_empty_registry() {
+        // Positive: empty registry → returns empty vec (no panic).
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        let sorted = reg.tiling_window_ids_sorted_by_x();
+        assert!(sorted.is_empty());
+    }
+
+    #[test]
+    fn sorted_by_x_single_window() {
+        // Positive: single tiling window → returns single-element vec.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        let sorted = reg.tiling_window_ids_sorted_by_x();
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0], crate::common::WindowId(42));
+    }
+
+    #[test]
+    fn sorted_by_x_excludes_non_tiling_windows() {
+        // Negative: windows in floating/ignored states are excluded from
+        // the sorted result, even if they have x-positions.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        insert_test_window_with_rect(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            500,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            20,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 100,
+                    y: 0,
+                    width: 200,
+                    height: 200,
+                },
+            }),
+            100,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            30,
+            WindowState::Ignored(IgnoredReason::Maximized),
+            0,
+        );
+
+        let sorted = reg.tiling_window_ids_sorted_by_x();
+        // Only the tiling-active window (hwnd=10) should appear.
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0], crate::common::WindowId(10));
+    }
+
+    #[test]
+    fn sorted_by_x_handles_equal_x_positions() {
+        // Edge case: two windows at the same x-position — sort is stable
+        // but order among equal keys is not strictly guaranteed.
+        // We only verify both are present.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        insert_test_window_with_rect(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            200,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            20,
+            WindowState::Tiling(TilingState::Active { col: 1, row: 0 }),
+            200,
+        );
+
+        let sorted = reg.tiling_window_ids_sorted_by_x();
+        assert_eq!(sorted.len(), 2);
+        assert!(sorted.contains(&crate::common::WindowId(10)));
+        assert!(sorted.contains(&crate::common::WindowId(20)));
     }
 
     // ── Direct handler tests (replaces process_pending_events tests) ──

@@ -17,7 +17,7 @@
 use predicates::prelude::*;
 
 use super::common::{ensure_daemon_stopped, stm, unique_pipe_name};
-use super::test_desktop::{start_test_daemon, DaemonGuard, TestDesktop};
+use super::test_desktop::{DaemonGuard, TestDesktop, start_test_daemon};
 
 /// Full lifecycle: daemon running → verify `stm start` rejects → `stm stop` → verify `stm stop` rejects.
 ///

@@ -156,10 +156,12 @@ impl ScrollTilingManager {
     /// 3. Query monitor work area via Win32.
     /// 4. Derive layout parameters from [`StmConfig`].
     /// 5. Create [`LayoutEngine`] with those parameters.
-    /// 6. Batch-initialize layout from existing tiling windows.
-    /// 7. Create [`WindowAnimator`] with Win32 backend and zero-duration
-    ///    config (for instant snap of initial positions).
-    /// 8. Animate the initial layout diff (instant, no visible animation).
+    /// 6. Batch-initialize layout from existing tiling windows (sorted by x
+    ///    coordinate for deterministic column assignment; viewport centered
+    ///    on the focused column).
+    /// 7. Create [`WindowAnimator`] with Win32 backend and the user's
+    ///    configured animation duration (instant if animation is disabled).
+    /// 8. Animate the initial layout diff (windows animate to tiling positions).
     /// 9. Start the WinEvent hook thread.
     /// 10. Create the IPC named pipe server.
     /// 11. Return the fully initialized STM ready for [`run()`](Self::run).
@@ -210,41 +212,60 @@ impl ScrollTilingManager {
         );
 
         // 6. Batch-initialize layout from existing tiling windows.
-        let tiling_ids = registry.tiling_window_ids();
+        //    Sort by x-coordinate so column assignment is deterministic and
+        //    windows travel the shortest distance to their tiling positions.
+        let tiling_ids = registry.tiling_window_ids_sorted_by_x();
+        log::debug!("init: {} tiling windows (sorted by x)", tiling_ids.len());
         let initial_diff = if !tiling_ids.is_empty() {
-            let diff = layout.initialize_windows(tiling_ids);
+            // Focus the rightmost (last) window — most likely the user's active
+            // window on a typical left-to-right layout.
+            let focus_col = Some(tiling_ids.len() - 1);
+            let diff = layout.initialize_windows(tiling_ids, focus_col);
+            for m in &diff.moves {
+                log::trace!(
+                    "init move: {:?} from ({},{},{},{}) to ({},{},{},{})",
+                    m.window_id,
+                    m.from.x,
+                    m.from.y,
+                    m.from.width,
+                    m.from.height,
+                    m.to.x,
+                    m.to.y,
+                    m.to.width,
+                    m.to.height,
+                );
+            }
             Some(diff)
         } else {
+            log::warn!("init: no tiling windows found — skipping initial layout");
             None
         };
 
-        // 7. Create animator with zero-duration config for instant initial snap.
-        //    Duration::ZERO means "complete immediately" — windows snap to their
-        //    starting positions without visible animation.
+        // 7. Create animator with the user's configured animation duration.
+        //    On startup, windows animate from their current positions to tiling
+        //    positions using the user's configured speed. If animation is disabled
+        //    in config, duration will be zero (instant snap).
         let backend = Win32Backend::new();
-        let snap_config = AnimatorConfig {
-            duration: Duration::ZERO,
-            ..AnimatorConfig::default()
-        };
-        let mut animator = WindowAnimator::new(backend, snap_config);
+        let init_config = Self::derive_animator_config(&app_config, Duration::ZERO);
+        log::debug!(
+            "init: animator config duration={:?}ms, animation.enabled={}",
+            init_config.duration,
+            app_config.animation.enabled,
+        );
+        let mut animator = WindowAnimator::new(backend, init_config);
 
-        // 8. Animate initial layout (instant snap — zero duration).
-        if let Some(diff) = initial_diff {
+        // 8. Animate initial layout with user-configured duration.
+        if let Some(ref diff) = initial_diff {
             // Use a standalone function to avoid borrow checker issues
             // — animate_diff takes &mut self, but we don't have Self yet.
-            animate_diff_raw(&mut animator, &diff);
+            log::debug!("init: submitting {} moves to animator", diff.moves.len());
+            animate_diff_raw(&mut animator, diff);
         }
 
-        // 9. Switch to the user-configured animation duration for runtime.
-        //    After the initial snap, all subsequent window moves should animate
-        //    at the speed the user configured (or stay instant if disabled).
-        let runtime_config = Self::derive_animator_config(&app_config, Duration::ZERO);
-        animator.update_config(runtime_config);
-
-        // 10. Start hook thread.
+        // 9. Start hook thread.
         let (hook_receiver, _hook_handle) = hooks::start_hook_thread(desktop_name)?;
 
-        // 11. Create IPC server.
+        // 10. Create IPC server.
         let server = PipeServer::create()
             .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
 

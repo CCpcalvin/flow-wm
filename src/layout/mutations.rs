@@ -298,6 +298,71 @@ pub(crate) fn ensure_column_visible(
     layout.clone()
 }
 
+/// Centers the viewport so the given column appears at the horizontal midpoint
+/// of the monitor.
+///
+/// Unlike [`ensure_column_visible`] which only scrolls the minimum amount needed
+/// to bring a column into view, this function always places the target column
+/// at the *center* of the viewport. This produces a more visually intentional
+/// result during initialization — the user's most-recently-active window
+/// appears front-and-center rather than potentially hugging the left edge.
+///
+/// # Algorithm
+///
+/// 1. Walk columns left-to-right, accumulating `canvas_x` (virtual canvas
+///    pixel position) until reaching `col_idx`.
+/// 2. Convert the column's `width_eighths` to pixel width via
+///    [`column_eighths_to_pixels`].
+/// 3. Compute `col_center = canvas_x + col_px / 2`.
+/// 4. The ideal `viewport_offset = col_center - monitor_width / 2`.
+/// 5. Clamp to `>= 0` so the camera never scrolls past the left edge.
+///
+/// # Panics
+///
+/// Panics if `col_idx` is out of bounds for the layout's columns.
+///
+/// # Arguments
+///
+/// * `layout` — The current virtual layout.
+/// * `col_idx` — Index of the column to center.
+/// * `config` — Mutation configuration providing monitor width and column width.
+///
+/// # Returns
+///
+/// A new [`VirtualLayout`] with `viewport_offset` adjusted to center the
+/// requested column.
+#[must_use]
+pub(crate) fn center_on_column(
+    layout: &VirtualLayout,
+    col_idx: usize,
+    config: &MutationConfig,
+) -> VirtualLayout {
+    assert!(
+        col_idx < layout.columns.len(),
+        "center_on_column: col_idx {} out of bounds ({} columns)",
+        col_idx,
+        layout.columns.len()
+    );
+
+    let mut canvas_x: i32 = 0;
+    for (i, col) in layout.columns.iter().enumerate() {
+        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
+        if i == col_idx {
+            let col_center = canvas_x + col_px / 2;
+            let viewport_offset = col_center - config.monitor_width / 2;
+            let viewport_offset = viewport_offset.max(0);
+            return VirtualLayout {
+                viewport_offset,
+                ..layout.clone()
+            };
+        }
+        canvas_x += col_px;
+    }
+
+    // Unreachable because we asserted `col_idx < len`, but satisfy the compiler.
+    layout.clone()
+}
+
 // ---------------------------------------------------------------------------
 // Swap mutations
 // ---------------------------------------------------------------------------
@@ -588,10 +653,21 @@ pub fn toggle_monocle(
 /// it builds the layout in a single operation without intermediate
 /// projection + diff steps.
 ///
+/// # Camera centering
+///
+/// When `focus_col_idx` is `Some(idx)`, the viewport is centered on the
+/// specified column so that column appears at the horizontal midpoint of the
+/// monitor. This produces a natural initial view focused on the user's
+/// most-recently-active window. When `None`, the viewport starts at offset
+/// `0` (left-aligned with the first column).
+///
 /// # Arguments
 ///
 /// * `ids` — Window IDs to place in the layout, one per column, in order.
 /// * `config` — Mutation configuration (provides default column width).
+/// * `focus_col_idx` — Optional index of the column to center in the viewport.
+///   If `Some`, the viewport is positioned so this column appears at the
+///   monitor's horizontal center. If `None`, `viewport_offset` is `0`.
 ///
 /// # Returns
 ///
@@ -615,19 +691,29 @@ pub fn toggle_monocle(
 /// let layout = initialize_windows(
 ///     &[WindowId(1), WindowId(2), WindowId(3)],
 ///     &config,
+///     None,
 /// );
 /// assert_eq!(layout.columns.len(), 3);
 /// ```
 #[must_use]
-pub fn initialize_windows(ids: &[WindowId], config: &MutationConfig) -> VirtualLayout {
+pub fn initialize_windows(
+    ids: &[WindowId],
+    config: &MutationConfig,
+    focus_col_idx: Option<usize>,
+) -> VirtualLayout {
     let columns: Vec<Column> = ids
         .iter()
         .map(|&id| Column::new(config.default_column_width_eighths, id))
         .collect();
 
-    VirtualLayout {
+    let initial = VirtualLayout {
         columns,
         viewport_offset: 0,
+    };
+
+    match focus_col_idx {
+        Some(idx) if idx < initial.columns.len() => center_on_column(&initial, idx, config),
+        _ => initial,
     }
 }
 
@@ -1556,7 +1642,7 @@ mod tests {
     #[test]
     fn initialize_windows_empty_list() {
         // Positive: empty list → empty layout
-        let layout = initialize_windows(&[], &test_config());
+        let layout = initialize_windows(&[], &test_config(), None);
         assert!(layout.columns.is_empty());
         assert_eq!(layout.viewport_offset, 0);
     }
@@ -1564,7 +1650,7 @@ mod tests {
     #[test]
     fn initialize_windows_single_window() {
         // Positive: single window → single column
-        let layout = initialize_windows(&[WindowId(1)], &test_config());
+        let layout = initialize_windows(&[WindowId(1)], &test_config(), None);
         assert_eq!(layout.columns.len(), 1);
         assert_eq!(layout.columns[0].rows, vec![WindowId(1)]);
         assert_eq!(layout.columns[0].width_eighths, 4); // default
@@ -1574,8 +1660,11 @@ mod tests {
     #[test]
     fn initialize_windows_multiple_windows() {
         // Positive: multiple windows → multiple columns in order
-        let layout =
-            initialize_windows(&[WindowId(10), WindowId(20), WindowId(30)], &test_config());
+        let layout = initialize_windows(
+            &[WindowId(10), WindowId(20), WindowId(30)],
+            &test_config(),
+            None,
+        );
         assert_eq!(layout.columns.len(), 3);
         assert_eq!(layout.columns[0].rows, vec![WindowId(10)]);
         assert_eq!(layout.columns[1].rows, vec![WindowId(20)]);
@@ -1584,6 +1673,122 @@ mod tests {
         assert_eq!(layout.columns[0].width_eighths, 4);
         assert_eq!(layout.columns[1].width_eighths, 4);
         assert_eq!(layout.columns[2].width_eighths, 4);
+        assert_eq!(layout.viewport_offset, 0);
+    }
+
+    // --- center_on_column tests ---
+
+    #[test]
+    fn center_on_column_first_column() {
+        // Positive: centering on column 0 clamps to offset 0 because the column
+        // is already visible from the left edge. 3 columns × 4 eighths (960px)
+        // on a 1920px monitor.
+        // col_center = 0 + 960/2 = 480
+        // offset = 480 - 1920/2 = 480 - 960 = -480 → clamped to 0
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = center_on_column(&layout, 0, &config);
+        assert_eq!(result.viewport_offset, 0);
+    }
+
+    #[test]
+    fn center_on_column_middle_column() {
+        // Positive: centering on column 1 centers it in the viewport.
+        // col_center = 960 + 960/2 = 1440
+        // offset = 1440 - 960 = 480
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = center_on_column(&layout, 1, &config);
+        assert_eq!(result.viewport_offset, 480);
+    }
+
+    #[test]
+    fn center_on_column_last_column() {
+        // Positive: centering on the last column (index 2) scrolls right.
+        // col_center = 1920 + 960/2 = 2400
+        // offset = 2400 - 960 = 1440
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = center_on_column(&layout, 2, &config);
+        assert_eq!(result.viewport_offset, 1440);
+    }
+
+    #[test]
+    fn center_on_column_single_column() {
+        // Positive: single column on 1920px monitor → clamped to 0.
+        // col_center = 0 + 960/2 = 480
+        // offset = 480 - 960 = -480 → clamped to 0
+        let layout = VirtualLayout::with_columns(vec![Column::new(4, WindowId(1))], 0);
+        let config = test_config();
+        let result = center_on_column(&layout, 0, &config);
+        assert_eq!(result.viewport_offset, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn center_on_column_out_of_bounds_panics() {
+        // Negative: centering on a column index that exceeds the layout
+        // should panic with an out-of-bounds assertion.
+        let layout = three_column_layout();
+        let config = test_config();
+        let _ = center_on_column(&layout, 99, &config);
+    }
+
+    // --- initialize_windows with focus_col_idx tests ---
+
+    #[test]
+    fn initialize_windows_with_focus_produces_centered_viewport() {
+        // Positive: passing focus_col_idx=Some(2) (last column of 3) produces
+        // a viewport_offset > 0 because the camera centers on the last column.
+        let layout = initialize_windows(
+            &[WindowId(1), WindowId(2), WindowId(3)],
+            &test_config(),
+            Some(2),
+        );
+        assert_eq!(layout.columns.len(), 3);
+        assert!(
+            layout.viewport_offset > 0,
+            "viewport should be centered on last column, not left-aligned"
+        );
+        // Expected: 1440 (col_center = 2400, offset = 2400 - 960 = 1440)
+        assert_eq!(layout.viewport_offset, 1440);
+    }
+
+    #[test]
+    fn initialize_windows_without_focus_produces_zero_offset() {
+        // Positive: passing None for focus_col_idx → viewport_offset stays 0.
+        let layout = initialize_windows(
+            &[WindowId(1), WindowId(2), WindowId(3)],
+            &test_config(),
+            None,
+        );
+        assert_eq!(layout.viewport_offset, 0);
+    }
+
+    #[test]
+    fn initialize_windows_with_out_of_bounds_focus_uses_zero_offset() {
+        // Negative: focus_col_idx=Some(99) exceeds the 3 columns → graceful
+        // fallback to viewport_offset 0 (no centering applied).
+        let layout = initialize_windows(
+            &[WindowId(1), WindowId(2), WindowId(3)],
+            &test_config(),
+            Some(99),
+        );
+        assert_eq!(
+            layout.viewport_offset, 0,
+            "out-of-bounds focus index should produce zero offset"
+        );
+    }
+
+    #[test]
+    fn initialize_windows_with_focus_on_first_column() {
+        // Positive: focus_col_idx=Some(0) → clamped to 0 (first column visible
+        // from left edge).
+        let layout = initialize_windows(
+            &[WindowId(1), WindowId(2), WindowId(3)],
+            &test_config(),
+            Some(0),
+        );
         assert_eq!(layout.viewport_offset, 0);
     }
 }
