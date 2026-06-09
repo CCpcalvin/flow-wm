@@ -2,6 +2,10 @@
 //!
 //! Generates JSON Schemas from both [`super::types::StmConfig`] (app settings)
 //! and [`super::types::WindowRulesConfig`] (window rules) via `schemars`.
+//!
+//! These schemas are used by the **taplo** TOML language server for IDE
+//! autocomplete and validation. They are written to a `schemas/` subdirectory
+//! inside the config directory when [`super::lifecycle::init_config_dir`] runs.
 
 use crate::common::{StmError, StmResult};
 use schemars::schema_for;
@@ -10,8 +14,8 @@ use super::types::{StmConfig, WindowRulesConfig};
 
 /// Generate the JSON Schema for [`StmConfig`] (app settings).
 ///
-/// The schema can be written to `%APPDATA%\stm\stm-config-schema.json`
-/// for editor autocomplete support (VS Code, Neovim with yaml-language-server).
+/// The schema can be written to `%APPDATA%\stm\schemas\stm-config.schema.json`
+/// for editor autocomplete support (VS Code, Neovim with taplo LSP).
 pub fn generate_config_schema() -> StmResult<String> {
     let schema = schema_for!(StmConfig);
     serde_json::to_string_pretty(&schema)
@@ -20,7 +24,7 @@ pub fn generate_config_schema() -> StmResult<String> {
 
 /// Generate the JSON Schema for [`WindowRulesConfig`] (window rules).
 ///
-/// The schema can be written to `%APPDATA%\stm\stm-rules-schema.json`
+/// The schema can be written to `%APPDATA%\stm\schemas\stm-rules.schema.json`
 /// for editor autocomplete support on the rules file.
 pub fn generate_rules_schema() -> StmResult<String> {
     let schema = schema_for!(WindowRulesConfig);

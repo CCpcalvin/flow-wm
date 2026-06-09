@@ -1,19 +1,19 @@
-//! Configuration type definitions matching the YAML schema.
+//! Configuration type definitions matching the TOML schema.
 //!
-//! Every field has `#[serde(default = "...")]` so partial YAML configs fill in
-//! missing fields with defaults. Full YAML round-trip is tested: every field
-//! survives `StmConfig → YAML → StmConfig`.
+//! Every field has `#[serde(default = "...")]` so partial TOML configs fill in
+//! missing fields with defaults. Full TOML round-trip is tested: every field
+//! survives `StmConfig → TOML → StmConfig`.
 //!
 //! # Config File Split
 //!
-//! Configuration is split across two YAML files:
+//! Configuration is split across two TOML files:
 //!
-//! - **`stm.yml`** ([`StmConfig`]) — Application settings (hotkeys, padding,
-//!   animation, etc.). Loaded from `%USERPROFILE%\.config\stm\stm.yml`
+//! - **`stm.toml`** ([`StmConfig`]) — Application settings (hotkeys, padding,
+//!   animation, etc.). Loaded from `%USERPROFILE%\.config\stm\stm.toml`
 //!   (see [`config::dirs`](crate::config::dirs) for the full resolution chain).
 //!
-//! - **`stm-rules.yml`** ([`WindowRulesConfig`]) — Window classification rules
-//!   and default action. Loaded from `%USERPROFILE%\.config\stm\stm-rules.yml`.
+//! - **`stm-rules.toml`** ([`WindowRulesConfig`]) — Window classification rules
+//!   and default action. Loaded from `%USERPROFILE%\.config\stm\stm-rules.toml`.
 //!
 //! This separation allows users to edit rules frequently (adding ignore patterns
 //! for new apps) without risk of corrupting their app settings, and vice versa.
@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level application configuration structure.
 ///
-/// Loaded from `%USERPROFILE%\.config\stm\stm.yml` (see [`config::dirs`](crate::config::dirs)
+/// Loaded from `%USERPROFILE%\.config\stm\stm.toml` (see [`config::dirs`](crate::config::dirs)
 /// for the full resolution chain including `--config` flag and `STM_CONFIG_DIR` env var
-/// overrides). Every field has a default, so even an empty YAML file `{}` produces
+/// overrides). Every field has a default, so even an empty TOML file produces
 /// a valid config.
 ///
 /// This struct contains **application settings only** — hotkeys, padding,
@@ -34,21 +34,24 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Example
 ///
-/// ```yaml
-/// super_key: VK_F24
-/// column_width: 960
-/// min_column_width_px: 320
-/// padding:
-///   window: 4
-///   up: 0
-///   down: 0
-/// hotkeys:
-///   focus_left: Super+H
-///   focus_right: Super+L
-/// animation:
-///   enabled: true
-///   duration_ms: 180
-///   easing: ease-out-expo
+/// ```toml
+/// super_key = "VK_F24"
+/// column_width = 960
+/// min_column_width_px = 320
+///
+/// [padding]
+/// window = 4
+/// up = 0
+/// down = 0
+///
+/// [hotkeys]
+/// focus_left = "Super+H"
+/// focus_right = "Super+L"
+///
+/// [animation]
+/// enabled = true
+/// duration_ms = 180
+/// easing = "ease-out-expo"
 /// ```
 ///
 /// See `docs/spec/04-config-and-persistence.md` for the full schema.
@@ -285,7 +288,7 @@ default_hotkey!(default_place_above, "Super+A");
 /// Rules are evaluated **top-to-bottom, first match wins** against new windows.
 /// If no rule matches, [`WindowRulesConfig::default_action`] is used.
 ///
-/// The `match` field uses `#[serde(rename = "match")]` so the YAML key is
+/// The `match` field uses `#[serde(rename = "match")]` so the TOML key is
 /// `match` while the Rust field is `match_` (avoiding the reserved word).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WindowRule {
@@ -400,28 +403,28 @@ pub enum WindowAction {
     Ignore,
 }
 
-/// Window classification configuration, loaded from `stm-rules.yml`.
+/// Window classification configuration, loaded from `stm-rules.toml`.
 ///
 /// This is the user-facing window rules file. Rules are evaluated top-to-bottom,
 /// first match wins. If no rule matches, `default_action` is used.
 ///
-/// Loaded from `%USERPROFILE%\.config\stm\stm-rules.yml` (see [`config::dirs`](crate::config::dirs)
+/// Loaded from `%USERPROFILE%\.config\stm\stm-rules.toml` (see [`config::dirs`](crate::config::dirs)
 /// for overrides). If the file doesn't exist,
 /// defaults to an empty rule list with `default_action: tile`.
 ///
 /// # Example
 ///
-/// ```yaml
-/// default_action: tile
-/// rules:
-///   - match:
-///       exe: "explorer.exe"
-///       title_contains: "Open"
-///     action: ignore
-///   - match:
-///       class: "Chrome_WidgetWin_1"
-///     action: tile
-///     initial_width_eighths: 4
+/// ```toml
+/// default_action = "tile"
+///
+/// [[rules]]
+/// match = { exe = "explorer.exe", title_contains = "Open" }
+/// action = "ignore"
+///
+/// [[rules]]
+/// match = { class = "Chrome_WidgetWin_1" }
+/// action = "tile"
+/// initial_width_eighths = 4
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WindowRulesConfig {
@@ -526,10 +529,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_roundtrips_yaml() {
+    fn default_config_roundtrips_toml() {
         let config = StmConfig::default();
-        let yaml = serde_yaml::to_string(&config).expect("serialize");
-        let parsed: StmConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.super_key, "VK_F24");
         assert_eq!(parsed.column_width, 960);
         assert_eq!(parsed.min_column_width_px, 320);
@@ -541,17 +544,19 @@ mod tests {
     }
 
     #[test]
-    fn config_from_yaml_with_settings() {
-        let yaml = r#"
-super_key: VK_F24
-padding:
-  window: 8
-  up: 10
-  down: 40
-animation:
-  enabled: false
+    fn config_from_toml_with_settings() {
+        let toml_str = r#"
+super_key = "VK_F24"
+
+[padding]
+window = 8
+up = 10
+down = 40
+
+[animation]
+enabled = false
 "#;
-        let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
+        let config: StmConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.padding.window, 8);
         assert_eq!(config.padding.up, 10);
         assert_eq!(config.padding.down, 40);
@@ -559,10 +564,10 @@ animation:
     }
 
     #[test]
-    fn config_from_minimal_yaml() {
-        // Empty YAML should produce defaults
-        let yaml = "{}";
-        let config: StmConfig = serde_yaml::from_str(yaml).expect("parse");
+    fn config_from_minimal_toml() {
+        // Empty TOML should produce defaults
+        let toml_str = "";
+        let config: StmConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.padding.window, 4);
     }
@@ -571,7 +576,7 @@ animation:
 
     #[test]
     fn config_roundtrip_preserves_all_fields() {
-        // Positive: every field survives YAML → StmConfig → YAML
+        // Positive: every field survives TOML → StmConfig → TOML
         let config = StmConfig {
             super_key: "VK_LWIN".into(),
             column_width: 1200,
@@ -606,8 +611,8 @@ animation:
             },
         };
 
-        let yaml = serde_yaml::to_string(&config).expect("serialize all fields");
-        let parsed: StmConfig = serde_yaml::from_str(&yaml).expect("deserialize all fields");
+        let toml_str = toml::to_string(&config).expect("serialize all fields");
+        let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize all fields");
 
         assert_eq!(parsed.super_key, "VK_LWIN");
         assert_eq!(parsed.column_width, 1200);
@@ -704,27 +709,27 @@ animation:
     #[test]
     fn window_rules_config_default_roundtrips() {
         let config = WindowRulesConfig::default();
-        let yaml = serde_yaml::to_string(&config).expect("serialize");
-        let parsed: WindowRulesConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let parsed: WindowRulesConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.default_action, WindowAction::Tile);
         assert!(parsed.rules.is_empty());
     }
 
     #[test]
-    fn window_rules_config_from_yaml() {
-        let yaml = r#"
-default_action: float
-rules:
-  - match:
-      exe: "explorer.exe"
-      title_contains: "Open"
-    action: ignore
-  - match:
-      class: "Chrome_WidgetWin_1"
-    action: tile
-    initial_width_eighths: 4
+    fn window_rules_config_from_toml() {
+        let toml_str = r#"
+default_action = "float"
+
+[[rules]]
+match = { exe = "explorer.exe", title_contains = "Open" }
+action = "ignore"
+
+[[rules]]
+match = { class = "Chrome_WidgetWin_1" }
+action = "tile"
+initial_width_eighths = 4
 "#;
-        let config: WindowRulesConfig = serde_yaml::from_str(yaml).expect("parse");
+        let config: WindowRulesConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.default_action, WindowAction::Float);
         assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].action, WindowAction::Ignore);
@@ -732,9 +737,9 @@ rules:
     }
 
     #[test]
-    fn window_rules_config_empty_yaml() {
-        let yaml = "{}";
-        let config: WindowRulesConfig = serde_yaml::from_str(yaml).expect("parse");
+    fn window_rules_config_empty_toml() {
+        let toml_str = "";
+        let config: WindowRulesConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.default_action, WindowAction::Tile);
         assert!(config.rules.is_empty());
     }
@@ -761,8 +766,8 @@ rules:
             }],
         };
 
-        let yaml = serde_yaml::to_string(&config).expect("serialize");
-        let parsed: WindowRulesConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let parsed: WindowRulesConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.default_action, WindowAction::Ignore);
         assert_eq!(parsed.rules.len(), 1);
         assert_eq!(
@@ -782,8 +787,8 @@ rules:
     #[test]
     fn window_rules_config_all_window_actions_parse() {
         for action_str in ["tile", "float", "ignore"] {
-            let yaml = format!("default_action: {action_str}");
-            let config: WindowRulesConfig = serde_yaml::from_str(&yaml).expect(&yaml);
+            let toml_str = format!("default_action = \"{action_str}\"");
+            let config: WindowRulesConfig = toml::from_str(&toml_str).expect(&toml_str);
             assert_eq!(
                 config.default_action,
                 match action_str {
@@ -799,10 +804,10 @@ rules:
 
     #[test]
     fn window_rules_config_invalid_enum_rejects() {
-        let yaml = r#"
-default_action: foobar
+        let toml_str = r#"
+default_action = "foobar"
 "#;
-        let result = serde_yaml::from_str::<WindowRulesConfig>(yaml);
+        let result = toml::from_str::<WindowRulesConfig>(toml_str);
         assert!(result.is_err(), "invalid enum value should reject");
     }
 
@@ -814,9 +819,14 @@ default_action: foobar
             process_path_regex: Some(".*\\\\Microsoft\\\\Edge.*".into()),
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&rule).expect("serialize");
-        assert!(yaml.contains("exe_regex: msedge\\.exe"));
-        assert!(yaml.contains("class_regex: Edge.*"));
-        assert!(yaml.contains("process_path_regex:"));
+        let toml_str = toml::to_string(&rule).expect("serialize");
+        // Verify round-trip: deserialize back and check values match
+        let parsed: MatchRule = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed.exe_regex, Some("msedge\\.exe".into()));
+        assert_eq!(parsed.class_regex, Some("Edge.*".into()));
+        assert_eq!(
+            parsed.process_path_regex,
+            Some(".*\\\\Microsoft\\\\Edge.*".into())
+        );
     }
 }

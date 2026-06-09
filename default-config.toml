@@ -1,59 +1,59 @@
-# yaml-language-server: $schema=./schemas/stm-config.schema.json
+#:schema ./schemas/stm-config.schema.json
 
 # Default application configuration for ScrollingTilingManager.
 #
 # This file ships alongside stmd.exe and provides the canonical defaults for
 # all application settings. Users can override any of these values by editing
-# their own stm.yml in the config directory (~/.config/stm/stm.yml).
+# their own stm.toml in the config directory (~/.config/stm/stm.toml).
 #
-# All fields have defaults, so an empty YAML file `{}` is valid.
+# All fields have defaults, so an empty TOML file is valid.
 #
 # For field documentation, see the StmConfig docstring in src/config/types.rs.
 
 # The virtual key code treated as the Super/modifier key.
 # VK_F24 is F24 — an uncommon key that avoids conflicts with system shortcuts.
-super_key: VK_F24
+super_key = "VK_F24"
 
 # Default column width in pixels.
-column_width: 1280
+column_width = 1280
 
 # Minimum column width in pixels. Columns cannot be resized below this.
-min_column_width_px: 640
+min_column_width_px = 640
 
 # Padding settings in pixels.
 #
 # - window: inset around each window within its container cell (visual gap)
 # - up: top screen margin so windows don't touch the top edge
 # - down: bottom screen margin (e.g., for taskbar clearance)
-padding:
-  window: 2
-  up: 2
-  down: 2
+[padding]
+window = 2
+up = 2
+down = 2
 
 # Hotkey bindings (13 total).
 # Uses Vim-style Super+H/J/K/L for focus navigation.
-hotkeys:
-  focus_left: Super+H
-  focus_right: Super+L
-  focus_up: Super+K
-  focus_down: Super+J
-  swap_left: Super+Shift+H
-  swap_right: Super+Shift+L
-  scroll_left: Super+Left
-  scroll_right: Super+Right
-  toggle_float: Super+Space
-  toggle_monocle: Super+M
-  close_window: Super+Q
-  reload_config: Super+Shift+R
-  place_above: Super+A
+[hotkeys]
+focus_left = "Super+H"
+focus_right = "Super+L"
+focus_up = "Super+K"
+focus_down = "Super+J"
+swap_left = "Super+Shift+H"
+swap_right = "Super+Shift+L"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+toggle_float = "Super+Space"
+toggle_monocle = "Super+M"
+close_window = "Super+Q"
+reload_config = "Super+Shift+R"
+place_above = "Super+A"
 
 # Animation settings for layout transitions.
-animation:
-  enabled: true
-  duration_ms: 180
-  easing: ease-out-expo
+[animation]
+enabled = true
+duration_ms = 180
+easing = "ease-out-expo"
 
 # Strategy for restoring minimized tiling windows.
 # Options: original_slot, right_of_focused, append_right
-minimize_restore:
-  strategy: original_slot
+[minimize_restore]
+strategy = "original_slot"
