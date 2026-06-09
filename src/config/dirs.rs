@@ -1,7 +1,7 @@
 //! Config directory resolution with a priority chain.
 //!
 //! The STM daemon and CLI need a consistent location for user configuration
-//! files (`stm.yml` for app settings, `stm-rules.yml` for window rules, and
+//! files (`stm.toml` for app settings, `stm-rules.toml` for window rules, and
 //! JSON Schema files). This module resolves that directory at runtime using a
 //! three-level priority chain:
 //!
@@ -129,31 +129,31 @@ pub fn config_dir() -> PathBuf {
     resolve_config_dir(None)
 }
 
-/// Returns the path to the user's `stm-rules.yml` file using the default
+/// Returns the path to the user's `stm-rules.toml` file using the default
 /// config directory resolution.
 ///
-/// The path is resolved via [`resolve_config_dir`]`(None)`, then `stm-rules.yml`
+/// The path is resolved via [`resolve_config_dir`]`(None)`, then `stm-rules.toml`
 /// is appended. This is the file where users define window classification rules
 /// and default actions.
 ///
 /// # Returns
 ///
-/// Full path to `stm-rules.yml` as a [`PathBuf`].
+/// Full path to `stm-rules.toml` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use scrolling_tiling_manager::config::dirs::user_rules_path;
 /// let path = user_rules_path();
-/// assert!(path.ends_with("stm-rules.yml"));
+/// assert!(path.ends_with("stm-rules.toml"));
 /// assert!(path.to_string_lossy().contains("stm"));
 /// ```
 #[must_use]
 pub fn user_rules_path() -> PathBuf {
-    resolve_config_dir(None).join("stm-rules.yml")
+    resolve_config_dir(None).join("stm-rules.toml")
 }
 
-/// Returns the path to the user's `stm-rules.yml` file in an explicitly
+/// Returns the path to the user's `stm-rules.toml` file in an explicitly
 /// provided config directory.
 ///
 /// This is used when the config directory has already been resolved
@@ -166,7 +166,7 @@ pub fn user_rules_path() -> PathBuf {
 ///
 /// # Returns
 ///
-/// `dir.join("stm-rules.yml")` as a [`PathBuf`].
+/// `dir.join("stm-rules.toml")` as a [`PathBuf`].
 ///
 /// # Examples
 ///
@@ -176,14 +176,14 @@ pub fn user_rules_path() -> PathBuf {
 ///
 /// let custom = Path::new("C:\\my-config");
 /// let path = user_rules_path_in(custom);
-/// assert_eq!(path, custom.join("stm-rules.yml"));
+/// assert_eq!(path, custom.join("stm-rules.toml"));
 /// ```
 #[must_use]
 pub fn user_rules_path_in(dir: &Path) -> PathBuf {
-    dir.join("stm-rules.yml")
+    dir.join("stm-rules.toml")
 }
 
-/// Returns the path to the user's `stm.yml` app config file in an explicitly
+/// Returns the path to the user's `stm.toml` app config file in an explicitly
 /// provided config directory.
 ///
 /// This is used when the config directory has already been resolved
@@ -196,7 +196,7 @@ pub fn user_rules_path_in(dir: &Path) -> PathBuf {
 ///
 /// # Returns
 ///
-/// `dir.join("stm.yml")` as a [`PathBuf`].
+/// `dir.join("stm.toml")` as a [`PathBuf`].
 ///
 /// # Examples
 ///
@@ -206,34 +206,34 @@ pub fn user_rules_path_in(dir: &Path) -> PathBuf {
 ///
 /// let custom = Path::new("C:\\my-config");
 /// let path = user_app_config_path_in(custom);
-/// assert_eq!(path, custom.join("stm.yml"));
+/// assert_eq!(path, custom.join("stm.toml"));
 /// ```
 #[must_use]
 pub fn user_app_config_path_in(dir: &Path) -> PathBuf {
-    dir.join("stm.yml")
+    dir.join("stm.toml")
 }
 
-/// Returns the path to the user's `stm.yml` app config file using the default
+/// Returns the path to the user's `stm.toml` app config file using the default
 /// config directory resolution.
 ///
-/// The path is resolved via [`config_dir`]`, then `stm.yml` is appended.
+/// The path is resolved via [`config_dir`]`, then `stm.toml` is appended.
 /// This file contains application settings such as hotkeys, padding, and
 /// animation preferences.
 ///
 /// # Returns
 ///
-/// Full path to `stm.yml` as a [`PathBuf`].
+/// Full path to `stm.toml` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use scrolling_tiling_manager::config::dirs::user_app_config_path;
 /// let path = user_app_config_path();
-/// assert!(path.ends_with("stm.yml"));
+/// assert!(path.ends_with("stm.toml"));
 /// ```
 #[must_use]
 pub fn user_app_config_path() -> PathBuf {
-    config_dir().join("stm.yml")
+    config_dir().join("stm.toml")
 }
 
 /// Compute the default config directory: `%USERPROFILE%\.config\stm\`.
@@ -293,9 +293,9 @@ mod tests {
 
     /// Positive: `user_rules_path` ends with the expected filename.
     #[test]
-    fn user_rules_path_ends_with_stm_rules_yml() {
+    fn user_rules_path_ends_with_stm_rules_toml() {
         let path = user_rules_path();
-        assert!(path.ends_with("stm-rules.yml"), "path was: {path:?}");
+        assert!(path.ends_with("stm-rules.toml"), "path was: {path:?}");
     }
 
     /// Positive: `user_rules_path` contains `stm` in its path components.
@@ -326,14 +326,14 @@ mod tests {
         assert!(!path.as_os_str().is_empty(), "path should not be empty");
     }
 
-    /// Positive: the filename component is exactly "stm-rules.yml".
+    /// Positive: the filename component is exactly "stm-rules.toml".
     #[test]
-    fn user_rules_path_filename_is_stm_rules_yml() {
+    fn user_rules_path_filename_is_stm_rules_toml() {
         let path = user_rules_path();
         assert_eq!(
             path.file_name(),
-            Some(std::ffi::OsStr::new("stm-rules.yml")),
-            "filename should be stm-rules.yml: {path:?}"
+            Some(std::ffi::OsStr::new("stm-rules.toml")),
+            "filename should be stm-rules.toml: {path:?}"
         );
     }
 
@@ -425,11 +425,11 @@ mod tests {
         );
     }
 
-    /// Positive: `user_app_config_path` returns a path ending with `stm.yml`.
+    /// Positive: `user_app_config_path` returns a path ending with `stm.toml`.
     #[test]
-    fn user_app_config_path_returns_stm_yml() {
+    fn user_app_config_path_returns_stm_toml() {
         let path = user_app_config_path();
-        assert!(path.ends_with("stm.yml"), "path was: {path:?}");
+        assert!(path.ends_with("stm.toml"), "path was: {path:?}");
     }
 
     /// Positive: `user_rules_path_in` appends correctly.
@@ -437,7 +437,7 @@ mod tests {
     fn user_rules_path_in_returns_correct_path() {
         let dir = Path::new("C:\\test\\config");
         let path = user_rules_path_in(dir);
-        assert_eq!(path, dir.join("stm-rules.yml"));
+        assert_eq!(path, dir.join("stm-rules.toml"));
     }
 
     /// Positive: `user_app_config_path_in` appends correctly.
@@ -445,6 +445,6 @@ mod tests {
     fn user_app_config_path_in_returns_correct_path() {
         let dir = Path::new("C:\\test\\config");
         let path = user_app_config_path_in(dir);
-        assert_eq!(path, dir.join("stm.yml"));
+        assert_eq!(path, dir.join("stm.toml"));
     }
 }

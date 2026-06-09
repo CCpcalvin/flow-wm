@@ -1,12 +1,12 @@
 //! Configuration parser, auto-creation, and JSON Schema generation.
 //!
-//! Defines two YAML config file structures:
+//! Defines two TOML config file structures:
 //!
 //! - [`StmConfig`] — Application settings (hotkeys, padding, animation).
-//!   Loaded from `stm.yml` in the config directory.
+//!   Loaded from `stm.toml` in the config directory.
 //!
 //! - [`WindowRulesConfig`] — Window classification rules and default action.
-//!   Loaded from `stm-rules.yml` in the config directory.
+//!   Loaded from `stm-rules.toml` in the config directory.
 //!
 //! # Config File Lifecycle
 //!
@@ -15,7 +15,7 @@
 //! 1. **Init** — [`lifecycle::init_config_dir`] creates the config directory and writes
 //!    default config files and JSON Schemas.
 //!
-//! 2. **Load** — [`lifecycle::load_app_config`] and [`lifecycle::load_rules_config`] read YAML
+//! 2. **Load** — [`lifecycle::load_app_config`] and [`lifecycle::load_rules_config`] read TOML
 //!    files from disk, with shipped defaults as the base layer.
 //!
 //! 3. **Validate** — [`lifecycle::check_config`] validates config files without loading

@@ -19,7 +19,6 @@ path = "src/bin/stm-watchdog.rs"
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-serde_yaml = "0.9"
 schemars = "0.8"
 thiserror = "2"
 log = "0.4"
@@ -32,6 +31,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_IO", "Win32_Storage_FileSystem", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 regex = "1.12.3"
 crossbeam-channel = "0.5.15"
+toml = "1.1.2"
 
 [profile.release]
 opt-level = 3

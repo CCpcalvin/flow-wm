@@ -3,14 +3,14 @@
 //! This module owns the four-phase config lifecycle:
 //!
 //! 1. **Init** — [`init_config_dir`] creates the config directory and writes
-//!    default config files (`stm.yml`, `stm-rules.yml`) with JSON Schema files
+//!    default config files (`stm.toml`, `stm-rules.toml`) with JSON Schema files
 //!    for IDE autocomplete.
 //!
 //! 2. **Load** — Functions load config from shipped defaults and user overrides:
-//!    - [`load_default_config`] — loads `default-config.yml` from the exe directory
-//!    - [`load_default_rules`] — loads `default-stm-rules.yml` from the exe directory
-//!    - [`load_app_config`] — loads user's `stm.yml`, falling back to defaults
-//!    - [`load_rules_config`] — loads user's `stm-rules.yml`, falling back to defaults
+//!    - [`load_default_config`] — loads `default-config.toml` from the exe directory
+//!    - [`load_default_rules`] — loads `default-stm-rules.toml` from the exe directory
+//!    - [`load_app_config`] — loads user's `stm.toml`, falling back to defaults
+//!    - [`load_rules_config`] — loads user's `stm-rules.toml`, falling back to defaults
 //!
 //! 3. **Validate** — [`check_config`] validates config files without loading them
 //!    into the daemon. Used by `stm config check`.
@@ -26,8 +26,8 @@
 //!
 //! # Schema Headers
 //!
-//! When [`init_config_dir`] writes YAML files, it prepends a
-//! `yaml-language-server: $schema=...` comment header for IDE autocomplete support.
+//! When [`init_config_dir`] writes TOML files, it prepends a
+//! `#:schema ...` comment header for IDE autocomplete support (taplo LSP).
 //! The schema files are written into a `schemas/` subdirectory.
 
 use std::path::Path;
@@ -35,27 +35,25 @@ use std::path::Path;
 use super::schema;
 use super::types::{StmConfig, WindowRulesConfig};
 
-/// Schema header for `stm.yml` files (yaml-language-server autocomplete).
+/// Schema header for `stm.toml` files (taplo LSP autocomplete).
 ///
-/// Prepended to the YAML content when [`init_config_dir`] writes the default
-/// `stm.yml`. The relative path `./schemas/stm-config.schema.json` is resolved
+/// Prepended to the TOML content when [`init_config_dir`] writes the default
+/// `stm.toml`. The relative path `./schemas/stm-config.schema.json` is resolved
 /// against the config directory, so the schema file must be in `dir/schemas/`.
-const STM_CONFIG_SCHEMA_HEADER: &str =
-    "# yaml-language-server: $schema=./schemas/stm-config.schema.json\n\n";
+const STM_CONFIG_SCHEMA_HEADER: &str = "#:schema ./schemas/stm-config.schema.json\n\n";
 
-/// Schema header for `stm-rules.yml` files (yaml-language-server autocomplete).
+/// Schema header for `stm-rules.toml` files (taplo LSP autocomplete).
 ///
-/// Prepended to the YAML content when [`init_config_dir`] writes the default
-/// `stm-rules.yml`. The relative path `./schemas/stm-rules.schema.json` is resolved
+/// Prepended to the TOML content when [`init_config_dir`] writes the default
+/// `stm-rules.toml`. The relative path `./schemas/stm-rules.schema.json` is resolved
 /// against the config directory, so the schema file must be in `dir/schemas/`.
-const STM_RULES_SCHEMA_HEADER: &str =
-    "# yaml-language-server: $schema=./schemas/stm-rules.schema.json\n\n";
+const STM_RULES_SCHEMA_HEADER: &str = "#:schema ./schemas/stm-rules.schema.json\n\n";
 
 // ── Load functions ────────────────────────────────────────────────────
 
-/// Load application config from a YAML file.
+/// Load application config from a TOML file.
 ///
-/// Reads [`StmConfig`] from the given YAML file. This function is resilient:
+/// Reads [`StmConfig`] from the given TOML file. This function is resilient:
 ///
 /// - **File not found** → returns `StmConfig::default()`, logs at `debug` level.
 /// - **Parse error** → returns `StmConfig::default()`, logs an error with the parse failure.
@@ -67,7 +65,7 @@ const STM_RULES_SCHEMA_HEADER: &str =
 ///
 /// # Arguments
 ///
-/// * `path` - Path to the `stm.yml` file.
+/// * `path` - Path to the `stm.toml` file.
 ///
 /// # Returns
 ///
@@ -80,13 +78,13 @@ const STM_RULES_SCHEMA_HEADER: &str =
 /// use scrolling_tiling_manager::config::load_app_config;
 /// use std::path::Path;
 ///
-/// let config = load_app_config(Path::new("stm.yml"));
+/// let config = load_app_config(Path::new("stm.toml"));
 /// println!("column_width = {}", config.column_width);
 /// ```
 #[must_use]
 pub fn load_app_config(path: &Path) -> StmConfig {
     match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_yaml::from_str::<StmConfig>(&contents) {
+        Ok(contents) => match toml::from_str::<StmConfig>(&contents) {
             Ok(config) => {
                 // Validate post-deserialization — log warnings but don't fail.
                 if let Err(warning) = config.validate() {
@@ -107,7 +105,7 @@ pub fn load_app_config(path: &Path) -> StmConfig {
     }
 }
 
-/// Load window rules config from a YAML file.
+/// Load window rules config from a TOML file.
 ///
 /// If the file doesn't exist, returns the default (empty rules, `default_action: tile`).
 /// If the file exists but is malformed, logs an error and returns the default.
@@ -116,7 +114,7 @@ pub fn load_app_config(path: &Path) -> StmConfig {
 ///
 /// # Arguments
 ///
-/// * `path` - Path to the `stm-rules.yml` file.
+/// * `path` - Path to the `stm-rules.toml` file.
 ///
 /// # Returns
 ///
@@ -125,7 +123,7 @@ pub fn load_app_config(path: &Path) -> StmConfig {
 #[must_use]
 pub fn load_rules_config(path: &Path) -> WindowRulesConfig {
     match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_yaml::from_str::<WindowRulesConfig>(&contents) {
+        Ok(contents) => match toml::from_str::<WindowRulesConfig>(&contents) {
             Ok(config) => {
                 log::info!("loaded window rules from {:?}", path);
                 config
@@ -145,14 +143,14 @@ pub fn load_rules_config(path: &Path) -> WindowRulesConfig {
     }
 }
 
-/// Load default app config from `default-config.yml` bundled next to the executable.
+/// Load default app config from `default-config.toml` bundled next to the executable.
 ///
 /// Looks for the file in the same directory as the running executable. If the
 /// file doesn't exist, returns `StmConfig::default()`. This is **not an error** —
 /// the binary may not ship with a default config file (e.g., in development).
 ///
 /// This is the analogue of [`load_default_rules`] for the app config. It enables
-/// a two-layer config model: shipped defaults as the base layer, user's `stm.yml`
+/// a two-layer config model: shipped defaults as the base layer, user's `stm.toml`
 /// as the overlay.
 ///
 /// # Returns
@@ -173,7 +171,7 @@ pub fn load_default_config() -> StmConfig {
         return StmConfig::default();
     };
 
-    let path = dir.join("default-config.yml");
+    let path = dir.join("default-config.toml");
     if !path.exists() {
         log::debug!("no default config file at {:?}", path);
         return StmConfig::default();
@@ -182,7 +180,7 @@ pub fn load_default_config() -> StmConfig {
     load_app_config(&path)
 }
 
-/// Load default rules from `default-stm-rules.yml` bundled next to the executable.
+/// Load default rules from `default-stm-rules.toml` bundled next to the executable.
 ///
 /// Looks for the file in the same directory as the running executable. If the
 /// file doesn't exist, returns empty rules. This is **not an error** — the
@@ -206,7 +204,7 @@ pub fn load_default_rules() -> WindowRulesConfig {
         return WindowRulesConfig::default();
     };
 
-    let path = dir.join("default-stm-rules.yml");
+    let path = dir.join("default-stm-rules.toml");
     if !path.exists() {
         log::debug!("no default rules file at {:?}", path);
         return WindowRulesConfig::default();
@@ -223,10 +221,10 @@ pub fn load_default_rules() -> WindowRulesConfig {
 /// multiple times is safe). Then writes each default file only if it doesn't
 /// already exist:
 ///
-/// - `stm.yml` — default [`StmConfig`] as YAML, with a `yaml-language-server`
-///   `$schema` header prepended for IDE autocomplete.
-/// - `stm-rules.yml` — default [`WindowRulesConfig`] as YAML, with a
-///   `yaml-language-server` `$schema` header prepended.
+/// - `stm.toml` — default [`StmConfig`] as TOML, with a `#:schema` header
+///   prepended for IDE autocomplete (taplo LSP).
+/// - `stm-rules.toml` — default [`WindowRulesConfig`] as TOML, with a
+///   `#:schema` header prepended.
 /// - `schemas/stm-config.schema.json` — JSON Schema for [`StmConfig`].
 /// - `schemas/stm-rules.schema.json` — JSON Schema for [`WindowRulesConfig`].
 ///
@@ -244,8 +242,8 @@ pub fn load_default_rules() -> WindowRulesConfig {
 ///
 /// # Errors
 ///
-/// Returns `Err` if directory creation fails, or if writing `stm.yml` or
-/// `stm-rules.yml` fails. JSON Schema write failures are non-fatal (logged
+/// Returns `Err` if directory creation fails, or if writing `stm.toml` or
+/// `stm-rules.toml` fails. JSON Schema write failures are non-fatal (logged
 /// as warnings) and do not cause this function to return `Err`.
 ///
 /// # Example
@@ -271,42 +269,42 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("failed to create schemas directory {:?}: {e}", schemas_dir))?;
 
     // Serialize default configs for the user's config directory.
-    // This generates a starter stm.yml and stm-rules.yml for users.
-    // The actual runtime defaults come from `default-config.yml` /
-    // `default-stm-rules.yml` shipped next to stmd.exe (loaded via
+    // This generates a starter stm.toml and stm-rules.toml for users.
+    // The actual runtime defaults come from `default-config.toml` /
+    // `default-stm-rules.toml` shipped next to stmd.exe (loaded via
     // `load_default_config` / `load_default_rules`).
-    let default_config_yaml = serde_yaml::to_string(&StmConfig::default())
+    let default_config_toml = toml::to_string(&StmConfig::default())
         .map_err(|e| format!("failed to serialize default StmConfig: {e}"))?;
-    let default_rules_yaml = serde_yaml::to_string(&WindowRulesConfig::default())
+    let default_rules_toml = toml::to_string(&WindowRulesConfig::default())
         .map_err(|e| format!("failed to serialize default WindowRulesConfig: {e}"))?;
 
-    // Write default stm.yml with schema header, if it doesn't exist.
-    let stm_yml = dir.join("stm.yml");
-    let stm_content = format!("{STM_CONFIG_SCHEMA_HEADER}{default_config_yaml}");
-    match write_default_config_file(&stm_yml, &stm_content) {
+    // Write default stm.toml with schema header, if it doesn't exist.
+    let stm_toml = dir.join("stm.toml");
+    let stm_content = format!("{STM_CONFIG_SCHEMA_HEADER}{default_config_toml}");
+    match write_default_config_file(&stm_toml, &stm_content) {
         Ok(written) => {
             if written {
-                log::info!("wrote default config to {:?}", stm_yml);
+                log::info!("wrote default config to {:?}", stm_toml);
             }
         }
         Err(e) => {
-            return Err(format!("failed to write default config {:?}: {e}", stm_yml));
+            return Err(format!("failed to write default config {:?}: {e}", stm_toml));
         }
     }
 
-    // Write default stm-rules.yml with schema header, if it doesn't exist.
-    let rules_yml = dir.join("stm-rules.yml");
-    let rules_content = format!("{STM_RULES_SCHEMA_HEADER}{default_rules_yaml}");
-    match write_default_config_file(&rules_yml, &rules_content) {
+    // Write default stm-rules.toml with schema header, if it doesn't exist.
+    let rules_toml = dir.join("stm-rules.toml");
+    let rules_content = format!("{STM_RULES_SCHEMA_HEADER}{default_rules_toml}");
+    match write_default_config_file(&rules_toml, &rules_content) {
         Ok(written) => {
             if written {
-                log::info!("wrote default rules to {:?}", rules_yml);
+                log::info!("wrote default rules to {:?}", rules_toml);
             }
         }
         Err(e) => {
             return Err(format!(
                 "failed to write default rules {:?}: {e}",
-                rules_yml
+                rules_toml
             ));
         }
     }
@@ -354,10 +352,10 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
 
 /// Validate config files in a directory without loading them into the daemon.
 ///
-/// Checks both `stm.yml` and `stm-rules.yml` in the given directory:
+/// Checks both `stm.toml` and `stm-rules.toml` in the given directory:
 ///
-/// - Loads `stm.yml`, deserializes as [`StmConfig`], calls [`StmConfig::validate()`].
-/// - Loads `stm-rules.yml`, checks it parses correctly as [`WindowRulesConfig`].
+/// - Loads `stm.toml`, deserializes as [`StmConfig`], calls [`StmConfig::validate()`].
+/// - Loads `stm-rules.toml`, checks it parses correctly as [`WindowRulesConfig`].
 ///
 /// Missing files are **not errors** — they simply mean the user hasn't created
 /// a config yet and defaults will be used. This function only reports actual
@@ -387,27 +385,27 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
 /// ```
 #[must_use = "validation errors must be handled"]
 pub fn check_config(dir: &Path) -> Result<(), String> {
-    let stm_path = dir.join("stm.yml");
+    let stm_path = dir.join("stm.toml");
 
-    // Only validate stm.yml if it exists — missing is not an error.
+    // Only validate stm.toml if it exists — missing is not an error.
     if stm_path.exists() {
         let contents = std::fs::read_to_string(&stm_path)
             .map_err(|e| format!("failed to read {:?}: {e}", stm_path))?;
         let config: StmConfig =
-            serde_yaml::from_str(&contents).map_err(|e| format!("stm.yml parse error: {e}"))?;
+            toml::from_str(&contents).map_err(|e| format!("stm.toml parse error: {e}"))?;
         config
             .validate()
-            .map_err(|e| format!("stm.yml validation error: {e}"))?;
+            .map_err(|e| format!("stm.toml validation error: {e}"))?;
     }
 
-    let rules_path = dir.join("stm-rules.yml");
+    let rules_path = dir.join("stm-rules.toml");
 
-    // Only validate stm-rules.yml if it exists — missing is not an error.
+    // Only validate stm-rules.toml if it exists — missing is not an error.
     if rules_path.exists() {
         let contents = std::fs::read_to_string(&rules_path)
             .map_err(|e| format!("failed to read {:?}: {e}", rules_path))?;
-        let _: WindowRulesConfig = serde_yaml::from_str(&contents)
-            .map_err(|e| format!("stm-rules.yml parse error: {e}"))?;
+        let _: WindowRulesConfig = toml::from_str(&contents)
+            .map_err(|e| format!("stm-rules.toml parse error: {e}"))?;
     }
 
     Ok(())
@@ -461,22 +459,24 @@ mod tests {
 
     // ── load_app_config tests ──────────────────────────────────────────
 
-    /// Positive: valid YAML file parses into the expected `StmConfig`.
+    /// Positive: valid TOML file parses into the expected `StmConfig`.
     #[test]
     fn load_app_config_valid_file_parses_correctly() {
-        let yaml = r#"
-super_key: VK_LWIN
-column_width: 1200
-min_column_width_px: 400
-padding:
-  window: 8
-  up: 10
-  down: 40
-animation:
-  enabled: false
+        let toml_content = r#"
+super_key = "VK_LWIN"
+column_width = 1200
+min_column_width_px = 400
+
+[padding]
+window = 8
+up = 10
+down = 40
+
+[animation]
+enabled = false
 "#;
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(yaml.as_bytes()).unwrap();
+        f.write_all(toml_content.as_bytes()).unwrap();
 
         let config = load_app_config(f.path());
         assert_eq!(config.super_key, "VK_LWIN");
@@ -491,7 +491,7 @@ animation:
     /// Negative: missing file returns default config (not panic, not error).
     #[test]
     fn load_app_config_missing_file_returns_default() {
-        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm.yml");
+        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm.toml");
         let config = load_app_config(&path);
         assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.column_width, 960);
@@ -499,22 +499,22 @@ animation:
         assert_eq!(config.padding.window, 4);
     }
 
-    /// Negative: malformed YAML returns default config (not panic).
+    /// Negative: malformed TOML returns default config (not panic).
     #[test]
-    fn load_app_config_malformed_yaml_returns_default() {
+    fn load_app_config_malformed_toml_returns_default() {
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"this is not: valid: yaml: [[[[").unwrap();
+        f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
 
         let config = load_app_config(f.path());
         assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.column_width, 960);
     }
 
-    /// Negative: empty YAML object `{}` returns default config (all serde defaults fill in).
+    /// Negative: empty TOML file returns default config (all serde defaults fill in).
     #[test]
-    fn load_app_config_empty_yaml_returns_default() {
+    fn load_app_config_empty_toml_returns_default() {
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"{}").unwrap();
+        f.write_all(b"").unwrap();
 
         let config = load_app_config(f.path());
         assert_eq!(config.super_key, "VK_F24");
@@ -543,10 +543,10 @@ animation:
         );
 
         // Default files should exist.
-        assert!(dir.join("stm.yml").exists(), "stm.yml should be created");
+        assert!(dir.join("stm.toml").exists(), "stm.toml should be created");
         assert!(
-            dir.join("stm-rules.yml").exists(),
-            "stm-rules.yml should be created"
+            dir.join("stm-rules.toml").exists(),
+            "stm-rules.toml should be created"
         );
 
         // Schema files should be in schemas/ subdirectory.
@@ -559,26 +559,26 @@ animation:
             "schemas/stm-rules.schema.json should be created"
         );
 
-        // stm.yml should start with the schema header.
-        let contents = std::fs::read_to_string(dir.join("stm.yml")).unwrap();
+        // stm.toml should start with the schema header.
+        let contents = std::fs::read_to_string(dir.join("stm.toml")).unwrap();
         assert!(
-            contents.contains("yaml-language-server"),
-            "stm.yml should contain schema header"
+            contents.contains("#:schema"),
+            "stm.toml should contain taplo schema header"
         );
 
-        // stm.yml should contain valid StmConfig YAML (after the header).
-        let config: StmConfig = serde_yaml::from_str(&contents).unwrap();
+        // stm.toml should contain valid StmConfig TOML (after the header).
+        let config: StmConfig = toml::from_str(&contents).unwrap();
         assert_eq!(config.super_key, "VK_F24");
 
-        // stm-rules.yml should start with the schema header.
-        let contents = std::fs::read_to_string(dir.join("stm-rules.yml")).unwrap();
+        // stm-rules.toml should start with the schema header.
+        let contents = std::fs::read_to_string(dir.join("stm-rules.toml")).unwrap();
         assert!(
-            contents.contains("yaml-language-server"),
-            "stm-rules.yml should contain schema header"
+            contents.contains("#:schema"),
+            "stm-rules.toml should contain taplo schema header"
         );
 
-        // stm-rules.yml should contain valid WindowRulesConfig YAML.
-        let rules: WindowRulesConfig = serde_yaml::from_str(&contents).unwrap();
+        // stm-rules.toml should contain valid WindowRulesConfig TOML.
+        let rules: WindowRulesConfig = toml::from_str(&contents).unwrap();
         assert_eq!(rules.default_action, WindowAction::Tile);
     }
 
@@ -588,17 +588,17 @@ animation:
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Create stm.yml with custom content BEFORE init.
-        let custom_content = "super_key: VK_LWIN\ncolumn_width: 9999\n";
-        std::fs::write(dir.join("stm.yml"), custom_content).unwrap();
+        // Create stm.toml with custom content BEFORE init.
+        let custom_content = "super_key = \"VK_LWIN\"\ncolumn_width = 9999\n";
+        std::fs::write(dir.join("stm.toml"), custom_content).unwrap();
 
         let result = init_config_dir(dir);
         assert!(result.is_ok(), "init_config_dir failed: {result:?}");
 
         // File should still have the custom content.
-        let contents = std::fs::read_to_string(dir.join("stm.yml")).unwrap();
+        let contents = std::fs::read_to_string(dir.join("stm.toml")).unwrap();
         assert_eq!(contents, custom_content);
-        assert!(contents.contains("column_width: 9999"));
+        assert!(contents.contains("column_width = 9999"));
     }
 
     // ── check_config tests ──────────────────────────────────────────────
@@ -616,16 +616,16 @@ animation:
         assert!(result.is_ok(), "check_config failed: {result:?}");
     }
 
-    /// Negative: invalid stm.yml returns validation error.
+    /// Negative: invalid stm.toml returns validation error.
     #[test]
     fn check_config_invalid_app_config_returns_err() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Write an stm.yml with invalid values (negative padding).
+        // Write an stm.toml with invalid values (negative padding).
         std::fs::write(
-            dir.join("stm.yml"),
-            "super_key: VK_F24\npadding:\n  window: -1\n",
+            dir.join("stm.toml"),
+            "super_key = \"VK_F24\"\n\n[padding]\nwindow = -1\n",
         )
         .unwrap();
 
@@ -649,19 +649,19 @@ animation:
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Directory is empty — no stm.yml or stm-rules.yml.
+        // Directory is empty — no stm.toml or stm-rules.toml.
         let result = check_config(dir);
         assert!(result.is_ok(), "empty directory should pass check_config");
     }
 
-    /// Negative: malformed `stm-rules.yml` returns a parse error.
+    /// Negative: malformed `stm-rules.toml` returns a parse error.
     #[test]
     fn check_config_malformed_rules_returns_err() {
-        // Arrange: directory with a syntactically invalid stm-rules.yml.
+        // Arrange: directory with a syntactically invalid stm-rules.toml.
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        std::fs::write(dir.join("stm-rules.yml"), b"this is not: valid: yaml: [[[[").unwrap();
+        std::fs::write(dir.join("stm-rules.toml"), b"this is = not = valid = toml = [[[[").unwrap();
 
         // Act
         let result = check_config(dir);
@@ -669,34 +669,34 @@ animation:
         // Assert: returns an error mentioning the rules file.
         assert!(
             result.is_err(),
-            "malformed stm-rules.yml should cause check_config to fail"
+            "malformed stm-rules.toml should cause check_config to fail"
         );
         let err_msg = result.unwrap_err();
         assert!(
-            err_msg.contains("stm-rules.yml"),
+            err_msg.contains("stm-rules.toml"),
             "error message should identify the rules file: {err_msg}"
         );
     }
 
     // ── load_rules_config tests ────────────────────────────────────────
 
-    /// Positive: valid YAML file parses into the expected `WindowRulesConfig`.
+    /// Positive: valid TOML file parses into the expected `WindowRulesConfig`.
     #[test]
     fn load_rules_config_valid_file_parses_correctly() {
-        let yaml = r#"
-default_action: float
-rules:
-  - match:
-      exe: "explorer.exe"
-      title_contains: "Open"
-    action: ignore
-  - match:
-      class: "Chrome_WidgetWin_1"
-    action: tile
-    initial_width_eighths: 4
+        let toml_content = r#"
+default_action = "float"
+
+[[rules]]
+match = { exe = "explorer.exe", title_contains = "Open" }
+action = "ignore"
+
+[[rules]]
+match = { class = "Chrome_WidgetWin_1" }
+action = "tile"
+initial_width_eighths = 4
 "#;
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(yaml.as_bytes()).unwrap();
+        f.write_all(toml_content.as_bytes()).unwrap();
 
         let config = load_rules_config(f.path());
         assert_eq!(config.default_action, WindowAction::Float);
@@ -708,35 +708,35 @@ rules:
     /// Negative: missing file returns default config (not panic, not error).
     #[test]
     fn load_rules_config_missing_file_returns_default() {
-        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm-rules.yml");
+        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm-rules.toml");
         let config = load_rules_config(&path);
         assert_eq!(config.default_action, WindowAction::Tile);
         assert!(config.rules.is_empty());
     }
 
-    /// Negative: malformed YAML returns default config (not panic).
+    /// Negative: malformed TOML returns default config (not panic).
     #[test]
-    fn load_rules_config_malformed_yaml_returns_default() {
+    fn load_rules_config_malformed_toml_returns_default() {
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"this is not: valid: yaml: [[[[").unwrap();
+        f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
 
         let config = load_rules_config(f.path());
         assert_eq!(config.default_action, WindowAction::Tile);
         assert!(config.rules.is_empty());
     }
 
-    /// Negative: empty JSON-like file `{}` returns default config.
+    /// Negative: empty TOML file returns default config.
     #[test]
-    fn load_rules_config_empty_yaml_object_returns_default() {
+    fn load_rules_config_empty_toml_returns_default() {
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"{}").unwrap();
+        f.write_all(b"").unwrap();
 
         let config = load_rules_config(f.path());
         assert_eq!(config.default_action, WindowAction::Tile);
         assert!(config.rules.is_empty());
     }
 
-    /// Positive: valid YAML with regex fields round-trips through file I/O.
+    /// Positive: valid TOML with regex fields round-trips through file I/O.
     #[test]
     fn load_rules_config_roundtrips_regex_fields() {
         use crate::config::types::{MatchRule, WindowRule, WindowRulesConfig};
@@ -756,9 +756,9 @@ rules:
             }],
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let toml_str = toml::to_string(&config).unwrap();
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(yaml.as_bytes()).unwrap();
+        f.write_all(toml_str.as_bytes()).unwrap();
 
         let loaded = load_rules_config(f.path());
         assert_eq!(loaded.default_action, WindowAction::Ignore);
@@ -772,7 +772,7 @@ rules:
     // ── load_default_rules tests ───────────────────────────────────────
 
     /// Negative: `load_default_rules()` does not panic regardless of whether
-    /// `default-stm-rules.yml` exists next to the test binary.
+    /// `default-stm-rules.toml` exists next to the test binary.
     ///
     /// The exe directory in test environments (`target\debug\deps\`) will not
     /// have the bundled rules file, so this exercises the "file not found →
@@ -787,7 +787,7 @@ rules:
     // ── load_default_config tests ──────────────────────────────────────
 
     /// Negative: `load_default_config()` does not panic regardless of whether
-    /// `default-config.yml` exists next to the test binary.
+    /// `default-config.toml` exists next to the test binary.
     ///
     /// The exe directory in test environments (`target\debug\deps\`) will not
     /// have the bundled config file, so this exercises the "file not found →
@@ -799,21 +799,21 @@ rules:
         let _config = load_default_config();
     }
 
-    // ── default-stm-rules.yml parse test ────────────────────────────────
+    // ── default-stm-rules.toml parse test ────────────────────────────────
 
-    /// Positive: the bundled `default-stm-rules.yml` in the project root
+    /// Positive: the bundled `default-stm-rules.toml` in the project root
     /// parses correctly as `WindowRulesConfig`.
     ///
     /// This catches syntax errors or schema drift in the shipped defaults.
     #[test]
-    fn default_stm_rules_yml_parses_correctly() {
+    fn default_stm_rules_toml_parses_correctly() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR should be set during tests");
-        let path = std::path::PathBuf::from(manifest_dir).join("default-stm-rules.yml");
+        let path = std::path::PathBuf::from(manifest_dir).join("default-stm-rules.toml");
 
         // Only run if the file exists (it should in the project tree).
         if !path.exists() {
-            eprintln!("skipping: default-stm-rules.yml not found at {path:?}");
+            eprintln!("skipping: default-stm-rules.toml not found at {path:?}");
             return;
         }
 
@@ -836,23 +836,23 @@ rules:
         assert_eq!(taskbar_rule.unwrap().action, WindowAction::Ignore);
     }
 
-    // ── default-config.yml parse test ──────────────────────────────────
+    // ── default-config.toml parse test ──────────────────────────────────
 
-    /// Positive: the bundled `default-config.yml` in the project root
+    /// Positive: the bundled `default-config.toml` in the project root
     /// parses correctly as `StmConfig`.
     ///
     /// This catches syntax errors or schema drift in the shipped defaults.
-    /// It does NOT enforce that the YAML values match the Rust serde defaults
-    /// — `default-config.yml` is the single source of truth and can be freely
+    /// It does NOT enforce that the TOML values match the Rust serde defaults
+    /// — `default-config.toml` is the single source of truth and can be freely
     /// edited to change defaults without recompiling.
     #[test]
-    fn default_config_yml_parses_correctly() {
+    fn default_config_toml_parses_correctly() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR should be set during tests");
-        let path = std::path::PathBuf::from(manifest_dir).join("default-config.yml");
+        let path = std::path::PathBuf::from(manifest_dir).join("default-config.toml");
 
         if !path.exists() {
-            eprintln!("skipping: default-config.yml not found at {path:?}");
+            eprintln!("skipping: default-config.toml not found at {path:?}");
             return;
         }
 
@@ -861,7 +861,7 @@ rules:
         // Verify the file parsed and is valid (passes semantic validation).
         assert!(
             config.validate().is_ok(),
-            "default-config.yml should pass validation"
+            "default-config.toml should pass validation"
         );
 
         // Spot-check: file should have all top-level sections.

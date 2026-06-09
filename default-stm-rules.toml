@@ -1,0 +1,93 @@
+#:schema ./schemas/stm-rules.schema.json
+
+# Default window classification rules for ScrollingTilingManager.
+#
+# This file ships alongside stmd.exe and provides sensible defaults for common
+# Windows system windows that should NOT be tiled. Users can override any of
+# these rules by adding their own rules in stm-rules.toml (which is checked first).
+#
+# Format: first match wins. Each rule has a "match" clause (AND logic) and
+# an "action" (tile, float, or ignore).
+#
+# For match field documentation, see the MatchRule docstring in src/config/types.rs.
+
+default_action = "tile"
+
+# ── Windows Shell ────────────────────────────────────────────────────
+
+# Windows taskbar
+[[rules]]
+match = { class = "Shell_TrayWnd" }
+action = "ignore"
+
+# Desktop wallpaper host process (Windows 10+)
+[[rules]]
+match = { exe = "ApplicationFrameHost.exe", class = "Windows.UI.Core.CoreWindow" }
+action = "ignore"
+
+# Windows Search overlay
+[[rules]]
+match = { exe = "SearchUI.exe" }
+action = "ignore"
+
+# Start Menu
+[[rules]]
+match = { exe = "ShellExperienceHost.exe" }
+action = "ignore"
+
+# Windows Action Center / Quick Settings / notification toasts
+[[rules]]
+match = { exe = "ShellExperienceHost.exe", class = "Windows.UI.Core.CoreWindow" }
+action = "ignore"
+
+# ── System Dialogs ──────────────────────────────────────────────────
+
+# Common Win32 dialog boxes (Open/Save As, Properties, etc.)
+[[rules]]
+match = { class = "#32770" }
+action = "float"
+
+# Run dialog
+[[rules]]
+match = { class = "ComboBox", exe = "Explorer.exe" }
+action = "float"
+
+# ── Explorer ────────────────────────────────────────────────────────
+
+# Windows Explorer file open/save dialogs
+[[rules]]
+match = { exe = "explorer.exe", class = "CabinetWClass" }
+action = "ignore"
+
+# ── Task Manager ────────────────────────────────────────────────────
+
+[[rules]]
+match = { exe = "Taskmgr.exe" }
+action = "float"
+
+# ── Accessibility ───────────────────────────────────────────────────
+
+# On-Screen Keyboard
+[[rules]]
+match = { class = "OSKMainClass" }
+action = "ignore"
+
+# Magnifier
+[[rules]]
+match = { exe = "Magnify.exe" }
+action = "ignore"
+
+# Narrator
+[[rules]]
+match = { exe = "Narrator.exe" }
+action = "ignore"
+
+# ── Custom Apps ───────────────────────────────────────────────────
+
+[[rules]]
+match = { exe = "Surfshark.exe" }
+action = "float"
+
+[[rules]]
+match = { exe = "Addictive Keys.exe" }
+action = "float"
