@@ -15,7 +15,8 @@ use std::path::Path;
 use clap::Parser;
 
 use scrolling_tiling_manager::config::{
-    dirs, init_config_dir, load_app_config, load_default_rules, load_rules_config,
+    dirs, init_config_dir, load_app_config, load_default_config, load_default_rules,
+    load_rules_config,
 };
 use scrolling_tiling_manager::daemon::ScrollTilingManager;
 
@@ -81,6 +82,16 @@ fn run(args: Args) -> Result<(), String> {
     init_config_dir(&config_dir)?;
 
     // 3. Load configuration.
+    //
+    // Two-layer config model:
+    //   Layer 1: Shipped defaults from `default-config.yml` (next to stmd.exe).
+    //   Layer 2: User overrides from `stm.yml` (in config dir).
+    //
+    // If the user file is missing or malformed, the daemon uses the shipped
+    // defaults (or compiled-in Rust defaults as the emergency fallback).
+    // The drift test in `config::lifecycle::tests` ensures the compiled-in
+    // defaults match the shipped YAML file.
+    let _shipped_defaults = load_default_config();
     let app_config = load_app_config(&dirs::user_app_config_path_in(&config_dir));
     let user_rules = load_rules_config(&dirs::user_rules_path_in(&config_dir));
     let default_rules = load_default_rules();

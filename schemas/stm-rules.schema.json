@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WindowRulesConfig",
+  "description": "Window classification configuration, loaded from `stm-rules.yml`.\n\nThis is the user-facing window rules file. Rules are evaluated top-to-bottom, first match wins. If no rule matches, `default_action` is used.\n\nLoaded from `%USERPROFILE%\\.config\\stm\\stm-rules.yml` (see [`config::dirs`](crate::config::dirs) for overrides). If the file doesn't exist, defaults to an empty rule list with `default_action: tile`.\n\n# Example\n\n```yaml default_action: tile rules: - match: exe: \"explorer.exe\" title_contains: \"Open\" action: ignore - match: class: \"Chrome_WidgetWin_1\" action: tile initial_width_eighths: 4 ```",
+  "type": "object",
+  "properties": {
+    "default_action": {
+      "description": "Default action for windows not matching any rule.",
+      "default": "tile",
+      "allOf": [
+        {
+          "$ref": "#/definitions/WindowAction"
+        }
+      ]
+    },
+    "rules": {
+      "description": "Window classification rules (first match wins).",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/WindowRule"
+      }
+    }
+  },
+  "definitions": {
+    "MatchRule": {
+      "description": "Match criteria for a window rule.\n\nAll fields are optional — a rule matches if **all specified fields** match (AND logic). Unspecified (`None`) fields are ignored entirely.\n\nEach field supports a different matching mode:\n\n- **Exact match** (`exe`, `title`, `class`, `process_path`) — the candidate string must equal the rule value exactly.\n\n- **Substring match** (`title_contains`) — the rule value must appear as a contiguous substring of the candidate string.\n\n- **Regex match** (`exe_regex`, `title_regex`, `class_regex`, `process_path_regex`) — the rule value is compiled as a Rust regex and the full candidate string must match (not just a substring). Uses the `regex` crate's syntax.\n\n# Case Sensitivity\n\n| Field               | Semantics                                         | |---------------------|---------------------------------------------------| | `exe`               | Case-insensitive (Windows paths are case-insensitive) | | `exe_regex`         | Case-insensitive by default (Windows paths)       | | `title`             | Case-sensitive                                    | | `title_contains`    | Case-sensitive                                    | | `title_regex`       | Case-sensitive (use `(?i)` for case-insensitive)  | | `class`             | Case-sensitive                                    | | `class_regex`       | Case-sensitive (use `(?i)` for case-insensitive)  | | `process_path`      | Case-insensitive (Windows paths)                  | | `process_path_regex` | Case-insensitive by default (Windows paths)      |\n\n**Why are `exe` and `process_path` case-insensitive?**\n\nOn Windows, the filesystem is case-insensitive — `chrome.exe` and `Chrome.exe` refer to the same file. Window class names (`class`) and titles (`title`) are case-sensitive strings that applications control, so they are matched exactly. Regex fields use the `(?i)` / `(?-i)` inline flags if the user needs different behavior.",
+      "type": "object",
+      "properties": {
+        "class": {
+          "description": "Exact Win32 window class name. Case-sensitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "class_regex": {
+          "description": "Regex on Win32 window class name. Case-sensitive. Use `(?i)` inline flag for case-insensitive matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exe": {
+          "description": "Exact executable name (e.g., `\"code.exe\"`). Case-insensitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exe_regex": {
+          "description": "Regex on executable name. Case-insensitive by default. Use `(?-i)` inline flag to opt into case-sensitive matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "process_path": {
+          "description": "Exact full executable path. Case-insensitive (Windows filesystem).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "process_path_regex": {
+          "description": "Regex on full executable path. Case-insensitive by default. Use `(?-i)` inline flag to opt into case-sensitive matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "Exact window title. Case-sensitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title_contains": {
+          "description": "Case-sensitive substring match on title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title_regex": {
+          "description": "Full regex match on title. Case-sensitive. Use `(?i)` inline flag for case-insensitive matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "WindowAction": {
+      "description": "Action to apply when a window rule matches.\n\n- `Tile` — managed by [`LayoutEngine`](crate::layout::LayoutEngine) - `Float` — free-floating, user-positioned, not tiled - `Ignore` — excluded from tiling entirely (e.g., fullscreen apps)",
+      "oneOf": [
+        {
+          "description": "Managed by [`LayoutEngine`](crate::layout::LayoutEngine).",
+          "type": "string",
+          "enum": [
+            "tile"
+          ]
+        },
+        {
+          "description": "Free-floating, user-positioned, not tiled.",
+          "type": "string",
+          "enum": [
+            "float"
+          ]
+        },
+        {
+          "description": "Excluded from tiling entirely (e.g., fullscreen apps).",
+          "type": "string",
+          "enum": [
+            "ignore"
+          ]
+        }
+      ]
+    },
+    "WindowRule": {
+      "description": "A single window classification rule.\n\nRules are evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, [`WindowRulesConfig::default_action`] is used.\n\nThe `match` field uses `#[serde(rename = \"match\")]` so the YAML key is `match` while the Rust field is `match_` (avoiding the reserved word).",
+      "type": "object",
+      "required": [
+        "action",
+        "match"
+      ],
+      "properties": {
+        "action": {
+          "description": "Action to take when matched.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WindowAction"
+            }
+          ]
+        },
+        "initial_width_eighths": {
+          "description": "Optional initial width in eighths (1–8).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "match": {
+          "description": "Criteria to match against a window.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/MatchRule"
+            }
+          ]
+        },
+        "override_persist": {
+          "description": "If true, this rule overrides per-app learned state.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

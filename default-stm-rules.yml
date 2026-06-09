@@ -1,3 +1,5 @@
+# yaml-language-server: $schema=./schemas/stm-rules.schema.json
+
 # Default window classification rules for ScrollingTilingManager.
 #
 # This file ships alongside stmd.exe and provides sensible defaults for common
@@ -84,3 +86,12 @@ rules:
   - match:
       exe: "Narrator.exe"
     action: ignore
+  
+  # ── Custom Apps ───────────────────────────────────────────────────
+  - match:
+      exe: "Surfshark.exe"
+    action: float
+
+  - match:
+      exe: "Addictive Keys.exe"
+    action: float
