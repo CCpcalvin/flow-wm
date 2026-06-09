@@ -578,6 +578,59 @@ pub fn toggle_monocle(
 // Window add / remove
 // ---------------------------------------------------------------------------
 
+/// Build a complete virtual layout from a list of window IDs.
+///
+/// Creates one column per window with the default width. Called on an
+/// empty layout during daemon startup when the registry already has
+/// tracked windows from the init scan.
+///
+/// This is more efficient than calling [`add_window`] N times because
+/// it builds the layout in a single operation without intermediate
+/// projection + diff steps.
+///
+/// # Arguments
+///
+/// * `ids` — Window IDs to place in the layout, one per column, in order.
+/// * `config` — Mutation configuration (provides default column width).
+///
+/// # Returns
+///
+/// A [`VirtualLayout`] with one column per window ID, each at the default
+/// width from `config.default_column_width_eighths`.
+///
+/// # Example
+///
+/// ```
+/// # use scrolling_tiling_manager::layout::mutations::{initialize_windows, MutationConfig};
+/// # use scrolling_tiling_manager::layout::types::Padding;
+/// # use scrolling_tiling_manager::common::WindowId;
+/// let config = MutationConfig {
+///     monitor_width: 1920,
+///     column_width: 960,
+///     default_column_width_eighths: 4,
+///     min_column_eighths: 2,
+///     max_column_eighths: 8,
+///     padding: Padding { window: 4, up: 0, down: 0 },
+/// };
+/// let layout = initialize_windows(
+///     &[WindowId(1), WindowId(2), WindowId(3)],
+///     &config,
+/// );
+/// assert_eq!(layout.columns.len(), 3);
+/// ```
+#[must_use]
+pub fn initialize_windows(ids: &[WindowId], config: &MutationConfig) -> VirtualLayout {
+    let columns: Vec<Column> = ids
+        .iter()
+        .map(|&id| Column::new(config.default_column_width_eighths, id))
+        .collect();
+
+    VirtualLayout {
+        columns,
+        viewport_offset: 0,
+    }
+}
+
 /// Add a window to the layout as a new column appended to the right.
 #[must_use]
 pub fn add_window(
@@ -1496,5 +1549,41 @@ mod tests {
         // Negative: can't swap right from last column
         let layout = three_column_layout();
         assert!(swap_column(&layout, WindowId(3), Direction::Right, &test_config()).is_none());
+    }
+
+    // --- initialize_windows tests ---
+
+    #[test]
+    fn initialize_windows_empty_list() {
+        // Positive: empty list → empty layout
+        let layout = initialize_windows(&[], &test_config());
+        assert!(layout.columns.is_empty());
+        assert_eq!(layout.viewport_offset, 0);
+    }
+
+    #[test]
+    fn initialize_windows_single_window() {
+        // Positive: single window → single column
+        let layout = initialize_windows(&[WindowId(1)], &test_config());
+        assert_eq!(layout.columns.len(), 1);
+        assert_eq!(layout.columns[0].rows, vec![WindowId(1)]);
+        assert_eq!(layout.columns[0].width_eighths, 4); // default
+        assert_eq!(layout.viewport_offset, 0);
+    }
+
+    #[test]
+    fn initialize_windows_multiple_windows() {
+        // Positive: multiple windows → multiple columns in order
+        let layout =
+            initialize_windows(&[WindowId(10), WindowId(20), WindowId(30)], &test_config());
+        assert_eq!(layout.columns.len(), 3);
+        assert_eq!(layout.columns[0].rows, vec![WindowId(10)]);
+        assert_eq!(layout.columns[1].rows, vec![WindowId(20)]);
+        assert_eq!(layout.columns[2].rows, vec![WindowId(30)]);
+        // All columns get default width
+        assert_eq!(layout.columns[0].width_eighths, 4);
+        assert_eq!(layout.columns[1].width_eighths, 4);
+        assert_eq!(layout.columns[2].width_eighths, 4);
+        assert_eq!(layout.viewport_offset, 0);
     }
 }

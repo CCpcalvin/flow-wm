@@ -10,6 +10,9 @@
 
 #[path = "cli/common.rs"]
 mod common;
+#[cfg(debug_assertions)]
+#[path = "cli/daemon_init.rs"]
+mod daemon_init;
 #[path = "cli/daemon_lifecycle.rs"]
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]

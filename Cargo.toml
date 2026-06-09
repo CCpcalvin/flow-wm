@@ -29,19 +29,9 @@ clap = { version = "4.6.1", features = ["derive"] }
 # Win32 bindings. Feature flags are transitive gates that enable functions
 # in other modules (e.g., Win32_System_IO gates ReadFile/WriteFile/ConnectNamedPipe;
 # Win32_Security gates CreateFileW/CreateNamedPipeW).
-windows = { version = "0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_System_Pipes",
-    "Win32_System_IO",
-    "Win32_Storage_FileSystem",
-    "Win32_Security",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Accessibility",
-    "Win32_System_Threading",
-    "Win32_System_StationsAndDesktops",
-    "Win32_Graphics_Gdi",
-] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_IO", "Win32_Storage_FileSystem", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 regex = "1.12.3"
+crossbeam-channel = "0.5.15"
 
 [profile.release]
 opt-level = 3

@@ -89,8 +89,11 @@
 //!
 //! See [`layout::projection`] module docs for the full container model.
 
+pub mod animation;
 pub mod common;
 pub mod config;
+pub mod daemon;
+pub mod floating;
 pub mod ipc;
 pub mod layout;
 pub mod registry;

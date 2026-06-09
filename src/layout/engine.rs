@@ -363,6 +363,31 @@ impl LayoutEngine {
 
         self.apply_mutation(new_layout)
     }
+
+    /// Initialize the layout with multiple windows in one operation.
+    ///
+    /// Creates one column per window, assigns default widths, and computes
+    /// a single [`LayoutDiff`] covering all windows. More efficient than
+    /// calling [`add_window`](Self::add_window) N times because it avoids
+    /// intermediate projection + diff steps.
+    ///
+    /// Used at daemon startup when the registry already has tracked windows
+    /// from the init scan.
+    ///
+    /// Focus is set to the last window (consistent with [`add_window`](Self::add_window)).
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` — Window IDs to place in the layout, one per column, in order.
+    ///
+    /// # Returns
+    ///
+    /// A [`LayoutDiff`] describing the new layout and all window positions.
+    pub fn initialize_windows(&mut self, ids: Vec<WindowId>) -> LayoutDiff {
+        let new_layout = mutations::initialize_windows(&ids, &self.config);
+        self.focused = ids.last().copied();
+        self.apply_mutation(new_layout)
+    }
 }
 
 #[cfg(test)]
@@ -798,5 +823,39 @@ mod tests {
         assert!(engine.swap_window(Direction::Right).is_none());
         assert!(engine.swap_window(Direction::Up).is_none());
         assert!(engine.swap_window(Direction::Down).is_none());
+    }
+
+    // --- Engine initialize_windows tests ---
+
+    #[test]
+    fn engine_initialize_windows_empty() {
+        // Positive: empty vec → empty layout, no focus
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
+        let diff = engine.initialize_windows(vec![]);
+        assert!(diff.virtual_layout.columns.is_empty());
+        assert!(engine.focused().is_none());
+    }
+
+    #[test]
+    fn engine_initialize_windows_single() {
+        // Positive: single window → single column, focused
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
+        let diff = engine.initialize_windows(vec![WindowId(1)]);
+        assert_eq!(diff.virtual_layout.columns.len(), 1);
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+        // Should produce moves (new window appeared)
+        assert!(!diff.moves.is_empty());
+    }
+
+    #[test]
+    fn engine_initialize_windows_multiple() {
+        // Positive: multiple windows → multiple columns, focus on last
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
+        let diff = engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)]);
+        assert_eq!(diff.virtual_layout.columns.len(), 3);
+        assert_eq!(diff.virtual_layout.columns[0].rows[0], WindowId(10));
+        assert_eq!(diff.virtual_layout.columns[1].rows[0], WindowId(20));
+        assert_eq!(diff.virtual_layout.columns[2].rows[0], WindowId(30));
+        assert_eq!(engine.focused(), Some(WindowId(30))); // last window
     }
 }

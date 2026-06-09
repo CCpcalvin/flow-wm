@@ -1,9 +1,11 @@
-//! Daemon-side command dispatcher.
+//! Daemon-side command dispatcher (fallback).
 //!
 //! Maps [`SocketMessage`] commands to [`SocketResponse`] results.
-//! The base [`dispatch`] function is platform-independent. The
-//! [`dispatch_with_registry`] function (Windows-only) handles commands that
-//! require access to the [`WindowRegistry`](crate::registry::WindowRegistry).
+//! This is the base/fallback dispatcher used before the full
+//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager) orchestrator
+//! takes over IPC handling. All commands except `Stop` return
+//! "not yet implemented" errors here — the orchestrator's `dispatch()` method
+//! handles the real routing to subsystems.
 
 use super::message::{SocketMessage, SocketResponse};
 
@@ -43,28 +45,6 @@ pub fn dispatch(msg: &SocketMessage) -> SocketResponse {
         SocketMessage::SetConfigValue { .. } => unimplemented_command("set_config_value"),
         SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
         SocketMessage::ForgetAllApps => unimplemented_command("forget_all_apps"),
-    }
-}
-
-/// Dispatch a command that requires access to the window registry.
-///
-/// Handles `QueryWindowsAll` by serialising the registry state to JSON,
-/// and falls through to [`dispatch`] for all other commands.
-pub fn dispatch_with_registry(
-    msg: &SocketMessage,
-    registry: &std::sync::Arc<std::sync::Mutex<crate::registry::WindowRegistry>>,
-) -> SocketResponse {
-    match msg {
-        SocketMessage::QueryWindowsAll => match registry.lock() {
-            Ok(reg) => {
-                let payload = reg.to_json_value();
-                SocketResponse::Data { payload }
-            }
-            Err(e) => SocketResponse::Error {
-                message: format!("registry lock failed: {e}"),
-            },
-        },
-        _ => dispatch(msg),
     }
 }
 

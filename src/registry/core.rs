@@ -18,25 +18,28 @@
 //!
 //! # Threading Model
 //!
-//! The registry is wrapped in `Arc<Mutex<WindowRegistry>>` and shared between
-//! two threads:
+//! The registry is owned directly by
+//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager) — no
+//! `Arc<Mutex<>>` wrapping. The orchestrator drains hook events from the mpsc
+//! channel and dispatches to individual handler methods on the IPC thread.
 //!
 //! ```text
 //! IPC Thread (main):              Hook Thread (background):
-//!   lock(registry)                  SetWinEventHook ×3
-//!   ├─ process_pending_events()     GetMessageW loop
-//!   │    └─ try_recv() from mpsc        ↓ callback
-//!   ├─ dispatch IPC command         sender.send(HookEvent)
-//!   ├─ process_pending_events()
+//!   owns STM (all fields)           SetWinEventHook ×3
+//!   ├─ drain mpsc channel             GetMessageW loop
+//!   │    └─ try_recv() from mpsc          ↓ callback
+//!   ├─ dispatch to on_* handlers        sender.send(HookEvent)
+//!   ├─ handle event(s)
 //!   └─ ... (repeat)
 //! ```
 //!
-//! The **hook thread never locks the mutex**. It sends typed [`HookEvent`]s
-//! through a non-blocking `mpsc` channel. The IPC thread drains these events
-//! under its `MutexGuard` and applies all state transitions. This design:
+//! The **hook thread never accesses any STM field**. It sends typed
+//! [`HookEvent`]s through a non-blocking `mpsc` channel. The IPC thread drains
+//! these events and dispatches to individual handler methods. This design:
 //!
-//! - Eliminates deadlocks (only one thread ever holds the lock).
-//! - Keeps HWND dereferencing on the IPC thread (which owns the `MutexGuard`).
+//! - Eliminates deadlocks entirely (no locks at all — borrow checker enforces
+//!   exclusive access at compile time via `&mut self`).
+//! - Keeps HWND dereferencing on the IPC thread (which owns the registry).
 //! - Makes the hook callback fast and non-blocking (`try_recv` on the other end).
 //!
 //! # Initialization Flow
@@ -56,10 +59,13 @@
 //!    └─ background thread registers WinEvent hooks
 //!       └─ sends HookEvent::Created/Destroyed/Foreground/MinimizeStart/MinimizeEnd
 //!
-//! 4. IPC loop:
+//! 4. Orchestrator IPC loop:
 //!    └─ each iteration:
-//!       ├─ process_pending_events(receiver)  ← drain hook events
-//!       └─ dispatch IPC command              ← handle CLI request
+//!       ├─ drain mpsc channel directly
+//!       ├─ dispatch to individual handlers
+//!       │    ├─ handle_created / remove_window / set_focused / etc.
+//!       │    └─ coordinate with LayoutEngine
+//!       └─ handle IPC command
 //! ```
 //!
 //! # State Transitions
@@ -101,7 +107,6 @@ use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GW_OWNER, GetWindow};
 use crate::config::types::WindowRulesConfig;
 
 use super::classification;
-use super::hooks::HookEvent;
 use super::types::{FloatingState, IgnoredReason, TilingState, VirtualSlot, Window, WindowState};
 use super::win32;
 
@@ -116,17 +121,20 @@ use super::win32;
 /// Windows enter via two paths:
 /// 1. **Initialization scan** — [`scan_existing_windows`](Self::scan_existing_windows)
 ///    enumerates all current top-level windows via `EnumWindows`.
-/// 2. **Live events** — [`process_pending_events`](Self::process_pending_events)
-///    receives `HookEvent::Created` from the WinEvent hook thread.
+/// 2. **Live events** — [`handle_created`](Self::handle_created)
+///    is called when `HookEvent::Created` arrives from the WinEvent hook thread.
 ///
 /// Windows leave when `HookEvent::Destroyed` is received (via
 /// [`remove_window`](Self::remove_window)).
 ///
 /// # Threading
 ///
-/// Shared via `Arc<Mutex<WindowRegistry>>` between:
-/// - **IPC thread** — locks to process events and answer queries.
-/// - **Hook thread** — never locks; sends events through an `mpsc` channel.
+/// Owned directly by [`ScrollTilingManager`](crate::daemon::ScrollTilingManager)
+/// — no `Arc<Mutex<>>` wrapping. The orchestrator drains hook events from the
+/// mpsc channel on the IPC thread and calls registry methods via `&mut self`.
+///
+/// The hook thread never accesses registry fields; it only sends
+/// [`HookEvent`]s through the channel.
 ///
 /// See the [module-level documentation](super) for the full threading diagram.
 ///
@@ -468,57 +476,52 @@ impl WindowRegistry {
         })
     }
 
-    /// Drains all pending hook events and applies them to the registry.
+    /// Returns the WindowIds of all currently tiling-active windows.
     ///
-    /// This is the **main event dispatch loop** for the registry. It must be
-    /// called periodically from the IPC thread (which owns the `MutexGuard`)
-    /// to process events queued by the WinEvent hook thread.
+    /// Used at startup to build the initial layout in one batch operation.
+    /// Only includes windows in `TilingState::Active` — minimized and
+    /// non-tiling windows are excluded.
     ///
-    /// Uses `try_recv` for non-blocking operation — if no events are pending,
-    /// returns immediately. This ensures the IPC loop never blocks waiting
-    /// for events; it processes whatever is available and moves on to the
-    /// next IPC command.
+    /// # Returns
     ///
-    /// # Event Dispatch Table
+    /// A `Vec<WindowId>` in no guaranteed order. The caller (orchestrator)
+    /// should pass these to [`LayoutEngine::initialize_windows`](crate::layout::LayoutEngine::initialize_windows)
+    /// for efficient batch layout construction.
+    #[must_use]
+    pub fn tiling_window_ids(&self) -> Vec<crate::common::WindowId> {
+        self.windows
+            .iter()
+            .filter_map(|(key, w)| match &w.state {
+                WindowState::Tiling(TilingState::Active { .. }) => {
+                    Some(crate::common::WindowId(*key))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Check if a window is in tiling state (before removal).
     ///
-    /// | Event | Handler | Effect |
-    /// |-------|---------|--------|
-    /// | `Created` | `handle_created` | Query info → classify → register |
-    /// | `Destroyed` | [`remove_window`](Self::remove_window) | Remove from HashMap, clear focus |
-    /// | `Foreground` | [`set_focused`](Self::set_focused) | Update focused HWND |
-    /// | `MinimizeStart` | [`minimize_window`](Self::minimize_window) | Active → Minimized, save slot |
-    /// | `MinimizeEnd` | [`restore_window`](Self::restore_window) | Minimized → Active, restore slot |
-    pub fn process_pending_events(&mut self, receiver: &std::sync::mpsc::Receiver<HookEvent>) {
-        while let Ok(event) = receiver.try_recv() {
-            match event {
-                HookEvent::Created { hwnd } => {
-                    self.handle_created(hwnd);
-                }
-                HookEvent::Destroyed { hwnd } => {
-                    self.remove_window(hwnd);
-                }
-                HookEvent::Foreground { hwnd } => {
-                    self.set_focused(hwnd);
-                }
-                HookEvent::MinimizeStart { hwnd } => {
-                    self.minimize_window(hwnd);
-                }
-                HookEvent::MinimizeEnd { hwnd } => {
-                    self.restore_window(hwnd);
-                }
-            }
-        }
+    /// Used by the orchestrator to determine if removing a window
+    /// requires layout engine updates. Returns `true` if the window
+    /// is in any `TilingState` variant (Active or Minimized).
+    ///
+    /// This check should be performed **before** calling
+    /// [`remove_window`](Self::remove_window) because the window
+    /// will no longer exist in the registry afterward.
+    ///
+    /// # Arguments
+    ///
+    /// * `hwnd_val` - The window handle value (HWND as `isize`).
+    #[must_use]
+    pub fn is_tiling(&self, hwnd_val: isize) -> bool {
+        self.windows
+            .get(&hwnd_val)
+            .map(|w| matches!(w.state, WindowState::Tiling(_)))
+            .unwrap_or(false)
     }
 
     /// Handles a window creation event from the WinEvent hook.
-    ///
-    /// This is the live-event counterpart to the init scan's
-    /// [`scan_existing_windows`](Self::scan_existing_windows). It:
-    /// 1. Skips if already tracked (idempotent, same as init scan).
-    /// 2. Skips invisible windows (no `WS_VISIBLE` style).
-    /// 3. Skips windows with empty titles (background containers).
-    /// 4. Skips windows with an owner (dialogs, popups — not top-level).
-    /// 5. Gathers full window info via [`win32::get_window_info`].
     /// 6. Delegates to [`register_window_from_info`](Self::register_window_from_info).
     ///
     /// # Why Re-check Visibility and Title?
@@ -528,26 +531,34 @@ impl WindowRegistry {
     /// `EVENT_OBJECT_CREATE`. A window might be created invisible and then shown,
     /// or shown and then hidden. The WinEvent hook catches the creation event
     /// regardless, so we filter at registration time.
-    fn handle_created(&mut self, hwnd_val: isize) {
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(WindowId(hwnd_val))` if the window was classified as
+    /// tiling (i.e., it entered the registry in a `WindowState::Tiling` state).
+    /// Returns `None` for floating, ignored, or skipped windows. This allows the
+    /// caller (orchestrator) to immediately add the window to the layout engine
+    /// without a second lookup.
+    pub fn handle_created(&mut self, hwnd_val: isize) -> Option<crate::common::WindowId> {
         if self.windows.contains_key(&hwnd_val) {
-            return; // Already tracked.
+            return None; // Already tracked.
         }
 
         let hwnd = HWND(hwnd_val as *mut _);
 
         // Only manage visible windows with titles.
         if !win32::is_window_visible(hwnd) {
-            return;
+            return None;
         }
 
         let title = win32::get_window_text(hwnd).unwrap_or_default();
         if title.is_empty() {
-            return;
+            return None;
         }
 
         // Skip windows with an owner (dialogs, popups).
         if has_owner(hwnd) {
-            return;
+            return None;
         }
 
         match win32::get_window_info(hwnd) {
@@ -556,7 +567,18 @@ impl WindowRegistry {
             }
             Err(e) => {
                 log::warn!("handle_created: failed to get info for {:?}: {e}", hwnd);
+                return None;
             }
+        }
+
+        // Check if the window was classified as tiling.
+        if let Some(window) = self.windows.get(&hwnd_val) {
+            match &window.state {
+                WindowState::Tiling(_) => Some(crate::common::WindowId(hwnd_val)),
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 }
@@ -979,25 +1001,148 @@ mod tests {
         ));
     }
 
-    // ── process_pending_events tests ─────────────────────────────────
+    // ── tiling_window_ids tests ────────────────────────────────────────
 
     #[test]
-    fn process_pending_events_handles_created() {
+    fn tiling_window_ids_returns_active_tiling_only() {
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        // Created event for an HWND that doesn't exist — will be ignored
-        // because we can't query real window info in unit tests.
-        tx.send(HookEvent::Created { hwnd: 0 }).unwrap();
+        // Insert a mix of states.
+        insert_test_window(
+            &mut reg,
+            100,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        insert_test_window(&mut reg, 200, WindowState::Tiling(TilingState::Minimized));
+        insert_test_window(
+            &mut reg,
+            300,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            }),
+        );
+        insert_test_window(
+            &mut reg,
+            400,
+            WindowState::Ignored(IgnoredReason::Maximized),
+        );
 
-        // Should not panic on unknown HWNDs.
-        reg.process_pending_events(&rx);
-        assert!(reg.is_empty());
+        let ids = reg.tiling_window_ids();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&crate::common::WindowId(100)));
     }
 
     #[test]
-    fn process_pending_events_handles_destroyed() {
+    fn tiling_window_ids_empty_registry() {
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        assert!(reg.tiling_window_ids().is_empty());
+    }
+
+    #[test]
+    fn tiling_window_ids_multiple_active() {
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        insert_test_window(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        insert_test_window(
+            &mut reg,
+            20,
+            WindowState::Tiling(TilingState::Active { col: 1, row: 0 }),
+        );
+        insert_test_window(
+            &mut reg,
+            30,
+            WindowState::Tiling(TilingState::Active { col: 2, row: 0 }),
+        );
+
+        let ids = reg.tiling_window_ids();
+        assert_eq!(ids.len(), 3);
+    }
+
+    // ── is_tiling tests ──────────────────────────────────────────────
+
+    #[test]
+    fn is_tiling_true_for_active() {
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        assert!(reg.is_tiling(42));
+    }
+
+    #[test]
+    fn is_tiling_true_for_minimized() {
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(&mut reg, 42, WindowState::Tiling(TilingState::Minimized));
+        assert!(reg.is_tiling(42));
+    }
+
+    #[test]
+    fn is_tiling_false_for_floating() {
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            }),
+        );
+        assert!(!reg.is_tiling(42));
+    }
+
+    #[test]
+    fn is_tiling_false_for_ignored() {
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(&mut reg, 42, WindowState::Ignored(IgnoredReason::Maximized));
+        assert!(!reg.is_tiling(42));
+    }
+
+    #[test]
+    fn is_tiling_false_for_unknown() {
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        assert!(!reg.is_tiling(99999));
+    }
+
+    // ── handle_created returns tests ──────────────────────────────────
+
+    #[test]
+    fn handle_created_returns_none_for_nonexistent_hwnd() {
+        // handle_created on an HWND that doesn't exist will fail to get
+        // window info and return None — should not panic.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        // HWND 0 is typically invalid — handle_created should return None.
+        let result = reg.handle_created(0);
+        assert!(result.is_none());
+    }
+
+    // ── Direct handler tests (replaces process_pending_events tests) ──
+
+    #[test]
+    fn direct_destroy_handler_works() {
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 33isize;
@@ -1008,15 +1153,12 @@ mod tests {
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
         );
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(HookEvent::Destroyed { hwnd: hwnd_val }).unwrap();
-
-        reg.process_pending_events(&rx);
+        reg.remove_window(hwnd_val);
         assert!(reg.is_empty());
     }
 
     #[test]
-    fn process_pending_events_handles_foreground() {
+    fn direct_foreground_handler_works() {
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
         let hwnd_val = 44isize;
@@ -1027,10 +1169,7 @@ mod tests {
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
         );
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(HookEvent::Foreground { hwnd: hwnd_val }).unwrap();
-
-        reg.process_pending_events(&rx);
+        reg.set_focused(hwnd_val);
         assert_eq!(reg.focused, Some(hwnd_val));
     }
 }

@@ -450,3 +450,57 @@ pub fn get_window_info(hwnd: HWND) -> Result<WindowInfo, String> {
         is_fullscreen,
     })
 }
+
+// ── Monitor queries ──────────────────────────────────────────────────
+
+/// Get the work area of the primary monitor (excluding taskbar).
+///
+/// Uses `SystemParametersInfoW` with `SPI_GETWORKAREA` which returns
+/// the primary monitor's work area. The work area excludes the taskbar
+/// and any other application desktop bars registered with the shell.
+///
+/// For multi-monitor setups where you need a specific monitor's work
+/// area, this would need to be replaced with `MonitorFromPoint` +
+/// `GetMonitorInfoW`. This function is suitable for the primary-monitor
+/// case which covers the typical single-monitor daemon deployment.
+///
+/// # Errors
+///
+/// Returns an error string if `SystemParametersInfoW` fails (extremely
+/// rare — only occurs in sandboxed environments or during system shutdown).
+///
+/// # Example
+///
+/// ```no_run
+/// use scrolling_tiling_manager::registry::win32::get_primary_monitor_work_area;
+/// let area = get_primary_monitor_work_area().expect("work area");
+/// println!("Work area: {}x{} at ({}, {})", area.width, area.height, area.x, area.y);
+/// ```
+pub fn get_primary_monitor_work_area() -> Result<Rect, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+
+    /// `SPI_GETWORKAREA` — retrieves the size of the work area on the
+    /// primary display monitor. The work area is the portion of the screen
+    /// not obscured by the system taskbar or by application desktop toolbars.
+    const SPI_GETWORKAREA: u32 = 0x0030;
+
+    let mut rect = RECT::default();
+    unsafe {
+        SystemParametersInfoW(
+            SYSTEM_PARAMETERS_INFO_ACTION(SPI_GETWORKAREA),
+            0,
+            Some(&mut rect as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .map_err(|e| format!("SystemParametersInfoW(SPI_GETWORKAREA) failed: {e}"))?;
+
+    Ok(Rect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    })
+}
