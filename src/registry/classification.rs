@@ -19,8 +19,16 @@
 //! # Classification Pipeline
 //!
 //! ```text
-//! WindowCandidate { exe, title, class, process_path }
+//! HWND (raw window handle)
 //!          │
+//!          ▼
+//! ┌─ Win32 Pre-filters (in win32.rs / core.rs) ──────────────────────┐
+//! │  Visible?          ──► skip if not IsWindowVisible               │
+//! │  Has title?        ──► skip if GetWindowTextLengthW == 0         │
+//! │  Alt+Tab visible?  ──► skip if WS_EX_TOOLWINDOW && !WS_EX_APPWINDOW │
+//! │  No owner?         ──► skip if GetWindow(GW_OWNER) != null       │
+//! └───────────────────────────────────────────────────────────────────┘
+//!          │ (passes all pre-filters)
 //!          ▼
 //! ┌─ Maximized? ──► Ignored(IgnoredReason::Maximized)    ← always wins
 //! │
@@ -32,6 +40,13 @@
 //!     ├─ Default rules (first match wins, regex pre-compiled)
 //!     └─ Default action (fallback)
 //! ```
+//!
+//! The Win32 pre-filters (visible, titled, Alt+Tab visible, no owner) are
+//! checked in the registry layer (`core.rs`) **before** any classification
+//! happens. This is a performance optimization: cheap Win32 checks eliminate
+//! obvious non-candidates without the cost of process queries or regex
+//! matching. It also means the classification pipeline only ever sees windows
+//! that are genuine user-facing candidates.
 //!
 //! The [`ClassificationPipeline`] provides multi-layer classification with a
 //! single entry point. All regex patterns are pre-compiled at construction

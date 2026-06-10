@@ -49,7 +49,9 @@
 //!    └─ builds ClassificationPipeline from user and default rule configs
 //!
 //! 2. scan_existing_windows()
-//!    └─ EnumWindows → for each visible, top-level, titled window:
+//!    └─ EnumWindows → for each visible, titled, Alt+Tab visible, top-level window:
+//!       ├─ Pre-filters: visible, titled, Alt+Tab visible (WS_EX_TOOLWINDOW),
+//!       │   no owner (GW_OWNER)
 //!       ├─ get_window_info(hwnd)
 //!       └─ register_window_from_info(info)
 //!          ├─ classify_with_state_pipeline(candidate, is_max, is_fs, pipeline)
@@ -184,13 +186,30 @@ impl WindowRegistry {
     ///
     /// # Filtering
     ///
-    /// Only registers windows that pass all three filters:
+    /// Only registers windows that pass all filters:
     /// 1. **Visible** — `IsWindowVisible(hwnd)` returns `true`.
-    /// 2. **No owner** — `GetWindow(hwnd, GW_OWNER)` returns null (top-level only).
-    /// 3. **Non-empty title** — `GetWindowTextW` returns a non-empty string.
+    /// 2. **Non-empty title** — `GetWindowTextW` returns a non-empty string.
+    /// 3. **Alt+Tab visible** — Window would appear in the Alt+Tab switcher
+    ///    (checks `WS_EX_TOOLWINDOW` / `WS_EX_APPWINDOW` extended styles).
+    ///    This automatically excludes background helper windows, tray icons,
+    ///    and tool windows that the user never interacts with directly.
+    /// 4. **No owner** — `GetWindow(hwnd, GW_OWNER)` returns null (top-level only).
     ///
-    /// These filters exclude dialogs, popups, tool windows, and invisible
-    /// containers (like the Windows desktop window).
+    /// These filters exclude dialogs, popups, tool windows, invisible
+    /// containers (like the Windows desktop window), and background helper
+    /// applications (like `GearLink_KBAgent.exe`, `SystemSettings.exe`).
+    ///
+    /// # Filter Order (Performance)
+    ///
+    /// The filters are ordered from cheapest to most expensive:
+    /// 1. Visibility (`IsWindowVisible`) — single Win32 call, no string alloc.
+    /// 2. Title length (`GetWindowTextLengthW`) — single Win32 call, no string alloc.
+    /// 3. Alt+Tab visibility (`GetWindowLongW(GWL_EXSTYLE)`) — single Win32 call.
+    /// 4. Owner check (`GetWindow(GW_OWNER)`) — single Win32 call.
+    /// 5. Full `get_window_info()` — multiple Win32 calls (expensive).
+    ///
+    /// Early termination on cheap filters avoids expensive process queries
+    /// for windows that would be discarded anyway.
     ///
     /// # Graceful Degradation
     ///
@@ -208,6 +227,18 @@ impl WindowRegistry {
 
                     let title = win32::get_window_text(hwnd).unwrap_or_default();
                     if title.is_empty() {
+                        continue;
+                    }
+
+                    // Skip windows that wouldn't appear in Alt+Tab (tool windows,
+                    // tray icons, background helpers like GearLink_KBAgent.exe).
+                    if !win32::is_alt_tab_visible(hwnd) {
+                        log::debug!("init: skipping {:?} — not Alt+Tab visible", hwnd);
+                        continue;
+                    }
+
+                    // Skip owned windows (dialogs, popups).
+                    if has_owner(hwnd) {
                         continue;
                     }
 
@@ -584,6 +615,12 @@ impl WindowRegistry {
 
         let title = win32::get_window_text(hwnd).unwrap_or_default();
         if title.is_empty() {
+            return None;
+        }
+
+        // Skip windows that wouldn't appear in Alt+Tab (tool windows,
+        // tray icons, background helpers).
+        if !win32::is_alt_tab_visible(hwnd) {
             return None;
         }
 

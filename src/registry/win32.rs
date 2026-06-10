@@ -30,16 +30,19 @@
 //! - **Aggregator**: [`get_window_info`] — queries all metadata at once.
 
 use std::ffi::OsStr;
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetClassNameW, GetSystemMetrics, GetWindowLongW, GetWindowRect,
+    GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetSystemMetrics, GetWindowLongW, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsZoomed,
-    SM_CXSCREEN, SM_CYSCREEN, WINDOW_STYLE, WS_CAPTION, WS_THICKFRAME,
+    SM_CXSCREEN, SM_CYSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -206,6 +209,120 @@ pub fn is_window_visible(hwnd: HWND) -> bool {
 pub fn is_zoomed(hwnd: HWND) -> bool {
     let result = unsafe { IsZoomed(hwnd) };
     result.as_bool()
+}
+
+/// Returns `true` if the window would appear in the Alt+Tab switcher.
+///
+/// Windows uses a combination of extended window styles and Desktop Window
+/// Manager (DWM) cloaking state to determine which windows appear in the
+/// Alt+Tab switcher. This function mirrors the OS-level logic with two checks:
+///
+/// ## 1. Extended Style Check (`WS_EX_TOOLWINDOW` / `WS_EX_APPWINDOW`)
+///
+/// - Windows with `WS_EX_TOOLWINDOW` are **hidden** from Alt+Tab (they're
+///   considered tool windows, tray icons, floating toolbars, etc.).
+/// - However, windows with `WS_EX_APPWINDOW` **force** visibility in Alt+Tab
+///   even if they have `WS_EX_TOOLWINDOW`.
+///
+/// | `WS_EX_TOOLWINDOW` | `WS_EX_APPWINDOW` | Style check result |
+/// |:-------------------:|:------------------:|:------------------:|
+/// | ✗                   | ✗                  | ✓ (normal window)  |
+/// | ✓                   | ✗                  | ✗ (tool window)    |
+/// | ✗                   | ✓                  | ✓ (forced)         |
+/// | ✓                   | ✓                  | ✓ (forced)         |
+///
+/// ## 2. DWM Cloaking Check (`DWMWA_CLOAKED`)
+///
+/// Modern Windows (Vista+) uses DWM cloaking to hide windows that are
+/// technically "visible" to Win32 but not shown to the user. This is the
+/// primary mechanism for suspending UWP/WinUI apps. A cloaked window has
+/// `IsWindowVisible() == true` but is not rendered on screen.
+///
+/// Cloak reasons (any non-zero value means the window is hidden):
+///
+/// | Constant                | Value | Meaning                                  |
+/// |:------------------------|:-----:|:-----------------------------------------|
+/// | `DWM_CLOAKED_APP`       |   1   | Cloaked by its own application           |
+/// | `DWM_CLOAKED_SHELL`     |   2   | Cloaked by the shell (suspended UWP)     |
+/// | `DWM_CLOAKED_INHERITED` |   4   | Cloaked because owner window is cloaked  |
+///
+/// # Why This Matters
+///
+/// Without the cloaking check, background UWP frames like
+/// `ApplicationFrameHost.exe` (class `ApplicationFrameWindow`) and
+/// `SystemSettings.exe` (class `Windows.UI.Core.CoreWindow`) slip through
+/// the style-only filter — they have no `WS_EX_TOOLWINDOW` but are cloaked
+/// by the shell when suspended. These windows should never be tiled.
+///
+/// # Fail-Open Behavior
+///
+/// If `DwmGetWindowAttribute` fails (e.g., the window was destroyed between
+/// our checks), we treat the window as **not cloaked** — we'd rather include
+/// a window than accidentally exclude a legitimate one.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+#[must_use]
+pub fn is_alt_tab_visible(hwnd: HWND) -> bool {
+    // ── Check 1: Extended style ───────────────────────────────────────
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
+    let ex = WINDOW_EX_STYLE(ex_style as u32);
+
+    let is_tool = ex & WS_EX_TOOLWINDOW != WINDOW_EX_STYLE(0);
+    let is_app = ex & WS_EX_APPWINDOW != WINDOW_EX_STYLE(0);
+
+    // Alt+Tab shows windows that are NOT toolwindows,
+    // OR windows that explicitly opt in via APPWINDOW.
+    let style_visible = !is_tool || is_app;
+    if !style_visible {
+        return false;
+    }
+
+    // ── Check 2: DWM cloaking (suspended UWP background frames) ──────
+    !is_cloaked(hwnd)
+}
+
+/// Returns `true` if the window is DWM-cloaked (hidden from the screen).
+///
+/// DWM cloaking is the modern Windows mechanism for hiding windows that are
+/// technically "visible" to `IsWindowVisible()` but not rendered. This is
+/// primarily used for suspended UWP/WinUI apps and shell-managed windows.
+///
+/// # Cloak Reasons
+///
+/// | Constant                | Value | Typical cause                            |
+/// |:------------------------|:-----:|:-----------------------------------------|
+/// | `DWM_CLOAKED_APP`       |   1   | Application hid itself (e.g., minimised) |
+/// | `DWM_CLOAKED_SHELL`     |   2   | Shell suspended a UWP app               |
+/// | `DWM_CLOAKED_INHERITED` |   4   | Owner window is cloaked                  |
+///
+/// Any non-zero value means the window is cloaked.
+///
+/// # Fail-Open
+///
+/// If `DwmGetWindowAttribute` fails, returns `false` (not cloaked). This
+/// prevents accidentally excluding legitimate windows due to transient
+/// Win32 errors (e.g., window destroyed mid-query).
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+#[must_use]
+pub fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked: u32 = 0;
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+            size_of::<u32>() as u32,
+        )
+    };
+    match result {
+        Ok(()) => cloaked != 0,
+        Err(_) => false, // Fail-open: assume not cloaked.
+    }
 }
 
 /// Detects whether the window is in exclusive or borderless fullscreen.
