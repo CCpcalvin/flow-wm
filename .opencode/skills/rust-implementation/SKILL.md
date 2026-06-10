@@ -8,19 +8,26 @@ description: >
   Do NOT load for Python, TypeScript, or cross-platform crate work.
   Produces correct, idiomatic Rust that compiles cleanly on Windows with
   `cargo build` (native MSVC toolchain, x86_64-pc-windows-msvc).
-version: 1
+version: 2
 ---
 
 # Rust Implementation Guide — ScrollingTilingManager (Windows Binary)
 
 ## Tech Stack
 
-- **Rust stable (MSRV 1.78+)**
+- **Rust stable (MSRV 1.82+)** — edition 2024
 - **Target:** `x86_64-pc-windows-msvc` (MSVC toolchain, not GNU). Native build — no `--target` flag needed.
-- **windows-rs** (`windows` crate ≥ 0.58) — Win32 / Windows UI Automation bindings
-- **tokio** (optional, single-threaded `current_thread` runtime) — async I/O only
+- **windows-rs** (`windows` crate 0.62.x) — Win32 / Windows UI Automation bindings
 - **serde + serde_json** — config serialisation/deserialisation
-- **cargo** — build, lint (`clippy`), format (`rustfmt`), test
+- **clap** (derive) — CLI argument parsing
+- **thiserror** — ergonomic error types
+- **crossbeam-channel** — multi-producer multi-consumer channels
+- **log + env_logger** — structured logging
+- **toml** — TOML config parsing
+- **regex** — pattern matching for window classification
+- **schemars** — JSON Schema generation for config
+
+This project is **Windows-only**. A `build.rs` gate prevents compilation on other platforms. Do NOT add `#[cfg(target_os = "windows")]` guards anywhere — the entire codebase assumes Windows.
 
 ---
 
@@ -34,9 +41,8 @@ version: 1
 | Trait | `PascalCase` | `Tiler`, `WindowProvider` |
 | Function/method | `snake_case` | `apply_layout`, `get_hwnd` |
 | Constant | `SCREAMING_SNAKE` | `MAX_COLUMNS`, `DEFAULT_GAP_PX` |
-| Module | `snake_case` | `mod win32_bridge;` |
 | Binary crate root | `main.rs` | — |
-| Integration test file | `tests/<subject>.rs` | `tests/layout_engine.rs` |
+| Integration test file | `tests/<subject>.rs` | `tests/cli.rs` |
 
 ---
 
@@ -44,42 +50,84 @@ version: 1
 
 ```
 src/
-├── main.rs              # Entry point: parse args, init runtime, run message loop
-├── config.rs            # Serde config structs + load_config()
-├── layout/
-│   ├── mod.rs           # pub use re-exports
-│   ├── engine.rs        # Pure tiling logic (no Win32 imports)
-│   └── types.rs         # Rect, Axis, Direction enums
-├── win32/
-│   ├── mod.rs           # pub use re-exports
-│   ├── hook.rs          # SetWinEventHook / shell hook setup
-│   ├── monitor.rs       # EnumDisplayMonitors, work-area queries
-│   └── window.rs        # HWND wrappers, MoveWindow, ShowWindow
-└── ipc.rs               # Named-pipe IPC for runtime commands (optional)
+├── main.rs              # stmd daemon entry: parse args, init runtime, run event loop
+├── lib.rs               # Library crate — re-exports all pub modules
+│
+├── common/              # Shared types and error definitions
+│   ├── error.rs         # StmError enum, StmResult<T> alias
+│   └── types.rs         # WindowId (platform-independent HWND bridge)
+│
+├── layout/              # Pure tiling logic — NO windows crate imports
+│   ├── engine.rs        # LayoutEngine: virtual layout state + mutations
+│   ├── types.rs         # VirtualLayout, ActualLayout, ActualEntry, AnimationHint
+│   ├── projection.rs    # Virtual → Actual coordinate projection (pure fn)
+│   ├── diff.rs          # ActualLayout diff → Vec<WindowMove> instructions
+│   └── mutations.rs     # High-level mutation API (add_window, remove_window, etc.)
+│
+├── registry/            # Window tracking and Win32 bridge
+│   ├── core.rs          # WindowRegistry: HWND ↔ WindowId mapping, window metadata
+│   ├── classification.rs # Window class/title matching rules
+│   ├── hooks.rs         # SetWinEventHook / shell hook setup
+│   ├── desktop.rs       # Virtual-desktop detection (IVirtualDesktopManager COM)
+│   ├── win32.rs         # Low-level Win32 FFI wrappers (MoveWindow, ShowWindow, etc.)
+│   └── types.rs         # Registry-specific types (WindowInfo, WindowState)
+│
+├── config/              # Configuration loading and validation
+│   ├── types.rs         # Serde config structs (AppConfig, LayoutConfig, etc.)
+│   ├── lifecycle.rs     # Config file watching and hot-reload
+│   ├── schema.rs        # JSON Schema generation via schemars
+│   └── dirs.rs          # XDG-style config/log directory resolution
+│
+├── ipc/                 # Named-pipe IPC for stm CLI ↔ stmd daemon
+│   ├── message.rs       # Request/Response enums
+│   ├── transport.rs     # Named-pipe read/write framing
+│   └── dispatch.rs      # Message → LayoutEngine mutation dispatch
+│
+├── animation/           # Window move animation system
+│   ├── animator.rs      # Animation orchestration
+│   ├── backend/         # Backend implementations
+│   │   ├── win32.rs     # SetWindowPos-based animation backend
+│   │   └── mock.rs      # Test-only animation backend
+│   ├── batch.rs         # Batch animation scheduling
+│   ├── config.rs        # Animation timing configuration
+│   ├── easing.rs        # Easing functions (linear, ease-in-out, etc.)
+│   ├── interpolation.rs # Frame interpolation
+│   ├── metrics.rs       # Animation performance metrics
+│   └── types.rs         # AnimationHint, AnimationFrame types
+│
+├── daemon/              # Daemon orchestration (event loop, startup, shutdown)
+│   └── mod.rs
+│
+└── floating/            # Floating window management (non-tiled windows)
+    └── mod.rs
 ```
 
-Rules:
-- `layout/` MUST contain no `windows` crate imports. Keep tiling logic pure.
-- `win32/` MUST contain no business/tiling logic — only FFI wrappers.
-- `main.rs` wires the two together; no layout or Win32 logic lives there directly.
+### Module Boundary Rules
+
+- **`layout/`** MUST contain zero `use windows` or `use std::os::windows` imports. It is pure Rust logic. It only knows about `WindowId`, never `HWND`.
+- **`registry/`** contains all Win32 interop. `registry/win32.rs` holds raw FFI wrappers; `registry/core.rs` maps HWND ↔ WindowId and manages window state.
+- **`common/`** is the shared foundation — error types and the `WindowId` bridge type. Both `layout/` and `registry/` may import from `common/`.
+- **`animation/`** may import `layout/types.rs` (for `AnimationHint`) and `registry/` (for Win32 backends). It MUST NOT import layout engine internals.
+- **`main.rs`** wires everything together; no layout or Win32 logic lives there directly.
 
 ---
 
 ## 3 — Win32 Bindings
 
-Read `references/win32-api.md` before writing any `win32/` code.
+Read `references/win32-api.md` before writing any `registry/win32.rs` code.
 
 ```rust
-// src/win32/window.rs
+// src/registry/win32.rs
 use windows::Win32::Foundation::{HWND, RECT, BOOL};
 use windows::Win32::UI::WindowsAndMessaging::{
     MoveWindow, ShowWindow, SW_RESTORE, WINDOW_STYLE, WS_VISIBLE,
     GetWindowRect, GetWindowLongW, GWL_STYLE,
 };
 
-pub fn move_window(hwnd: HWND, rect: &crate::layout::types::Rect, repaint: bool) -> windows::core::Result<()> {
+/// Move a window to the specified pixel coordinates.
+pub fn move_window(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, repaint: bool) -> windows::core::Result<()> {
     unsafe {
-        MoveWindow(hwnd, rect.x, rect.y, rect.width, rect.height, repaint)?;
+        MoveWindow(hwnd, x, y, w, h, repaint)?;
     }
     Ok(())
 }
@@ -100,6 +148,7 @@ Rules:
 name = "scrolling-tiling-manager"
 version = "0.1.0"
 edition = "2024"
+description = "A scrolling, infinite-horizontal-canvas tiling window manager for Windows"
 
 [[bin]]
 name = "stmd"
@@ -114,16 +163,34 @@ name = "stm-watchdog"
 path = "src/bin/stm-watchdog.rs"
 
 [dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Graphics_Gdi",
-    "Win32_System_Threading",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# tokio only if async IPC is needed:
-# tokio = { version = "1", features = ["rt", "net", "sync"] }
+schemars = "0.8"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+] }
+regex = "1"
+crossbeam-channel = "0.5"
+toml = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3
@@ -138,134 +205,81 @@ Rules:
 - NEVER add features like `"Win32_Everything"` — enumerate exactly the features needed.
 - `edition = "2024"` is mandatory.
 - `strip = true` in release to produce a lean binary.
-- Add a `build.rs` that emits `compile_error!` if target is not Windows (see `references/build-rs.md`).
+- Use `cargo add <crate>` for adding new dependencies — do NOT edit `Cargo.toml` directly.
 
 ---
 
-## 5 — Message Loop Pattern
+## 5 — The 3-Layer Layout Pipeline
+
+Layout computation follows a functional, declarative pipeline. Every mutation flows through: **mutate → project → diff**.
+
+1. **Virtual Layer** (`layout/types::VirtualLayout`) — logical structure on an infinite horizontal canvas. Columns store proportional widths (`width_eighths`), not pixel positions.
+
+2. **Projection** (`layout/projection::project`) — pure function that converts virtual layout into actual screen coordinates, applying all padding.
+
+3. **Diff** (`layout/diff::diff`) — compares previous and new `ActualLayout` to produce `WindowMove` instructions with `AnimationHint`s.
 
 ```rust
-// src/main.rs (excerpt)
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetMessageW, TranslateMessage, DispatchMessageW, MSG,
-};
+// Example: adding a window to the layout
+use crate::layout::engine::LayoutEngine;
+use crate::common::types::WindowId;
 
-fn run_message_loop() {
-    let mut msg = MSG::default();
-    loop {
-        let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-        match ret.0 {
-            -1 => {
-                // GetMessage error — log and break
-                break;
-            }
-            0 => break, // WM_QUIT
-            _ => unsafe {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            },
-        }
-    }
-}
-```
-
-Rules:
-- Check `GetMessageW` return as `i32`: -1 = error, 0 = WM_QUIT, positive = continue.
-- NEVER call `std::thread::sleep` inside the message loop — it blocks Windows message delivery.
-- Post `WM_QUIT` via `PostQuitMessage(0)` for graceful shutdown; never `std::process::exit`.
-
----
-
-## 6 — Layout Engine (Pure Rust)
-
-```rust
-// src/layout/engine.rs
-use crate::layout::types::{Rect, Axis};
-
-/// Divide `parent` into `count` tiles along `axis` with `gap_px` between each.
-pub fn split_rect(parent: Rect, count: usize, axis: Axis, gap_px: i32) -> Vec<Rect> {
-    if count == 0 { return vec![]; }
-    match axis {
-        Axis::Horizontal => {
-            let total_gap = gap_px * (count as i32 - 1);
-            let tile_w = (parent.width - total_gap) / count as i32;
-            (0..count).map(|i| Rect {
-                x: parent.x + i as i32 * (tile_w + gap_px),
-                y: parent.y,
-                width: tile_w,
-                height: parent.height,
-            }).collect()
-        }
-        Axis::Vertical => {
-            let total_gap = gap_px * (count as i32 - 1);
-            let tile_h = (parent.height - total_gap) / count as i32;
-            (0..count).map(|i| Rect {
-                x: parent.x,
-                y: parent.y + i as i32 * (tile_h + gap_px),
-                width: parent.width,
-                height: tile_h,
-            }).collect()
-        }
-    }
+fn handle_window_created(engine: &mut LayoutEngine, wid: WindowId) {
+    engine.add_window(wid);           // Mutate virtual layout
+    let actual = engine.project();    // Virtual → Actual coordinates
+    let moves = engine.diff(&previous, &actual); // Diff → Vec<WindowMove>
+    // Apply moves via animation system
 }
 ```
 
 Rules:
 - Layout functions MUST be pure (`fn`, not `unsafe fn`, no I/O, no Win32).
-- Use integer arithmetic for pixel positions — never `f32`/`f64` in layout math (rounding errors accumulate).
-- All layout functions MUST have unit tests in `tests/layout_engine.rs` or inline `#[cfg(test)]` blocks.
+- Use integer arithmetic for pixel positions — never `f32`/`f64` in layout math.
+- All layout functions MUST have unit tests (inline `#[cfg(test)]` blocks or in `tests/`).
 
 ---
 
-## 7 — Error Handling
+## 6 — Error Handling
 
 ```rust
+// src/common/error.rs (actual code)
 use std::fmt;
 
 #[derive(Debug)]
 pub enum StmError {
-    Win32(windows::core::Error),
     Config(String),
     Layout(String),
+    Io(std::io::Error),
+    Registry(String),
 }
 
-impl fmt::Display for StmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Win32(e)   => write!(f, "Win32 error: {e}"),
-            Self::Config(s)  => write!(f, "Config error: {s}"),
-            Self::Layout(s)  => write!(f, "Layout error: {s}"),
-        }
-    }
-}
-
-impl From<windows::core::Error> for StmError {
-    fn from(e: windows::core::Error) -> Self { Self::Win32(e) }
-}
+impl fmt::Display for StmError { /* ... */ }
+impl std::error::Error for StmError {}
 
 pub type StmResult<T> = Result<T, StmError>;
 ```
 
 Rules:
 - NEVER use `.unwrap()` or `.expect()` outside of tests — use `?` or explicit match.
-- Propagate `StmError` up to `main`, where it is logged before exiting with a non-zero code.
+- Map Win32 errors to `StmError::Registry(String)` at the registry boundary.
+- Map I/O errors using the `From<std::io::Error>` impl — they convert automatically with `?`.
 - `panic!` is reserved for logic invariants that cannot be recovered from.
 
 ---
 
-## 8 — Rust Rules
+## 7 — Rust Rules
 
 - Rust stable only — no nightly features.
-- All public items MUST have doc comments (`///`).
+- All public items MUST have doc comments (`///` or `//!`). Write docstrings that explain the "why" and design decisions, not just the "what" — `cargo doc` is the project's wiki.
 - Use `#[must_use]` on functions returning `Result` or meaningful values that callers might silently discard.
 - No `std::mem::transmute` — use `windows-rs` typed conversions.
 - Prefer `impl Trait` over `Box<dyn Trait>` for return types when the type is known statically.
-- `clippy::pedantic` lints enabled in CI — fix or explicitly `#[allow]` with a comment.
-- No `println!` in production paths — use the `log` crate with `env_logger` or `tracing`.
+- No `println!` in production paths — use the `log` crate with `env_logger`.
+- `build.rs` MUST panic for non-Windows targets. No `#[cfg(target_os)]` guards needed in source code.
 
 ---
 
-## 9 — Validation
+## 8 — Validation
 
 After every change:
 
@@ -281,11 +295,12 @@ Fix all issues before handoff. Never suppress a Clippy lint without an inline co
 
 ## Handoff Checklist
 
-- [ ] Module boundaries respected (`layout/` pure, `win32/` FFI only)
+- [ ] Module boundaries respected (`layout/` pure, `registry/` owns Win32, `common/` shared)
 - [ ] All `unsafe` blocks minimal-scope, single Win32 call each
 - [ ] No `.unwrap()` / `.expect()` outside tests
 - [ ] `cargo clippy -- -D warnings` exits 0
 - [ ] `cargo fmt --check` exits 0
-- [ ] `cargo test` passes (pure layout tests + Win32 tests on Windows)
+- [ ] `cargo test` passes
 - [ ] All public items have `///` doc comments
 - [ ] Win32 feature flags are minimal — no blanket feature includes
+- [ ] No `#[cfg(target_os)]` guards in source code

@@ -1,13 +1,14 @@
 ---
-name: workflow-rust
+name: rust-workflow
 description: >
   Orchestrates multi-phase Rust binary feature implementation for the
-  ScrollingTilingManager on Windows — layout engine, Win32 wrappers, config,
-  and IPC. Load proactively on any new feature request for this project.
+  ScrollingTilingManager on Windows — layout engine, registry (Win32 bridge),
+  config, IPC, and animation. Load proactively on any new feature request for
+  this project.
   Do NOT load for Python/FastAPI features, Svelte frontend work, or cross-platform
   Rust crates. Replaces the Python/Svelte workflow skill for this project.
   Produces a phased plan with CoderAgent, TestEngineer, and CodeReviewer assignments.
-version: 1
+version: 2
 ---
 
 # Rust Feature Workflow — ScrollingTilingManager (Windows Binary)
@@ -19,21 +20,34 @@ Skip for trivial tasks (single-file, < 40 lines, no new types or module exports,
 Phase rules:
 - Each phase must be independently compilable with `cargo check`.
 - Same-batch phases touch non-overlapping file sets.
-- Cross-batch only when phase B needs phase A output (e.g., new types used by Win32 wrappers).
+- Cross-batch only when phase B needs phase A output (e.g., new types used by registry wrappers).
 - Each phase should use 100k–120k tokens. Adjust scope to fit.
 
 Naming: `1a, 1b` (parallel) → `2a, 2b` (parallel, after batch 1) → `3a` (after batch 2)
 
-Each CoderAgent is assigned to **one module layer** — `layout/`, `win32/`, `config.rs`, or `main.rs`. A single phase NEVER spans two layers that have a dependency relationship.
+Each CoderAgent is assigned to **one module layer** — `layout/`, `registry/`, `config/`, `ipc/`, `animation/`, or `main.rs`. A single phase NEVER spans two layers that have a dependency relationship.
+
+Module layers and their dependencies:
+
+```
+common/    → (no stm imports — foundation layer)
+layout/    → common/ only
+config/    → common/ only
+registry/  → common/ + layout/types (for Rect conversion)
+animation/ → layout/types + registry/ (for Win32 backends)
+ipc/       → common/ + layout/ (for dispatch to engine)
+daemon/    → all modules (orchestration)
+main.rs    → all modules (wiring)
+```
 
 Example — *"Add spiral tiling + config hot-reload"*:
 
 | Phase | Layer | Task | Deps |
 |---|---|---|---|
 | 1a | `layout/` | `spiral_layout` fn + inline unit tests | — |
-| 1b | `config.rs` | `watch_config` file-watcher + reload signal | — |
-| 2a | `win32/hook.rs` | Wire config reload signal to message loop | 1b |
-| 2b | `win32/window.rs` | Apply spiral layout on `HSHELL_WINDOWCREATED` | 1a |
+| 1b | `config/` | `watch_config` file-watcher + reload signal | — |
+| 2a | `registry/hooks.rs` | Wire config reload signal to event loop | 1b |
+| 2b | `registry/win32.rs` | Apply spiral layout on `HSHELL_WINDOWCREATED` | 1a |
 | 3a | `main.rs` | Wire hot-reload + spiral into startup path | 2a, 2b |
 
 ---
@@ -60,8 +74,9 @@ There is no frontend layer for this project. Never spawn a Svelte/frontend agent
 - No handoff until all CoderAgents in the batch report `cargo check` success.
 
 **Testing Phase** — once per batch:
-- TestEngineer loads `rust-test`. Writes integration/layout-correctness tests. Runs `cargo test`.
-- Win32-dependent tests are `#[cfg(target_os = "windows")]` — TestEngineer notes which tests require Windows CI.
+- TestEngineer loads `rust-test`.
+- TestEngineer analyzes coverage gaps, writes missing tests, runs `cargo test`.
+- TestEngineer reports: coverage gaps found, tests written, suite results.
 
 **Reviewing Phase** — once per batch, all reviewers run in parallel:
 - CodeReviewer loads `rust-review`. Reviews code + test results.
@@ -69,15 +84,15 @@ There is no frontend layer for this project. Never spawn a Svelte/frontend agent
 
 ```
 CoderAgents ──────────────────────────────────────────────────┐
-  (layout/ + win32/ + config.rs, parallel where deps allow)   │
-                                                               ▼
-TestEngineer (cargo test suite) ──────────────────────────────┤
-                                                               ▼
-                    ┌─── CodeReviewer ────┐
-                    │                     ├─── approved? → ✅ Done
-                    └─────────────────────┘
-                              ↑ rejected
-                         CoderAgent ◄──────────────────────────┘
+  (layout/ + registry/ + config/, parallel where deps allow)  │
+                                                                ▼
+TestEngineer (coverage analysis + cargo test) ─────────────────┤
+                                                                ▼
+                     ┌─── CodeReviewer ────┐
+                     │                     ├─── approved? → ✅ Done
+                     └─────────────────────┘
+                               ↑ rejected
+                          CoderAgent ◄──────────────────────────┘
 ```
 
 ---
@@ -97,9 +112,9 @@ TestEngineer (cargo test suite) ────────────────
 ## 5 — Parallel Rules
 
 - Never two agents editing the same `.rs` file simultaneously.
-- No shared new types between parallel phases — promote to an earlier phase's `layout/types.rs` or `config.rs`.
-- `layout/` and `win32/` can always be built in parallel (different module trees).
-- The `Rect` type is the cross-layer contract — it MUST NOT change shape after it is used by both layers.
+- No shared new types between parallel phases — promote to an earlier phase's `common/types.rs` or `layout/types.rs`.
+- `layout/` and `registry/` can always be built in parallel (different module trees, layout/ is pure).
+- The `WindowId` type in `common/types.rs` is the cross-layer contract — it MUST NOT change shape after it is used by both layers.
 - Next batch's CoderAgent integrates parallel outputs by updating `main.rs` wiring only.
 
 ---
@@ -110,25 +125,27 @@ TestEngineer (cargo test suite) ────────────────
 - [ ] All CoderAgents: `cargo clippy -- -D warnings` clean
 - [ ] All CoderAgents: `cargo fmt --check` clean
 - [ ] All CoderAgents: related inline unit tests passing
-- [ ] TestEngineer: `cargo test` (pure) 0 failures on host
-- [ ] TestEngineer: Win32-dependent tests tagged `#[cfg(target_os = "windows")]`
+- [ ] TestEngineer: coverage gap analysis completed
+- [ ] TestEngineer: `cargo test` (full suite) 0 failures
+- [ ] TestEngineer: missing tests written for identified gaps
 - [ ] CodeReviewer: approved
 - [ ] `cargo build --release` produces `stmd.exe`, `stm.exe`, `stm-watchdog.exe`
 - [ ] No `.unwrap()` / `.expect()` in production code paths
 - [ ] All public items have `///` doc comments
 - [ ] `build.rs` Windows-only guard present
+- [ ] No `#[cfg(target_os)]` guards in source or test code
 
 **Cross-phase**
-- [ ] `layout/types::Rect` shape unchanged from the established contract
+- [ ] `common/types::WindowId` shape unchanged from the established contract
 - [ ] No new `windows` feature flags added without explicit justification
-- [ ] All new modules registered in `src/main.rs` or parent `mod.rs`
+- [ ] All new modules registered in `src/lib.rs` or parent `mod.rs`
 
 ---
 
 ## Gotchas
 
-- **`layout/types::Rect` shape changes break both layers simultaneously**: If Rect gains a field (e.g., `dpi_scale: f64`) after both `layout/` and `win32/` use it, both modules break and require a coordinated multi-agent fix. Treat Rect as a frozen contract once two layers depend on it — promote any shape change to a dedicated phase 0.
-- **`cargo check` passing does not mean `cargo test` passes on Windows**: CoderAgents may report "compiles" without running tests. Always require `cargo test` output in the testing phase report — not just a clean `cargo check`.
+- **`WindowId` shape changes break both layers simultaneously**: If `WindowId` gains a field after both `layout/` and `registry/` use it, both modules break and require a coordinated multi-agent fix. Treat `WindowId` as a frozen contract once two layers depend on it — promote any shape change to a dedicated phase 0.
+- **`cargo check` passing does not mean `cargo test` passes**: CoderAgents may report "compiles" without running tests. Always require `cargo test` output in the testing phase report — not just a clean `cargo check`.
 - **Parallel agents on `main.rs`**: The wiring phase always touches `main.rs`. Never assign two parallel agents to phases that both need to edit `main.rs` — one agent must own that file exclusively per batch.
-- **Skipping TestEngineer when only `unsafe` scope changed**: A smaller `unsafe` block that wraps the same call differently can change semantics (e.g., what is protected by the scope). Always run `cargo test` after unsafe refactors, even if no logic changed. The re-spawn policy "CoderAgent only" refers to respawning the fixer — TestEngineer still runs the full suite.
+- **Skipping TestEngineer when only `unsafe` scope changed**: A smaller `unsafe` block that wraps the same call differently can change semantics. Always run `cargo test` after unsafe refactors, even if no logic changed. The re-spawn policy "CoderAgent only" refers to respawning the fixer — TestEngineer still runs the full suite.
 - **Win32 feature flag drift across phases**: When two parallel CoderAgents each add a `windows` feature flag to `Cargo.toml`, one will overwrite the other's change. Require agents to produce a unified diff of `Cargo.toml` changes and merge manually in the next batch's wiring phase.

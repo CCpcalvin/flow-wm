@@ -2,7 +2,7 @@
 
 ## Eval 1 — Approve a correct patch
 
-**Trigger:** Review a PR that adds `fn focus_window(hwnd: HWND) -> StmResult<()>` in `win32/window.rs` with minimal unsafe, proper error mapping, and a doc comment.
+**Trigger:** Review a PR that adds `fn focus_window(hwnd: HWND) -> windows::core::Result<()>` in `registry/win32.rs` with minimal unsafe, proper error mapping, and a doc comment.
 
 **Expected verdict:** ✅ Approved
 
@@ -35,4 +35,17 @@
 **Pass/fail checks:**
 - [ ] Reviewer cites Section 1 (module boundary) and Section 2 (Win32 in layout/)
 - [ ] Reviewer does not approve conditionally — this is a hard reject
-- [ ] Reviewer suggests the fix: move the call to `win32/window.rs`, pass `Rect` into layout
+- [ ] Reviewer suggests the fix: move the call to `registry/win32.rs`, pass `Rect` into layout
+
+---
+
+## Eval 4 — Reject cfg guard usage
+
+**Trigger:** Review code that adds `#[cfg(target_os = "windows")]` guards around test functions.
+
+**Expected verdict:** ❌ Rejected
+
+**Pass/fail checks:**
+- [ ] Reviewer cites Section 4 (no cfg guards needed — project is Windows-only)
+- [ ] Reviewer explains that `build.rs` is the sole platform gate
+- [ ] Reviewer does not reject the tests themselves — only the cfg guards
