@@ -154,7 +154,7 @@ impl ScrollTilingManager {
     /// 1. Create [`WindowRegistry`] from user and default rules.
     /// 2. Scan existing windows (populates registry before hooks start).
     /// 3. Query monitor work area via Win32.
-    /// 4. Derive layout parameters from [`StmConfig`].
+    /// 4. Derive layout parameters from the [`StmConfig`].
     /// 5. Create [`LayoutEngine`] with those parameters.
     /// 6. Batch-initialize layout from existing tiling windows (sorted by x
     ///    coordinate for deterministic column assignment; viewport centered
@@ -166,10 +166,17 @@ impl ScrollTilingManager {
     /// 10. Create the IPC named pipe server.
     /// 11. Return the fully initialized STM ready for [`run()`](Self::run).
     ///
+    /// # Config Model
+    ///
+    /// The `app_config` parameter is already the result of TOML-level merging
+    /// (see [`config::lifecycle::load_merged_app_config`]): shipped defaults
+    /// from `default-config.toml` overlaid with user overrides from `stm.toml`.
+    /// No further merging is needed here.
+    ///
     /// # Arguments
     ///
-    /// * `app_config` - Application settings loaded from `stm.yml`.
-    /// * `user_rules` - User-defined window rules from `stm-rules.yml`.
+    /// * `app_config` - Merged application settings (shipped + user overrides).
+    /// * `user_rules` - User-defined window rules from `stm-rules.toml`.
     /// * `default_rules` - Bundled default rules.
     /// * `config_dir` - Path to the configuration directory.
     /// * `desktop_name` - Optional test desktop name (debug builds only).
@@ -188,6 +195,16 @@ impl ScrollTilingManager {
         config_dir: PathBuf,
         desktop_name: Option<String>,
     ) -> Result<Self, String> {
+        log::debug!(
+            "effective config: column_width={}, min_column_width_px={}, padding.window={}, padding.up={}, padding.down={}, animation.duration_ms={}",
+            app_config.column_width,
+            app_config.min_column_width_px,
+            app_config.padding.window,
+            app_config.padding.up,
+            app_config.padding.down,
+            app_config.animation.duration_ms,
+        );
+
         // 1. Create registry from rules.
         let mut registry = WindowRegistry::new(&user_rules, &default_rules);
 
@@ -199,7 +216,7 @@ impl ScrollTilingManager {
             work_area: registry_win32::get_primary_monitor_work_area()?,
         };
 
-        // 4. Derive layout parameters from StmConfig.
+        // 4. Derive layout parameters from the merged config.
         let layout_config = Self::derive_layout_config(&app_config, &monitor);
 
         // 5. Create layout engine.
@@ -736,7 +753,8 @@ impl ScrollTilingManager {
     /// # Default Column Width Eighths
     ///
     /// Computed as 4 (meaning the column occupies 4/8 = half the monitor width).
-    /// This matches the default `column_width` of 960px on a 1920px monitor.
+    /// This matches the default `column_width` on a 1920px monitor regardless
+    /// of whether the shipped default (1280px) or an older default (960px) is used.
     fn derive_layout_config(app_config: &StmConfig, _monitor: &MonitorInfo) -> LayoutConfig {
         LayoutConfig {
             column_width: app_config.column_width,

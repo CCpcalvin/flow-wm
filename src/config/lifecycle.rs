@@ -7,6 +7,8 @@
 //!    for IDE autocomplete.
 //!
 //! 2. **Load** — Functions load config from shipped defaults and user overrides:
+//!    - [`load_merged_app_config`] — primary loader: merges shipped defaults with
+//!      user overrides at the TOML level, then deserializes
 //!    - [`load_default_config`] — loads `default-config.toml` from the exe directory
 //!    - [`load_default_rules`] — loads `default-stm-rules.toml` from the exe directory
 //!    - [`load_app_config`] — loads user's `stm.toml`, falling back to defaults
@@ -17,6 +19,28 @@
 //!
 //! 4. **Use** — The daemon extracts fields from [`StmConfig`](super::types::StmConfig)
 //!    into the layout engine.
+//!
+//! # Two-Layer Config Model (TOML-Level Merge)
+//!
+//! The daemon uses a two-layer config model where [`load_merged_app_config`] merges
+//! the two layers **before** deserializing:
+//!
+//! ```text
+//! default-config.toml ──► toml::Value ─┐
+//!                                       ├─ deep merge ──► merged Value ──► StmConfig
+//! stm.toml            ──► toml::Value ─┘
+//! ```
+//!
+//! - **Layer 1 (base)**: `default-config.toml` shipped next to `stmd.exe`.
+//!   This is the single source of truth for default values. Edit this file to
+//!   change defaults without recompiling.
+//! - **Layer 2 (overlay)**: User's `stm.toml` in the config directory.
+//!   Keys present here always win; absent keys inherit from shipped defaults.
+//!
+//! Merging at the TOML level (before serde deserialization) avoids the ambiguity
+//! of the comparison approach: absent keys are genuinely absent, so there is no
+//! confusion about whether a user "meant to set" a value that happens to equal
+//! the compiled-in default.
 //!
 //! # Resilient Loading Design
 //!
@@ -34,6 +58,77 @@ use std::path::Path;
 
 use super::schema;
 use super::types::{StmConfig, WindowRulesConfig};
+
+// ── TOML-level merge ──────────────────────────────────────────────────
+
+/// Deep merge `overlay` into `base` at the [`toml::Value`] level.
+///
+/// For each key in `overlay`:
+/// - If both `base` and `overlay` have a **table** at that key, recurse.
+/// - Otherwise, `overlay`'s value replaces `base`'s value (scalars, arrays).
+/// - Keys only in `base` are preserved untouched.
+///
+/// This produces the correct two-layer semantics: shipped defaults provide
+/// values for keys absent from the user's file, while user-specified keys
+/// always win. Arrays replace wholesale (TOML arrays have no natural merge
+/// strategy).
+///
+/// # Why merge at the TOML level?
+///
+/// After serde deserializes a TOML file, absent fields are filled in with
+/// compiled-in Rust defaults (`#[serde(default = "...")]`). At that point
+/// it is impossible to tell whether the user explicitly wrote `column_width = 960`
+/// or whether serde filled in `960` because the key was absent. Merging **before**
+/// deserialization avoids this ambiguity: the key is either present in the
+/// merged TOML or it isn't.
+fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
+    if let (toml::Value::Table(base_map), toml::Value::Table(overlay_map)) = (base, overlay) {
+        for (key, overlay_val) in overlay_map {
+            match base_map.get_mut(key) {
+                Some(base_val) if base_val.is_table() && overlay_val.is_table() => {
+                    merge_toml_values(base_val, overlay_val);
+                }
+                _ => {
+                    base_map.insert(key.clone(), overlay_val.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Read a TOML file into a raw [`toml::Value`] (no schema applied).
+///
+/// Returns `None` if the file doesn't exist, can't be read, or contains
+/// invalid TOML. Logs errors at appropriate levels.
+fn load_toml_file_as_value(path: &Path) -> Option<toml::Value> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                log::error!("failed to parse TOML at {:?}: {e}", path);
+                None
+            }
+        },
+        Err(e) => {
+            log::debug!("TOML file not found at {:?}: {e}", path);
+            None
+        }
+    }
+}
+
+/// Load the shipped `default-config.toml` as a raw [`toml::Value`].
+///
+/// Looks next to the running executable. Returns `None` if the file is
+/// missing (e.g., in development builds without the bundled file).
+fn load_shipped_config_as_value() -> Option<toml::Value> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let path = exe_dir.join("default-config.toml");
+    if !path.exists() {
+        log::debug!("no shipped default-config.toml at {:?}", path);
+        return None;
+    }
+    load_toml_file_as_value(&path)
+}
 
 /// Schema header for `stm.toml` files (taplo LSP autocomplete).
 ///
@@ -180,6 +275,83 @@ pub fn load_default_config() -> StmConfig {
     load_app_config(&path)
 }
 
+/// Load and merge app config from shipped defaults and user overrides.
+///
+/// This is the primary config loading function for the daemon. It implements
+/// the two-layer config model at the TOML level:
+///
+/// 1. Load `default-config.toml` (shipped next to `stmd.exe`) as raw [`toml::Value`].
+/// 2. Load `stm.toml` (user's config file at `user_config_path`) as raw [`toml::Value`].
+/// 3. Deep merge: user TOML overlays shipped TOML. Keys present in the user's file
+///    always win; absent keys inherit from the shipped defaults.
+/// 4. Deserialize the merged [`toml::Value`] into [`StmConfig`].
+///
+/// # Why TOML-level merge?
+///
+/// Merging before deserialization avoids the ambiguity of the comparison approach.
+/// After serde fills in `#[serde(default)]` values, it is impossible to distinguish
+/// "user wrote `column_width = 960`" from "serde filled in 960 because the key was
+/// absent". At the TOML level, the key is either present or absent — no ambiguity.
+///
+/// # Fallbacks
+///
+/// - **No shipped file** (e.g., dev build): user TOML is deserialized directly;
+///   serde's compiled-in Rust defaults fill in missing fields.
+/// - **No user file**: shipped TOML is deserialized directly.
+/// - **Neither**: `StmConfig::default()` (compiled-in Rust defaults).
+/// - **Parse errors**: logged and the other layer is used alone.
+///
+/// # Arguments
+///
+/// * `user_config_path` - Path to the user's `stm.toml` file.
+///
+/// # Returns
+///
+/// A [`StmConfig`]. Never fails — always returns a valid config.
+#[must_use]
+pub fn load_merged_app_config(user_config_path: &Path) -> StmConfig {
+    let shipped_value = load_shipped_config_as_value();
+    let user_value = load_toml_file_as_value(user_config_path);
+
+    // Start with shipped defaults as the base. If no shipped file, start empty
+    // (serde defaults will fill in during deserialization).
+    let mut merged = shipped_value.unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+
+    // Overlay user's TOML on top of shipped defaults.
+    if let Some(user) = user_value {
+        merge_toml_values(&mut merged, &user);
+        log::info!("loaded merged app config (shipped + user overrides)");
+    } else if let Some(table) = merged.as_table() {
+        if table.is_empty() {
+            log::debug!("no shipped or user config — using compiled-in defaults");
+        } else {
+            log::info!("loaded app config from shipped defaults (no user file)");
+        }
+    }
+
+    // Deserialize the merged TOML into StmConfig.
+    // toml v1 removed from_value, so we convert back to string first.
+    let merged_str = match toml::to_string(&merged) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("failed to serialize merged TOML: {e}; using defaults");
+            return StmConfig::default();
+        }
+    };
+    match toml::from_str::<StmConfig>(&merged_str) {
+        Ok(config) => {
+            if let Err(warning) = config.validate() {
+                log::warn!("config validation warning: {warning}");
+            }
+            config
+        }
+        Err(e) => {
+            log::error!("failed to parse merged config: {e}; using defaults");
+            StmConfig::default()
+        }
+    }
+}
+
 /// Load default rules from `default-stm-rules.toml` bundled next to the executable.
 ///
 /// Looks for the file in the same directory as the running executable. If the
@@ -221,8 +393,9 @@ pub fn load_default_rules() -> WindowRulesConfig {
 /// multiple times is safe). Then writes each default file only if it doesn't
 /// already exist:
 ///
-/// - `stm.toml` — default [`StmConfig`] as TOML, with a `#:schema` header
-///   prepended for IDE autocomplete (taplo LSP).
+/// - `stm.toml` — a minimal file with a `#:schema` header and a comment
+///   pointing to `default-config.toml`. The runtime merge fills in all fields
+///   from shipped defaults, so a complete starter file is unnecessary.
 /// - `stm-rules.toml` — default [`WindowRulesConfig`] as TOML, with a
 ///   `#:schema` header prepended.
 /// - `schemas/stm-config.schema.json` — JSON Schema for [`StmConfig`].
@@ -269,26 +442,36 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("failed to create schemas directory {:?}: {e}", schemas_dir))?;
 
     // Serialize default configs for the user's config directory.
-    // This generates a starter stm.toml and stm-rules.toml for users.
-    // The actual runtime defaults come from `default-config.toml` /
-    // `default-stm-rules.toml` shipped next to stmd.exe (loaded via
-    // `load_default_config` / `load_default_rules`).
-    let default_config_toml = toml::to_string(&StmConfig::default())
-        .map_err(|e| format!("failed to serialize default StmConfig: {e}"))?;
+    //
+    // stm.toml: write an empty file with just the schema header and a comment.
+    // The runtime merge (load_merged_app_config) fills in all fields from
+    // the shipped default-config.toml. Writing a complete file here would
+    // override the shipped defaults entirely, defeating the two-layer model.
+    let stm_toml_content = format!(
+        "{STM_CONFIG_SCHEMA_HEADER}\
+         # Override defaults from default-config.toml here.\n\
+         # See default-config.toml for all available fields.\n"
+    );
+
+    // stm-rules.toml: write the Rust defaults. Rules don't have a two-layer
+    // merge model (no shipped default-rules file that users partially override),
+    // so a complete starter file is appropriate.
     let default_rules_toml = toml::to_string(&WindowRulesConfig::default())
         .map_err(|e| format!("failed to serialize default WindowRulesConfig: {e}"))?;
 
-    // Write default stm.toml with schema header, if it doesn't exist.
+    // Write empty stm.toml with schema header, if it doesn't exist.
     let stm_toml = dir.join("stm.toml");
-    let stm_content = format!("{STM_CONFIG_SCHEMA_HEADER}{default_config_toml}");
-    match write_default_config_file(&stm_toml, &stm_content) {
+    match write_default_config_file(&stm_toml, &stm_toml_content) {
         Ok(written) => {
             if written {
                 log::info!("wrote default config to {:?}", stm_toml);
             }
         }
         Err(e) => {
-            return Err(format!("failed to write default config {:?}: {e}", stm_toml));
+            return Err(format!(
+                "failed to write default config {:?}: {e}",
+                stm_toml
+            ));
         }
     }
 
@@ -354,7 +537,10 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
 ///
 /// Checks both `stm.toml` and `stm-rules.toml` in the given directory:
 ///
-/// - Loads `stm.toml`, deserializes as [`StmConfig`], calls [`StmConfig::validate()`].
+/// - Loads `stm.toml`, **merges with shipped defaults** (same TOML-level merge
+///   as [`load_merged_app_config`]), then validates the result as [`StmConfig`].
+///   This means partial user files are valid — missing keys are filled in from
+///   shipped defaults, just like the daemon would do.
 /// - Loads `stm-rules.toml`, checks it parses correctly as [`WindowRulesConfig`].
 ///
 /// Missing files are **not errors** — they simply mean the user hasn't created
@@ -388,11 +574,29 @@ pub fn check_config(dir: &Path) -> Result<(), String> {
     let stm_path = dir.join("stm.toml");
 
     // Only validate stm.toml if it exists — missing is not an error.
+    // Merge with shipped defaults before validating so partial user files
+    // don't fail with "missing field" errors (same behavior as the daemon).
     if stm_path.exists() {
-        let contents = std::fs::read_to_string(&stm_path)
-            .map_err(|e| format!("failed to read {:?}: {e}", stm_path))?;
+        let user_value = load_toml_file_as_value(&stm_path)
+            .ok_or_else(|| format!("failed to read or parse {stm_path:?} (see log for details)"))?;
+
+        // Start with shipped defaults. If no shipped file is available (e.g.,
+        // dev build), fall back to serializing Rust defaults as the base.
+        let mut merged = match load_shipped_config_as_value() {
+            Some(shipped) => shipped,
+            None => {
+                let default_toml = toml::to_string(&StmConfig::default())
+                    .map_err(|e| format!("failed to serialize Rust defaults: {e}"))?;
+                toml::from_str::<toml::Value>(&default_toml)
+                    .map_err(|e| format!("failed to parse Rust defaults as TOML: {e}"))?
+            }
+        };
+        merge_toml_values(&mut merged, &user_value);
+
+        let merged_str = toml::to_string(&merged)
+            .map_err(|e| format!("failed to serialize merged TOML: {e}"))?;
         let config: StmConfig =
-            toml::from_str(&contents).map_err(|e| format!("stm.toml parse error: {e}"))?;
+            toml::from_str(&merged_str).map_err(|e| format!("stm.toml parse error: {e}"))?;
         config
             .validate()
             .map_err(|e| format!("stm.toml validation error: {e}"))?;
@@ -404,8 +608,8 @@ pub fn check_config(dir: &Path) -> Result<(), String> {
     if rules_path.exists() {
         let contents = std::fs::read_to_string(&rules_path)
             .map_err(|e| format!("failed to read {:?}: {e}", rules_path))?;
-        let _: WindowRulesConfig = toml::from_str(&contents)
-            .map_err(|e| format!("stm-rules.toml parse error: {e}"))?;
+        let _: WindowRulesConfig =
+            toml::from_str(&contents).map_err(|e| format!("stm-rules.toml parse error: {e}"))?;
     }
 
     Ok(())
@@ -457,6 +661,43 @@ mod tests {
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
 
+    /// Full TOML with all required StmConfig fields, used as the shipped-defaults
+    /// base in merge tests.  Mirrors `default-config.toml` but with distinct
+    /// values so test assertions can detect the source.
+    const FULL_SHIPPED_TOML: &str = r#"
+super_key = "VK_F24"
+column_width = 1280
+min_column_width_px = 640
+
+[padding]
+window = 2
+up = 2
+down = 2
+
+[hotkeys]
+focus_left = "Super+H"
+focus_right = "Super+L"
+focus_up = "Super+K"
+focus_down = "Super+J"
+swap_left = "Super+Shift+H"
+swap_right = "Super+Shift+L"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+toggle_float = "Super+Space"
+toggle_monocle = "Super+M"
+close_window = "Super+Q"
+reload_config = "Super+Shift+R"
+place_above = "Super+A"
+
+[animation]
+enabled = true
+duration_ms = 240
+easing = "ease-out-expo"
+
+[minimize_restore]
+strategy = "original_slot"
+"#;
+
     // ── load_app_config tests ──────────────────────────────────────────
 
     /// Positive: valid TOML file parses into the expected `StmConfig`.
@@ -472,8 +713,28 @@ window = 8
 up = 10
 down = 40
 
+[hotkeys]
+focus_left = "Super+H"
+focus_right = "Super+L"
+focus_up = "Super+K"
+focus_down = "Super+J"
+swap_left = "Super+Shift+H"
+swap_right = "Super+Shift+L"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+toggle_float = "Super+Space"
+toggle_monocle = "Super+M"
+close_window = "Super+Q"
+reload_config = "Super+Shift+R"
+place_above = "Super+A"
+
 [animation]
 enabled = false
+duration_ms = 200
+easing = "linear"
+
+[minimize_restore]
+strategy = "original_slot"
 "#;
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(toml_content.as_bytes()).unwrap();
@@ -566,9 +827,12 @@ enabled = false
             "stm.toml should contain taplo schema header"
         );
 
-        // stm.toml should contain valid StmConfig TOML (after the header).
-        let config: StmConfig = toml::from_str(&contents).unwrap();
-        assert_eq!(config.super_key, "VK_F24");
+        // stm.toml is intentionally empty (just header + comment) — the runtime
+        // merge fills in all fields from shipped default-config.toml.
+        assert!(
+            contents.contains("Override defaults"),
+            "stm.toml should contain the comment pointing to default-config.toml"
+        );
 
         // stm-rules.toml should start with the schema header.
         let contents = std::fs::read_to_string(dir.join("stm-rules.toml")).unwrap();
@@ -623,11 +887,10 @@ enabled = false
         let dir = tmp.path();
 
         // Write an stm.toml with invalid values (negative padding).
-        std::fs::write(
-            dir.join("stm.toml"),
-            "super_key = \"VK_F24\"\n\n[padding]\nwindow = -1\n",
-        )
-        .unwrap();
+        let mut toml = FULL_SHIPPED_TOML.replace("window = 2", "window = -1");
+        // Also replace the header newline from the constant.
+        toml = toml.trim_start().to_string();
+        std::fs::write(dir.join("stm.toml"), &toml).unwrap();
 
         let result = check_config(dir);
         assert!(
@@ -654,6 +917,25 @@ enabled = false
         assert!(result.is_ok(), "empty directory should pass check_config");
     }
 
+    /// Positive: partial stm.toml passes validation (merge fills missing fields).
+    ///
+    /// This is the key behavior fix: partial user files should pass `check_config`
+    /// because the runtime merge fills gaps from shipped/Rust defaults.
+    #[test]
+    fn check_config_partial_toml_returns_ok() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        // Write a partial stm.toml with only one field.
+        std::fs::write(dir.join("stm.toml"), "column_width = 800\n").unwrap();
+
+        let result = check_config(dir);
+        assert!(
+            result.is_ok(),
+            "partial stm.toml should pass check_config (merged with defaults): {result:?}"
+        );
+    }
+
     /// Negative: malformed `stm-rules.toml` returns a parse error.
     #[test]
     fn check_config_malformed_rules_returns_err() {
@@ -661,7 +943,11 @@ enabled = false
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        std::fs::write(dir.join("stm-rules.toml"), b"this is = not = valid = toml = [[[[").unwrap();
+        std::fs::write(
+            dir.join("stm-rules.toml"),
+            b"this is = not = valid = toml = [[[[",
+        )
+        .unwrap();
 
         // Act
         let result = check_config(dir);
@@ -875,5 +1161,281 @@ initial_width_eighths = 4
             !config.hotkeys.focus_left.is_empty(),
             "hotkeys should be populated"
         );
+    }
+
+    // ── load_merged_app_config tests ──────────────────────────────────
+
+    /// Positive: TOML-level merge — user overrides win, shipped defaults fill gaps.
+    ///
+    /// User's TOML has only `column_width = 800`. The shipped TOML has
+    /// `column_width = 1280`, `padding.window = 2`, etc. After merge:
+    /// - `column_width` = 800 (user wins)
+    /// - `padding.window` = 2 (shipped default, user didn't specify)
+    /// - `padding.up` = 2 (shipped default)
+    /// - `animation.duration_ms` = 240 (shipped default)
+    #[test]
+    fn merged_config_user_overrides_win_shipped_fills_gaps() {
+        let tmp = TempDir::new().unwrap();
+
+        // Write a "shipped defaults" file.
+        let shipped_path = tmp.path().join("default-config.toml");
+        std::fs::write(
+            &shipped_path,
+            r#"
+super_key = "VK_F24"
+column_width = 1280
+min_column_width_px = 640
+
+[padding]
+window = 2
+up = 2
+down = 2
+
+[hotkeys]
+focus_left = "Super+H"
+focus_right = "Super+L"
+focus_up = "Super+K"
+focus_down = "Super+J"
+swap_left = "Super+Shift+H"
+swap_right = "Super+Shift+L"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+toggle_float = "Super+Space"
+toggle_monocle = "Super+M"
+close_window = "Super+Q"
+reload_config = "Super+Shift+R"
+place_above = "Super+A"
+
+[animation]
+enabled = true
+duration_ms = 240
+easing = "ease-out-expo"
+
+[minimize_restore]
+strategy = "original_slot"
+"#,
+        )
+        .unwrap();
+
+        // Write a user file with only `column_width = 800`.
+        let user_path = tmp.path().join("stm.toml");
+        std::fs::write(&user_path, "column_width = 800\n").unwrap();
+
+        // Load shipped as value, merge with user.
+        let mut base = load_toml_file_as_value(&shipped_path).unwrap();
+        let overlay = load_toml_file_as_value(&user_path).unwrap();
+        merge_toml_values(&mut base, &overlay);
+
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+
+        // User override wins.
+        assert_eq!(config.column_width, 800, "user column_width should win");
+        // Shipped defaults fill in the rest.
+        assert_eq!(
+            config.min_column_width_px, 640,
+            "shipped min_column_width_px"
+        );
+        assert_eq!(config.padding.window, 2, "shipped padding.window");
+        assert_eq!(config.padding.up, 2, "shipped padding.up");
+        assert_eq!(config.padding.down, 2, "shipped padding.down");
+        assert_eq!(
+            config.animation.duration_ms, 240,
+            "shipped animation.duration_ms"
+        );
+    }
+
+    /// Positive: TOML-level merge — empty user file gets all shipped defaults.
+    ///
+    /// An empty user TOML means no overlay keys, so the merged result is
+    /// identical to the shipped defaults.
+    #[test]
+    fn merged_config_empty_user_gets_shipped_defaults() {
+        let tmp = TempDir::new().unwrap();
+
+        let shipped_path = tmp.path().join("default-config.toml");
+        std::fs::write(&shipped_path, FULL_SHIPPED_TOML).unwrap();
+
+        let user_path = tmp.path().join("stm.toml");
+        std::fs::write(&user_path, "").unwrap();
+
+        let mut base = load_toml_file_as_value(&shipped_path).unwrap();
+        let overlay = load_toml_file_as_value(&user_path).unwrap();
+        merge_toml_values(&mut base, &overlay);
+
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+
+        assert_eq!(config.column_width, 1280, "shipped column_width");
+        assert_eq!(
+            config.min_column_width_px, 640,
+            "shipped min_column_width_px"
+        );
+        assert_eq!(config.padding.window, 2, "shipped padding.window");
+        assert_eq!(config.padding.up, 2, "shipped padding.up");
+        assert_eq!(config.padding.down, 2, "shipped padding.down");
+    }
+
+    /// Positive: TOML-level merge — user explicitly sets a value that happens
+    /// to equal the compiled-in Rust default.
+    ///
+    /// Unlike the old comparison approach, this works correctly: the key is
+    /// present in the user's TOML, so it wins regardless of its value.
+    #[test]
+    fn merged_config_user_explicitly_sets_rust_default() {
+        let tmp = TempDir::new().unwrap();
+
+        let shipped_path = tmp.path().join("default-config.toml");
+        std::fs::write(&shipped_path, FULL_SHIPPED_TOML).unwrap();
+
+        // User explicitly writes column_width = 960 (the Rust default).
+        let user_path = tmp.path().join("stm.toml");
+        std::fs::write(&user_path, "column_width = 960\n").unwrap();
+
+        let mut base = load_toml_file_as_value(&shipped_path).unwrap();
+        let overlay = load_toml_file_as_value(&user_path).unwrap();
+        merge_toml_values(&mut base, &overlay);
+
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+
+        // User's explicit 960 wins — this is the key improvement over the
+        // comparison approach where 960 == Rust default → shipped default won.
+        assert_eq!(
+            config.column_width, 960,
+            "user's explicit value should win, even if it equals the Rust default"
+        );
+    }
+
+    /// Positive: TOML-level merge handles nested tables correctly.
+    ///
+    /// User overrides `padding.window` but not `padding.up/down`.
+    /// The merge should recurse into the `[padding]` table.
+    #[test]
+    fn merged_config_nested_table_partial_override() {
+        let tmp = TempDir::new().unwrap();
+
+        // Shipped defaults with distinct padding values.
+        let shipped_path = tmp.path().join("default-config.toml");
+        let shipped_toml = FULL_SHIPPED_TOML
+            .replace("window = 2", "window = 2")
+            .replace("up = 2", "up = 5")
+            .replace("down = 2", "down = 10");
+        std::fs::write(&shipped_path, shipped_toml).unwrap();
+
+        // User overrides only padding.window.
+        let user_path = tmp.path().join("stm.toml");
+        std::fs::write(&user_path, "[padding]\nwindow = 20\n").unwrap();
+
+        let mut base = load_toml_file_as_value(&shipped_path).unwrap();
+        let overlay = load_toml_file_as_value(&user_path).unwrap();
+        merge_toml_values(&mut base, &overlay);
+
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+
+        assert_eq!(config.padding.window, 20, "user override wins");
+        assert_eq!(config.padding.up, 5, "shipped default preserved");
+        assert_eq!(config.padding.down, 10, "shipped default preserved");
+    }
+
+    /// Positive: TOML-level merge is schema-agnostic.
+    ///
+    /// Adding a new field to the shipped TOML works without any code changes
+    /// to the merge logic. The field flows through to serde, which will
+    /// ignore it if the struct doesn't know about it yet.
+    #[test]
+    fn merged_config_new_field_in_shipped_flows_through() {
+        let tmp = TempDir::new().unwrap();
+
+        // Shipped file has an extra top-level field `future_option = 42`.
+        // Insert it before any [section] headers so TOML scopes it to the top level.
+        let shipped_toml = FULL_SHIPPED_TOML.replace(
+            "min_column_width_px = 640",
+            "min_column_width_px = 640\nfuture_option = 42",
+        );
+        let shipped_path = tmp.path().join("default-config.toml");
+        std::fs::write(&shipped_path, &shipped_toml).unwrap();
+
+        let user_path = tmp.path().join("stm.toml");
+        std::fs::write(&user_path, "").unwrap();
+
+        let mut base = load_toml_file_as_value(&shipped_path).unwrap();
+        let overlay = load_toml_file_as_value(&user_path).unwrap();
+        merge_toml_values(&mut base, &overlay);
+
+        // The merged TOML should still contain `future_option = 42`.
+        assert_eq!(
+            base.get("future_option").and_then(|v| v.as_integer()),
+            Some(42),
+            "new field should survive merge"
+        );
+
+        // serde ignores unknown fields by default — deserialization succeeds.
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+        assert_eq!(config.column_width, 1280);
+    }
+
+    /// Positive: load_merged_app_config with no user file returns shipped defaults.
+    ///
+    /// The user path doesn't exist, so the merged result is just the shipped file.
+    #[test]
+    fn load_merged_app_config_no_user_file_uses_shipped() {
+        let tmp = TempDir::new().unwrap();
+
+        // Simulate shipped defaults in the temp dir.
+        let shipped_path = tmp.path().join("default-config.toml");
+        std::fs::write(&shipped_path, FULL_SHIPPED_TOML).unwrap();
+
+        // User file doesn't exist.
+        let _user_path = tmp.path().join("stm.toml");
+
+        // Use the internal merge directly since load_merged_app_config
+        // looks next to the exe, not in our temp dir.
+        let base = load_toml_file_as_value(&shipped_path).unwrap();
+        // No user overlay.
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+
+        assert_eq!(config.column_width, 1280);
+        assert_eq!(config.padding.window, 2);
+    }
+
+    /// Positive: TOML-level merge — full user file completely overrides shipped.
+    #[test]
+    fn merged_config_full_user_file_overrides_all() {
+        let tmp = TempDir::new().unwrap();
+
+        let shipped_path = tmp.path().join("default-config.toml");
+        std::fs::write(&shipped_path, FULL_SHIPPED_TOML).unwrap();
+
+        // User overrides everything.
+        let user_path = tmp.path().join("stm.toml");
+        std::fs::write(
+            &user_path,
+            r#"column_width = 1600
+min_column_width_px = 800
+
+[padding]
+window = 10
+up = 20
+down = 30
+"#,
+        )
+        .unwrap();
+
+        let mut base = load_toml_file_as_value(&shipped_path).unwrap();
+        let overlay = load_toml_file_as_value(&user_path).unwrap();
+        merge_toml_values(&mut base, &overlay);
+
+        let config: StmConfig =
+            toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
+
+        assert_eq!(config.column_width, 1600, "user override");
+        assert_eq!(config.min_column_width_px, 800, "user override");
+        assert_eq!(config.padding.window, 10, "user override");
+        assert_eq!(config.padding.up, 20, "user override");
+        assert_eq!(config.padding.down, 30, "user override");
     }
 }

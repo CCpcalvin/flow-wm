@@ -1,8 +1,28 @@
 //! Configuration type definitions matching the TOML schema.
 //!
-//! Every field has `#[serde(default = "...")]` so partial TOML configs fill in
-//! missing fields with defaults. Full TOML round-trip is tested: every field
-//! survives `StmConfig → TOML → StmConfig`.
+//! Every field in [`StmConfig`] and its nested types is **required** in TOML —
+//! there are no `#[serde(default)]` annotations. The single source of truth for
+//! default values is `default-config.toml` shipped next to `stmd.exe`.
+//!
+//! # Design: No Serde Defaults
+//!
+//! Intentionally omitting `#[serde(default)]` creates a built-in safety net:
+//!
+//! - `default-config.toml` **must** contain every field. If a developer adds a
+//!   new field to a Rust struct but forgets to add it to `default-config.toml`,
+//!   deserialization fails with a clear `"missing field 'xyz'"` error.
+//! - Users' `stm.toml` files can still be partial — the TOML-level merge in
+//!   [`lifecycle::load_merged_app_config`] fills in missing fields from shipped
+//!   defaults before deserializing.
+//! - The compiled-in Rust `Default` impl serves as an **emergency fallback only**
+//!   (e.g., dev environments without the shipped file). It is NOT the canonical
+//!   source of default values.
+//!
+//! # Exceptions
+//!
+//! `Vec` fields (like `WindowRulesConfig::rules`) retain `#[serde(default)]`
+//! because an empty collection is unambiguous. Per-entry boolean flags
+//! (like `WindowRule::override_persist`) also keep defaults for convenience.
 //!
 //! # Config File Split
 //!
@@ -25,8 +45,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// Loaded from `%USERPROFILE%\.config\stm\stm.toml` (see [`config::dirs`](crate::config::dirs)
 /// for the full resolution chain including `--config` flag and `STM_CONFIG_DIR` env var
-/// overrides). Every field has a default, so even an empty TOML file produces
-/// a valid config.
+/// overrides). Every field is **required** in TOML — there are no serde defaults.
+///
+/// The canonical default values live in `default-config.toml` shipped next to `stmd.exe`.
+/// The TOML-level merge (see [`lifecycle::load_merged_app_config`]) fills in missing
+/// fields from shipped defaults before deserializing, so users' `stm.toml` files can
+/// be partial.
 ///
 /// This struct contains **application settings only** — hotkeys, padding,
 /// animation, etc. Window classification rules live in a separate file
@@ -58,32 +82,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StmConfig {
     /// The virtual key code treated as the Super/modifier key.
-    #[serde(default = "default_super_key")]
     pub super_key: String,
 
-    /// Default column width in pixels. Default: 960.
-    #[serde(default = "default_column_width")]
+    /// Default column width in pixels.
     pub column_width: u32,
 
     /// Minimum column width in pixels. Columns cannot be resized below this.
-    /// Default: 320.
-    #[serde(default = "default_min_column_width_px")]
     pub min_column_width_px: u32,
 
     /// Padding settings.
-    #[serde(default)]
     pub padding: Padding,
 
     /// Hotkey bindings.
-    #[serde(default)]
     pub hotkeys: Hotkeys,
 
     /// Animation settings.
-    #[serde(default)]
     pub animation: AnimationConfig,
 
     /// Behavior when a minimized tiling window is restored.
-    #[serde(default)]
     pub minimize_restore: MinimizeRestore,
 }
 
@@ -130,28 +146,25 @@ impl Default for StmConfig {
 /// - `down`: bottom screen margin (e.g., for taskbar clearance)
 ///
 /// ```text
-/// ┌─────────────────── monitor work area ───────────────────┐
-/// │ ↑ padding.up                                            │
+/// ┌─────────────────── monitor work area ────────────────────┐
+/// │ ↑ padding.up                                             │
 /// │ ┌──────── column cell ────────┐ ┌── next column cell ──┐ │
-/// │ │ ↑ padding.window            │ │                       │ │
-/// │ │ ┌──── window (HWND) ────┐   │ │                       │ │
-/// │ │ │                       │   │ │                       │ │
-/// │ │ └───────────────────────┘   │ │                       │ │
-/// │ │ ↓ padding.window            │ │                       │ │
-/// │ └─────────────────────────────┘ └───────────────────────┘ │
-/// │ ↓ padding.down                                          │
+/// │ │ ↑ padding.window            │ │                      │ │
+/// │ │ ┌──── window (HWND) ────┐   │ │                      │ │
+/// │ │ │                       │   │ │                      │ │
+/// │ │ └───────────────────────┘   │ │                      │ │
+/// │ │ ↓ padding.window            │ │                      │ │
+/// │ └─────────────────────────────┘ └──────────────────────┘ │
+/// │ ↓ padding.down                                           │
 /// └──────────────────────────────────────────────────────────┘
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Padding {
     /// Inset around each window within its container cell (visual gap).
-    #[serde(default = "default_window_padding")]
     pub window: i32,
     /// Top screen margin so windows don't touch the top edge.
-    #[serde(default)]
     pub up: i32,
     /// Bottom screen margin (e.g., for taskbar clearance).
-    #[serde(default)]
     pub down: i32,
 }
 
@@ -217,71 +230,56 @@ impl StmConfig {
 /// All hotkey bindings (13 total).
 ///
 /// Default keybinds use Vim-style `Super+H/J/K/L` for focus. All defaults are
-/// generated via a `default_hotkey!` macro to avoid repetition.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+/// defined in a manual `Default` impl (emergency fallback for dev environments).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Hotkeys {
     /// Focus left: default `Super+H`.
-    #[serde(default = "default_focus_left")]
     pub focus_left: String,
     /// Focus right: default `Super+L`.
-    #[serde(default = "default_focus_right")]
     pub focus_right: String,
     /// Focus up: default `Super+K`.
-    #[serde(default = "default_focus_up")]
     pub focus_up: String,
     /// Focus down: default `Super+J`.
-    #[serde(default = "default_focus_down")]
     pub focus_down: String,
     /// Swap left: default `Super+Shift+H`.
-    #[serde(default = "default_swap_left")]
     pub swap_left: String,
     /// Swap right: default `Super+Shift+L`.
-    #[serde(default = "default_swap_right")]
     pub swap_right: String,
     /// Scroll left: default `Super+Left`.
-    #[serde(default = "default_scroll_left")]
     pub scroll_left: String,
     /// Scroll right: default `Super+Right`.
-    #[serde(default = "default_scroll_right")]
     pub scroll_right: String,
     /// Toggle float/tiling: default `Super+Space`.
-    #[serde(default = "default_toggle_float")]
     pub toggle_float: String,
     /// Toggle monocle mode: default `Super+M`.
-    #[serde(default = "default_toggle_monocle")]
     pub toggle_monocle: String,
     /// Close focused window: default `Super+Q`.
-    #[serde(default = "default_close_window")]
     pub close_window: String,
     /// Reload config from disk: default `Super+Shift+R`.
-    #[serde(default = "default_reload_config")]
     pub reload_config: String,
     /// Place window above others in column: default `Super+A`.
-    #[serde(default = "default_place_above")]
     pub place_above: String,
 }
 
-macro_rules! default_hotkey {
-    ($name:ident, $value:literal) => {
-        fn $name() -> String {
-            $value.into()
+impl Default for Hotkeys {
+    fn default() -> Self {
+        Self {
+            focus_left: "Super+H".into(),
+            focus_right: "Super+L".into(),
+            focus_up: "Super+K".into(),
+            focus_down: "Super+J".into(),
+            swap_left: "Super+Shift+H".into(),
+            swap_right: "Super+Shift+L".into(),
+            scroll_left: "Super+Left".into(),
+            scroll_right: "Super+Right".into(),
+            toggle_float: "Super+Space".into(),
+            toggle_monocle: "Super+M".into(),
+            close_window: "Super+Q".into(),
+            reload_config: "Super+Shift+R".into(),
+            place_above: "Super+A".into(),
         }
-    };
+    }
 }
-
-default_hotkey!(default_focus_left, "Super+H");
-default_hotkey!(default_focus_right, "Super+L");
-default_hotkey!(default_focus_up, "Super+K");
-default_hotkey!(default_focus_down, "Super+J");
-default_hotkey!(default_swap_left, "Super+Shift+H");
-default_hotkey!(default_swap_right, "Super+Shift+L");
-default_hotkey!(default_scroll_left, "Super+Left");
-default_hotkey!(default_scroll_right, "Super+Right");
-default_hotkey!(default_toggle_float, "Super+Space");
-default_hotkey!(default_toggle_monocle, "Super+M");
-default_hotkey!(default_close_window, "Super+Q");
-default_hotkey!(default_reload_config, "Super+Shift+R");
-default_hotkey!(default_place_above, "Super+A");
 
 /// A single window classification rule.
 ///
@@ -429,7 +427,6 @@ pub enum WindowAction {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WindowRulesConfig {
     /// Default action for windows not matching any rule.
-    #[serde(default = "default_window_action")]
     pub default_action: WindowAction,
 
     /// Window classification rules (first match wins).
@@ -454,34 +451,19 @@ impl Default for WindowRulesConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AnimationConfig {
     /// Whether layout transitions are animated.
-    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Animation duration in milliseconds.
-    #[serde(default = "default_duration_ms")]
     pub duration_ms: u32,
     /// Easing function name (e.g., `"ease-out-expo"`).
-    #[serde(default = "default_easing")]
     pub easing: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_duration_ms() -> u32 {
-    180
-}
-
-fn default_easing() -> String {
-    "ease-out-expo".into()
 }
 
 impl Default for AnimationConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            duration_ms: default_duration_ms(),
-            easing: default_easing(),
+            enabled: true,
+            duration_ms: 180,
+            easing: "ease-out-expo".into(),
         }
     }
 }
@@ -494,18 +476,13 @@ impl Default for AnimationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MinimizeRestore {
     /// Strategy for placing restored windows.
-    #[serde(default = "default_minimize_restore_strategy")]
     pub strategy: MinimizeRestoreStrategy,
-}
-
-fn default_minimize_restore_strategy() -> MinimizeRestoreStrategy {
-    MinimizeRestoreStrategy::OriginalSlot
 }
 
 impl Default for MinimizeRestore {
     fn default() -> Self {
         Self {
-            strategy: default_minimize_restore_strategy(),
+            strategy: MinimizeRestoreStrategy::OriginalSlot,
         }
     }
 }
@@ -545,31 +522,77 @@ mod tests {
 
     #[test]
     fn config_from_toml_with_settings() {
+        // Full TOML required since there are no serde defaults.
         let toml_str = r#"
-super_key = "VK_F24"
+super_key = "VK_LWIN"
+column_width = 1200
+min_column_width_px = 400
 
 [padding]
 window = 8
 up = 10
 down = 40
 
+[hotkeys]
+focus_left = "Super+H"
+focus_right = "Super+L"
+focus_up = "Super+K"
+focus_down = "Super+J"
+swap_left = "Super+Shift+H"
+swap_right = "Super+Shift+L"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+toggle_float = "Super+Space"
+toggle_monocle = "Super+M"
+close_window = "Super+Q"
+reload_config = "Super+Shift+R"
+place_above = "Super+A"
+
 [animation]
 enabled = false
+duration_ms = 180
+easing = "ease-out-expo"
+
+[minimize_restore]
+strategy = "original_slot"
 "#;
         let config: StmConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.super_key, "VK_LWIN");
+        assert_eq!(config.column_width, 1200);
         assert_eq!(config.padding.window, 8);
         assert_eq!(config.padding.up, 10);
         assert_eq!(config.padding.down, 40);
         assert!(!config.animation.enabled);
     }
 
+    /// Negative: empty TOML should fail to parse since all fields are required.
+    ///
+    /// This is the safety net — if a field is missing from `default-config.toml`,
+    /// the error is caught at deserialization time.
     #[test]
-    fn config_from_minimal_toml() {
-        // Empty TOML should produce defaults
+    fn config_from_empty_toml_is_rejected() {
         let toml_str = "";
-        let config: StmConfig = toml::from_str(toml_str).expect("parse");
-        assert_eq!(config.super_key, "VK_F24");
-        assert_eq!(config.padding.window, 4);
+        let result = toml::from_str::<StmConfig>(toml_str);
+        assert!(
+            result.is_err(),
+            "empty TOML should fail without serde defaults"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("missing field"),
+            "error should mention missing field: {err}"
+        );
+    }
+
+    /// Negative: partial TOML (missing fields) should fail to parse.
+    #[test]
+    fn config_from_partial_toml_is_rejected() {
+        let toml_str = "column_width = 960\n";
+        let result = toml::from_str::<StmConfig>(toml_str);
+        assert!(
+            result.is_err(),
+            "partial TOML should fail without serde defaults"
+        );
     }
 
     // --- Integration: Full field preservation through round-trip ---
@@ -736,12 +759,24 @@ initial_width_eighths = 4
         assert_eq!(config.rules[1].initial_width_eighths, Some(4));
     }
 
+    /// Positive: TOML with only `default_action` parses correctly (rules defaults to empty).
     #[test]
-    fn window_rules_config_empty_toml() {
-        let toml_str = "";
+    fn window_rules_config_minimal_toml() {
+        let toml_str = "default_action = \"tile\"\n";
         let config: WindowRulesConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.default_action, WindowAction::Tile);
         assert!(config.rules.is_empty());
+    }
+
+    /// Negative: empty TOML fails because `default_action` is required.
+    #[test]
+    fn window_rules_config_empty_toml_is_rejected() {
+        let toml_str = "";
+        let result = toml::from_str::<WindowRulesConfig>(toml_str);
+        assert!(
+            result.is_err(),
+            "empty TOML should fail without serde defaults on default_action"
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub mod types;
 
 pub use lifecycle::{
     check_config, init_config_dir, load_app_config, load_default_config, load_default_rules,
-    load_rules_config,
+    load_merged_app_config, load_rules_config,
 };
 pub use types::StmConfig;
 pub use types::WindowRulesConfig;

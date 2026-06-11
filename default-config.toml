@@ -6,7 +6,12 @@
 # all application settings. Users can override any of these values by editing
 # their own stm.toml in the config directory (~/.config/stm/stm.toml).
 #
-# All fields have defaults, so an empty TOML file is valid.
+# This file must contain ALL StmConfig fields. If a field is missing,
+# deserialization fails with "missing field 'xyz'" — that's intentional,
+# it catches forgotten updates when adding new config fields.
+#
+# Users' stm.toml files can be partial; the TOML-level merge fills gaps
+# from this file before deserializing. See src/config/lifecycle.rs.
 #
 # For field documentation, see the StmConfig docstring in src/config/types.rs.
 
@@ -50,7 +55,7 @@ place_above = "Super+A"
 # Animation settings for layout transitions.
 [animation]
 enabled = true
-duration_ms = 180
+duration_ms = 240
 easing = "ease-out-expo"
 
 # Strategy for restoring minimized tiling windows.
