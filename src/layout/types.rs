@@ -256,20 +256,43 @@ pub struct MonitorInfo {
     pub work_area: Rect,
 }
 
-/// Padding configuration for the layout engine.
+/// Gap and margin configuration for the layout engine.
 ///
 /// This mirrors [`config::types::Padding`](crate::config::types::Padding) but lives
 /// in the layout module to avoid a circular dependency. The daemon converts
 /// between the two when constructing [`MutationConfig`](crate::layout::mutations::MutationConfig).
 ///
+/// # Gap Model (Uniform Spacing)
+///
+/// `window_gap` creates **uniform spacing** everywhere — the same gap appears
+/// between the screen edge and a window, and between two adjacent windows.
+///
+/// ```text
+/// Edge | window_gap | [Window 1] | window_gap | [Window 2] | window_gap | Edge
+/// ```
+///
+/// This is achieved via the slot-based canvas model:
+/// - Each column occupies a "slot" = content + right gap
+/// - `slot_width = base_content_width + window_gap`
+/// - Canvas starts at `window_gap` (initial left-edge gap)
+/// - The last column's embedded right gap serves as the right-edge gap
+///
+/// Vertically, the same model applies: `(row_count + 1) * window_gap` gaps
+/// are distributed within the available height.
+///
 /// See the [crate-level documentation](crate#padding-strategy) for a visual diagram.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Padding {
-    /// Inset around each window within its container cell.
-    pub window: i32,
-    /// Top screen margin.
+    /// Uniform gap between all elements (windows and screen edges), in pixels.
+    ///
+    /// This single value controls both horizontal (inter-column) and vertical
+    /// (inter-row) spacing, as well as the gap from windows to screen edges.
+    pub window_gap: i32,
+    /// Top screen margin — reserved space above the tiling area (e.g., for
+    /// custom title bars or visual breathing room above windows).
     pub up: i32,
-    /// Bottom screen margin.
+    /// Bottom screen margin — reserved space below the tiling area (e.g.,
+    /// for taskbar clearance).
     pub down: i32,
 }
 

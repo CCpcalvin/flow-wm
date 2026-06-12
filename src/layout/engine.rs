@@ -71,7 +71,7 @@ use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, Virtu
 /// let monitor = MonitorInfo {
 ///     work_area: Rect { x: 0, y: 0, width: 1920, height: 1080 },
 /// };
-/// let mut engine = LayoutEngine::new(monitor, 960, 4, 320, Padding { window: 4, up: 0, down: 0 });
+/// let mut engine = LayoutEngine::new(monitor, 960, 4, 320, Padding { window_gap: 4, up: 0, down: 0 });
 ///
 /// // Add windows (each becomes a new column, auto-focused)
 /// engine.add_window(WindowId(1));
@@ -423,7 +423,7 @@ mod tests {
 
     fn test_padding() -> Padding {
         Padding {
-            window: 4,
+            window_gap: 4,
             up: 0,
             down: 0,
         }

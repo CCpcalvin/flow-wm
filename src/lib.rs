@@ -82,7 +82,7 @@
 //! ```text
 //! Column cell (no padding):  [0, 0, 960, 1080]
 //!      │
-//!      │  projection::project_column_rows() applies padding.window on all sides
+//!      │  projection::project_column_rows() applies padding.window_gap on all sides
 //!      ▼
 //! Window rect (HWND):       [4, 4, 952, 1072]
 //! ```

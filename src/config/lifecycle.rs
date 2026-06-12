@@ -77,8 +77,8 @@ use super::types::{StmConfig, WindowRulesConfig};
 ///
 /// After serde deserializes a TOML file, absent fields are filled in with
 /// compiled-in Rust defaults (`#[serde(default = "...")]`). At that point
-/// it is impossible to tell whether the user explicitly wrote `column_width = 960`
-/// or whether serde filled in `960` because the key was absent. Merging **before**
+/// it is impossible to tell whether the user explicitly wrote `columns_per_screen = 3`
+/// or whether serde filled in `4` because the key was absent. Merging **before**
 /// deserialization avoids this ambiguity: the key is either present in the
 /// merged TOML or it isn't.
 fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
@@ -174,7 +174,7 @@ const STM_RULES_SCHEMA_HEADER: &str = "#:schema ./schemas/stm-rules.schema.json\
 /// use std::path::Path;
 ///
 /// let config = load_app_config(Path::new("stm.toml"));
-/// println!("column_width = {}", config.column_width);
+/// println!("columns_per_screen = {}", config.columns_per_screen);
 /// ```
 #[must_use]
 pub fn load_app_config(path: &Path) -> StmConfig {
@@ -290,7 +290,7 @@ pub fn load_default_config() -> StmConfig {
 ///
 /// Merging before deserialization avoids the ambiguity of the comparison approach.
 /// After serde fills in `#[serde(default)]` values, it is impossible to distinguish
-/// "user wrote `column_width = 960`" from "serde filled in 960 because the key was
+/// "user wrote `columns_per_screen = 3`" from "serde filled in 4 because the key was
 /// absent". At the TOML level, the key is either present or absent — no ambiguity.
 ///
 /// # Fallbacks
@@ -666,11 +666,11 @@ mod tests {
     /// values so test assertions can detect the source.
     const FULL_SHIPPED_TOML: &str = r#"
 super_key = "VK_F24"
-column_width = 1280
+columns_per_screen = 4
 min_column_width_px = 640
 
 [padding]
-window = 2
+window_gap = 2
 up = 2
 down = 2
 
@@ -705,11 +705,12 @@ strategy = "original_slot"
     fn load_app_config_valid_file_parses_correctly() {
         let toml_content = r#"
 super_key = "VK_LWIN"
+columns_per_screen = 3
 column_width = 1200
 min_column_width_px = 400
 
 [padding]
-window = 8
+window_gap = 8
 up = 10
 down = 40
 
@@ -741,9 +742,10 @@ strategy = "original_slot"
 
         let config = load_app_config(f.path());
         assert_eq!(config.super_key, "VK_LWIN");
-        assert_eq!(config.column_width, 1200);
+        assert_eq!(config.columns_per_screen, 3);
+        assert_eq!(config.column_width, Some(1200));
         assert_eq!(config.min_column_width_px, 400);
-        assert_eq!(config.padding.window, 8);
+        assert_eq!(config.padding.window_gap, 8);
         assert_eq!(config.padding.up, 10);
         assert_eq!(config.padding.down, 40);
         assert!(!config.animation.enabled);
@@ -755,9 +757,10 @@ strategy = "original_slot"
         let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm.toml");
         let config = load_app_config(&path);
         assert_eq!(config.super_key, "VK_F24");
-        assert_eq!(config.column_width, 960);
+        assert_eq!(config.columns_per_screen, 4);
+        assert_eq!(config.column_width, None);
         assert_eq!(config.min_column_width_px, 320);
-        assert_eq!(config.padding.window, 4);
+        assert_eq!(config.padding.window_gap, 4);
     }
 
     /// Negative: malformed TOML returns default config (not panic).
@@ -768,7 +771,7 @@ strategy = "original_slot"
 
         let config = load_app_config(f.path());
         assert_eq!(config.super_key, "VK_F24");
-        assert_eq!(config.column_width, 960);
+        assert_eq!(config.column_width, None);
     }
 
     /// Negative: empty TOML file returns default config (all serde defaults fill in).
@@ -779,8 +782,8 @@ strategy = "original_slot"
 
         let config = load_app_config(f.path());
         assert_eq!(config.super_key, "VK_F24");
-        assert_eq!(config.column_width, 960);
-        assert_eq!(config.padding.window, 4);
+        assert_eq!(config.column_width, None);
+        assert_eq!(config.padding.window_gap, 4);
     }
 
     // ── init_config_dir tests ──────────────────────────────────────────
@@ -887,7 +890,7 @@ strategy = "original_slot"
         let dir = tmp.path();
 
         // Write an stm.toml with invalid values (negative padding).
-        let mut toml = FULL_SHIPPED_TOML.replace("window = 2", "window = -1");
+        let mut toml = FULL_SHIPPED_TOML.replace("window_gap = 2", "window_gap = -1");
         // Also replace the header newline from the constant.
         toml = toml.trim_start().to_string();
         std::fs::write(dir.join("stm.toml"), &toml).unwrap();
@@ -899,7 +902,7 @@ strategy = "original_slot"
         );
         let err_msg = result.unwrap_err();
         assert!(
-            err_msg.contains("padding.window"),
+            err_msg.contains("padding.window_gap"),
             "error should mention the invalid field: {err_msg}"
         );
     }
@@ -1152,7 +1155,10 @@ initial_width_eighths = 4
 
         // Spot-check: file should have all top-level sections.
         assert!(!config.super_key.is_empty(), "super_key should be set");
-        assert!(config.column_width > 0, "column_width should be positive");
+        assert!(
+            config.columns_per_screen > 0,
+            "columns_per_screen should be positive"
+        );
         assert!(
             config.min_column_width_px > 0,
             "min_column_width_px should be positive"
@@ -1168,9 +1174,10 @@ initial_width_eighths = 4
     /// Positive: TOML-level merge — user overrides win, shipped defaults fill gaps.
     ///
     /// User's TOML has only `column_width = 800`. The shipped TOML has
-    /// `column_width = 1280`, `padding.window = 2`, etc. After merge:
-    /// - `column_width` = 800 (user wins)
-    /// - `padding.window` = 2 (shipped default, user didn't specify)
+    /// `columns_per_screen = 4`, `padding.window_gap = 2`, etc. After merge:
+    /// - `column_width` = Some(800) (user wins, explicit override)
+    /// - `columns_per_screen` = 4 (shipped default, user didn't specify)
+    /// - `padding.window_gap` = 2 (shipped default, user didn't specify)
     /// - `padding.up` = 2 (shipped default)
     /// - `animation.duration_ms` = 240 (shipped default)
     #[test]
@@ -1183,11 +1190,11 @@ initial_width_eighths = 4
             &shipped_path,
             r#"
 super_key = "VK_F24"
-column_width = 1280
+columns_per_screen = 4
 min_column_width_px = 640
 
 [padding]
-window = 2
+window_gap = 2
 up = 2
 down = 2
 
@@ -1230,13 +1237,18 @@ strategy = "original_slot"
             toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
 
         // User override wins.
-        assert_eq!(config.column_width, 800, "user column_width should win");
+        assert_eq!(
+            config.column_width,
+            Some(800),
+            "user column_width should win"
+        );
         // Shipped defaults fill in the rest.
+        assert_eq!(config.columns_per_screen, 4, "shipped columns_per_screen");
         assert_eq!(
             config.min_column_width_px, 640,
             "shipped min_column_width_px"
         );
-        assert_eq!(config.padding.window, 2, "shipped padding.window");
+        assert_eq!(config.padding.window_gap, 2, "shipped padding.window_gap");
         assert_eq!(config.padding.up, 2, "shipped padding.up");
         assert_eq!(config.padding.down, 2, "shipped padding.down");
         assert_eq!(
@@ -1266,12 +1278,13 @@ strategy = "original_slot"
         let config: StmConfig =
             toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
 
-        assert_eq!(config.column_width, 1280, "shipped column_width");
+        assert_eq!(config.column_width, None, "shipped has no column_width");
+        assert_eq!(config.columns_per_screen, 4, "shipped columns_per_screen");
         assert_eq!(
             config.min_column_width_px, 640,
             "shipped min_column_width_px"
         );
-        assert_eq!(config.padding.window, 2, "shipped padding.window");
+        assert_eq!(config.padding.window_gap, 2, "shipped padding.window_gap");
         assert_eq!(config.padding.up, 2, "shipped padding.up");
         assert_eq!(config.padding.down, 2, "shipped padding.down");
     }
@@ -1288,7 +1301,7 @@ strategy = "original_slot"
         let shipped_path = tmp.path().join("default-config.toml");
         std::fs::write(&shipped_path, FULL_SHIPPED_TOML).unwrap();
 
-        // User explicitly writes column_width = 960 (the Rust default).
+        // User explicitly writes column_width = 960 (the old Rust default).
         let user_path = tmp.path().join("stm.toml");
         std::fs::write(&user_path, "column_width = 960\n").unwrap();
 
@@ -1302,14 +1315,15 @@ strategy = "original_slot"
         // User's explicit 960 wins — this is the key improvement over the
         // comparison approach where 960 == Rust default → shipped default won.
         assert_eq!(
-            config.column_width, 960,
-            "user's explicit value should win, even if it equals the Rust default"
+            config.column_width,
+            Some(960),
+            "user's explicit value should win, even if it equals the old Rust default"
         );
     }
 
     /// Positive: TOML-level merge handles nested tables correctly.
     ///
-    /// User overrides `padding.window` but not `padding.up/down`.
+    /// User overrides `padding.window_gap` but not `padding.up/down`.
     /// The merge should recurse into the `[padding]` table.
     #[test]
     fn merged_config_nested_table_partial_override() {
@@ -1318,14 +1332,14 @@ strategy = "original_slot"
         // Shipped defaults with distinct padding values.
         let shipped_path = tmp.path().join("default-config.toml");
         let shipped_toml = FULL_SHIPPED_TOML
-            .replace("window = 2", "window = 2")
+            .replace("window_gap = 2", "window_gap = 2")
             .replace("up = 2", "up = 5")
             .replace("down = 2", "down = 10");
         std::fs::write(&shipped_path, shipped_toml).unwrap();
 
-        // User overrides only padding.window.
+        // User overrides only padding.window_gap.
         let user_path = tmp.path().join("stm.toml");
-        std::fs::write(&user_path, "[padding]\nwindow = 20\n").unwrap();
+        std::fs::write(&user_path, "[padding]\nwindow_gap = 20\n").unwrap();
 
         let mut base = load_toml_file_as_value(&shipped_path).unwrap();
         let overlay = load_toml_file_as_value(&user_path).unwrap();
@@ -1334,7 +1348,7 @@ strategy = "original_slot"
         let config: StmConfig =
             toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
 
-        assert_eq!(config.padding.window, 20, "user override wins");
+        assert_eq!(config.padding.window_gap, 20, "user override wins");
         assert_eq!(config.padding.up, 5, "shipped default preserved");
         assert_eq!(config.padding.down, 10, "shipped default preserved");
     }
@@ -1374,7 +1388,7 @@ strategy = "original_slot"
         // serde ignores unknown fields by default — deserialization succeeds.
         let config: StmConfig =
             toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
-        assert_eq!(config.column_width, 1280);
+        assert_eq!(config.column_width, None);
     }
 
     /// Positive: load_merged_app_config with no user file returns shipped defaults.
@@ -1398,8 +1412,8 @@ strategy = "original_slot"
         let config: StmConfig =
             toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
 
-        assert_eq!(config.column_width, 1280);
-        assert_eq!(config.padding.window, 2);
+        assert_eq!(config.column_width, None);
+        assert_eq!(config.padding.window_gap, 2);
     }
 
     /// Positive: TOML-level merge — full user file completely overrides shipped.
@@ -1414,11 +1428,12 @@ strategy = "original_slot"
         let user_path = tmp.path().join("stm.toml");
         std::fs::write(
             &user_path,
-            r#"column_width = 1600
+            r#"columns_per_screen = 2
+column_width = 1600
 min_column_width_px = 800
 
 [padding]
-window = 10
+window_gap = 10
 up = 20
 down = 30
 "#,
@@ -1432,9 +1447,10 @@ down = 30
         let config: StmConfig =
             toml::from_str::<StmConfig>(&toml::to_string(&base).unwrap()).unwrap();
 
-        assert_eq!(config.column_width, 1600, "user override");
+        assert_eq!(config.columns_per_screen, 2, "user override");
+        assert_eq!(config.column_width, Some(1600), "user override");
         assert_eq!(config.min_column_width_px, 800, "user override");
-        assert_eq!(config.padding.window, 10, "user override");
+        assert_eq!(config.padding.window_gap, 10, "user override");
         assert_eq!(config.padding.up, 20, "user override");
         assert_eq!(config.padding.down, 30, "user override");
     }

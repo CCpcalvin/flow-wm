@@ -25,8 +25,8 @@
 //! # Container Model
 //!
 //! Columns are **packed** with no inter-column gap. Visual spacing
-//! between adjacent windows comes entirely from `padding.window`
-//! (each window is inset by `padding.window` on all sides within its cell).
+//! between adjacent windows comes entirely from `padding.window_gap`
+//! (each window is inset by `padding.window_gap` on all sides within its cell).
 //!
 //! ```text
 //! [Col 1] [Col 2] [Col 3] | viewport | [Col n] [Col n+1] ...
@@ -127,7 +127,7 @@ pub fn project(
 /// Project a visible column's rows into actual entries.
 ///
 /// Rows are packed (no inter-row gap). Each window is inset by
-/// `padding.window` within its allocated row cell. The resulting
+/// `padding.window_gap` within its allocated row cell. The resulting
 /// [`ActualEntry::rect`](crate::layout::ActualEntry::rect) is the final HWND rect.
 fn project_column_rows(
     column: &Column,
@@ -152,10 +152,10 @@ fn project_column_rows(
         entries.push(ActualEntry {
             window_id: *window_id,
             rect: Rect {
-                x: col_x + padding.window,
-                y: y + padding.window,
-                width: (col_width - 2 * padding.window).max(0),
-                height: (row_height - 2 * padding.window).max(0),
+                x: col_x + padding.window_gap,
+                y: y + padding.window_gap,
+                width: (col_width - 2 * padding.window_gap).max(0),
+                height: (row_height - 2 * padding.window_gap).max(0),
             },
         });
 
@@ -195,10 +195,10 @@ fn park_column_rows(
         entries.push(ActualEntry {
             window_id: *window_id,
             rect: Rect {
-                x: park_x + padding.window,
-                y: y + padding.window,
-                width: (col_width - 2 * padding.window).max(0),
-                height: (height - 2 * padding.window).max(0),
+                x: park_x + padding.window_gap,
+                y: y + padding.window_gap,
+                width: (col_width - 2 * padding.window_gap).max(0),
+                height: (height - 2 * padding.window_gap).max(0),
             },
         });
 
@@ -265,7 +265,7 @@ mod tests {
 
     fn test_padding() -> Padding {
         Padding {
-            window: 4,
+            window_gap: 4,
             up: 0,
             down: 0,
         }
@@ -300,8 +300,8 @@ mod tests {
 
         let col_width = 960; // column_width for 4/8
         // First column at x=0
-        assert_eq!(actual.entries[0].rect.x, 4); // padding.window
-        assert_eq!(actual.entries[0].rect.width, col_width - 8); // 2 * padding.window
+        assert_eq!(actual.entries[0].rect.x, 4); // padding.window_gap
+        assert_eq!(actual.entries[0].rect.width, col_width - 8); // 2 * padding.window_gap
         // Second column packed at x=960
         assert_eq!(actual.entries[1].rect.x, col_width + 4);
         assert_eq!(actual.entries[1].rect.width, col_width - 8);
@@ -332,7 +332,7 @@ mod tests {
         );
         let actual = project(&layout, &monitor, TEST_COLUMN_WIDTH, &padding);
 
-        // First column parked at: monitor_left - col_width + padding = -960 + 4 = -956
+        // First column parked at: monitor_left - col_width + padding.window_gap = -960 + 4 = -956
         assert_eq!(actual.entries[0].rect.x, -960 + 4);
         // Second column visible on screen
         assert!(actual.entries[1].rect.x >= 0);
@@ -354,7 +354,7 @@ mod tests {
         );
         let actual = project(&layout, &monitor, TEST_COLUMN_WIDTH, &padding);
 
-        // Third column parked at: monitor_right + padding = 1920 + 4
+        // Third column parked at: monitor_right + padding.window_gap = 1920 + 4
         assert_eq!(actual.entries[2].rect.x, 1920 + 4);
     }
 
@@ -391,8 +391,8 @@ mod tests {
         assert_eq!(actual.entries.len(), 3);
 
         // Column 1: 1/8 * 960/4 = 1 * 240 = 240px
-        assert_eq!(actual.entries[0].rect.x, 4); // padding.window
-        assert_eq!(actual.entries[0].rect.width, 240 - 8); // 2*padding.window
+        assert_eq!(actual.entries[0].rect.x, 4); // padding.window_gap
+        assert_eq!(actual.entries[0].rect.width, 240 - 8); // 2*padding.window_gap
 
         // Column 2: 3/8 * 960/4 = 3 * 240 = 720px, packed at x=240
         assert_eq!(actual.entries[1].rect.x, 240 + 4);
@@ -407,7 +407,7 @@ mod tests {
     fn project_visible_tiles_cover_full_monitor_width() {
         // Positive: with 0 padding, visible tiles sum to exactly monitor width
         let zero_padding = Padding {
-            window: 0,
+            window_gap: 0,
             up: 0,
             down: 0,
         };
@@ -439,7 +439,7 @@ mod tests {
         );
         let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
 
-        // Col 0 (canvas 0–960): parked left at -960 + 4 (padding)
+        // Col 0 (canvas 0–960): parked left at -960 + 4 (padding.window_gap)
         assert_eq!(actual.entries[0].rect.x, -960 + 4);
         // Col 1 (canvas 960–1920): 1920 <= 1920 → off-screen left
         assert_eq!(actual.entries[1].rect.x, -960 + 4);
@@ -450,7 +450,7 @@ mod tests {
         // Col 3 (canvas 2880–3840): visible (2880 < 3840)
         assert!(actual.entries[3].rect.x >= 0, "col 3 should be visible");
 
-        // Col 4 (canvas 3840–4800): 3840 >= 3840 → parked right at 1920 + 4
+        // Col 4 (canvas 3840–4800): 3840 >= 3840 → parked right at 1920 + padding.window_gap
         assert_eq!(actual.entries[4].rect.x, 1920 + 4);
     }
 
@@ -492,7 +492,7 @@ mod tests {
 
         // First column: canvas_x=0, visible since 960 > 500
         // screen_x = 0 + (0 - 500) = -500
-        assert_eq!(actual.entries[0].rect.x, -500 + 4); // + padding.window
+        assert_eq!(actual.entries[0].rect.x, -500 + 4); // + padding.window_gap
 
         // Second column: canvas_x=960, screen_x = 0 + (960 - 500) = 460
         assert_eq!(actual.entries[1].rect.x, 460 + 4);
@@ -523,7 +523,7 @@ mod tests {
         let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
 
         assert_eq!(actual.entries.len(), 1);
-        assert_eq!(actual.entries[0].rect.width, 240 - 8); // 2*padding.window = 232
+        assert_eq!(actual.entries[0].rect.width, 240 - 8); // 2*padding.window_gap = 232
     }
 
     #[test]
@@ -573,7 +573,7 @@ mod tests {
     fn project_with_up_and_down_padding() {
         // Positive: up/down padding creates screen-level margins
         let padding = Padding {
-            window: 4,
+            window_gap: 4,
             up: 10,
             down: 40,
         };

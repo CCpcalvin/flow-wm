@@ -19,21 +19,26 @@
 # VK_F24 is F24 — an uncommon key that avoids conflicts with system shortcuts.
 super_key = "VK_F24"
 
-# Default column width in pixels.
-column_width = 1280
+# Number of columns that fit side-by-side on one monitor screen.
+# The actual pixel width of each column is computed at runtime from this value,
+# the monitor resolution, and window_gap — so the layout always fills the screen.
+#
+# Power users can override the auto-computed width by setting column_width explicitly:
+#   column_width = 1280       # (optional) fixed pixel width, ignores columns_per_screen
+columns_per_screen = 4
 
 # Minimum column width in pixels. Columns cannot be resized below this.
 min_column_width_px = 640
 
-# Padding settings in pixels.
+# Padding / spacing settings in pixels.
 #
-# - window: inset around each window within its container cell (visual gap)
-# - up: top screen margin so windows don't touch the top edge
-# - down: bottom screen margin (e.g., for taskbar clearance)
+# - window_gap: uniform gap between all elements (windows and screen edges)
+# - up: reserved space above the tiling area
+# - down: reserved space below the tiling area (e.g., for taskbar clearance)
 [padding]
-window = 2
-up = 2
-down = 2
+window_gap = 4
+up = 4
+down = 4
 
 # Hotkey bindings (13 total).
 # Uses Vim-style Super+H/J/K/L for focus navigation.

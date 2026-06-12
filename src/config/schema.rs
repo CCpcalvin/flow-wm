@@ -108,7 +108,10 @@ mod tests {
         let obj = padding_props
             .as_object()
             .expect("padding properties is object");
-        assert!(obj.contains_key("window"), "padding missing 'window'");
+        assert!(
+            obj.contains_key("window_gap"),
+            "padding missing 'window_gap'"
+        );
         assert!(obj.contains_key("up"), "padding missing 'up'");
         assert!(obj.contains_key("down"), "padding missing 'down'");
     }

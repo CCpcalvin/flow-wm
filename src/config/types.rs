@@ -56,15 +56,25 @@ use serde::{Deserialize, Serialize};
 /// animation, etc. Window classification rules live in a separate file
 /// ([`WindowRulesConfig`]) to allow independent editing.
 ///
+/// # Column Sizing
+///
+/// The primary column sizing mode is [`columns_per_screen`](StmConfig::columns_per_screen):
+/// the user specifies how many columns fit on one monitor, and the daemon computes
+/// the actual pixel width at runtime from the monitor resolution and [`window_gap`](Padding::window_gap).
+///
+/// Power users can override this by setting [`column_width`](StmConfig::column_width)
+/// to a fixed pixel value. When `column_width` is `Some`, it takes priority over
+/// `columns_per_screen` — the auto-computation is skipped entirely.
+///
 /// # Example
 ///
 /// ```toml
 /// super_key = "VK_F24"
-/// column_width = 960
+/// columns_per_screen = 4
 /// min_column_width_px = 320
 ///
 /// [padding]
-/// window = 4
+/// window_gap = 4
 /// up = 0
 /// down = 0
 ///
@@ -84,8 +94,25 @@ pub struct StmConfig {
     /// The virtual key code treated as the Super/modifier key.
     pub super_key: String,
 
-    /// Default column width in pixels.
-    pub column_width: u32,
+    /// Number of columns that fit side-by-side on one monitor screen.
+    ///
+    /// The daemon computes the actual pixel width at startup:
+    /// `base_content_width = (monitor_width - (N+1) * window_gap) / N`
+    /// where `N = columns_per_screen`.
+    ///
+    /// If [`column_width`](StmConfig::column_width) is also set, that value
+    /// takes priority and this field is ignored.
+    pub columns_per_screen: u32,
+
+    /// Fixed column width in pixels — power-user override.
+    ///
+    /// When `Some`, this overrides the auto-computation from [`columns_per_screen`](StmConfig::columns_per_screen).
+    /// When `None`, the daemon computes the width from the monitor resolution, `columns_per_screen`,
+    /// and `window_gap`.
+    ///
+    /// This field is **optional** in TOML — most users should rely on `columns_per_screen`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_width: Option<u32>,
 
     /// Minimum column width in pixels. Columns cannot be resized below this.
     pub min_column_width_px: u32,
@@ -111,9 +138,9 @@ fn default_window_action() -> WindowAction {
     WindowAction::Tile
 }
 
-/// Default column width in pixels.
-const fn default_column_width() -> u32 {
-    960
+/// Default number of columns per screen.
+const fn default_columns_per_screen() -> u32 {
+    4
 }
 
 /// Default minimum column width in pixels.
@@ -125,7 +152,8 @@ impl Default for StmConfig {
     fn default() -> Self {
         Self {
             super_key: default_super_key(),
-            column_width: default_column_width(),
+            columns_per_screen: default_columns_per_screen(),
+            column_width: None,
             min_column_width_px: default_min_column_width_px(),
             padding: Padding::default(),
             hotkeys: Hotkeys::default(),
@@ -135,47 +163,60 @@ impl Default for StmConfig {
     }
 }
 
-/// Padding configuration in pixels.
+/// Gap and margin configuration in pixels.
 ///
-/// Padding is applied during the projection step (see [`projection`](crate::layout::projection)),
+/// Gap is applied during the projection step (see [`projection`](crate::layout::projection)),
 /// not stored inside window structs. This means [`ActualEntry`](crate::layout::ActualEntry) rects
 /// are the **final HWND rects** — they can be passed directly to `SetWindowPos`.
 ///
-/// - `window`: inset around each window within its container cell (visual gap)
-/// - `up`: top screen margin so windows don't touch the top edge
-/// - `down`: bottom screen margin (e.g., for taskbar clearance)
+/// # Uniform Gap Model
+///
+/// `window_gap` creates **uniform spacing** everywhere:
+///
+/// ```text
+/// Edge | window_gap | [Window 1] | window_gap | [Window 2] | window_gap | Edge
+/// ```
+///
+/// - `window_gap`: uniform gap between all elements (windows, screen edges)
+/// - `up`: top screen margin (reserved space above tiling area)
+/// - `down`: bottom screen margin (reserved space below tiling area, e.g., taskbar)
+///
+/// The slot-based canvas model ensures that expanding a column consumes the
+/// inter-column gap so the layout always fills the screen.
 ///
 /// ```text
 /// ┌─────────────────── monitor work area ────────────────────┐
 /// │ ↑ padding.up                                             │
-/// │ ┌──────── column cell ────────┐ ┌── next column cell ──┐ │
-/// │ │ ↑ padding.window            │ │                      │ │
-/// │ │ ┌──── window (HWND) ────┐   │ │                      │ │
-/// │ │ │                       │   │ │                      │ │
-/// │ │ └───────────────────────┘   │ │                      │ │
-/// │ │ ↓ padding.window            │ │                      │ │
-/// │ └─────────────────────────────┘ └──────────────────────┘ │
+/// │ ↑ window_gap                                             │
+/// │ ┌──── window (HWND) ────┐   ┌──── window (HWND) ────┐   │
+/// │ │                       │   │                       │   │
+/// │ └───────────────────────┘   └───────────────────────┘   │
+/// │ ↓ window_gap                                             │
 /// │ ↓ padding.down                                           │
 /// └──────────────────────────────────────────────────────────┘
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Padding {
-    /// Inset around each window within its container cell (visual gap).
-    pub window: i32,
-    /// Top screen margin so windows don't touch the top edge.
+    /// Uniform gap between all elements (windows and screen edges), in pixels.
+    ///
+    /// This single value controls horizontal (inter-column), vertical (inter-row),
+    /// and edge-to-window spacing. Setting `window_gap = 4` means every gap
+    /// everywhere is 4 pixels.
+    pub window_gap: i32,
+    /// Top screen margin — reserved space above the tiling area.
     pub up: i32,
-    /// Bottom screen margin (e.g., for taskbar clearance).
+    /// Bottom screen margin — reserved space below the tiling area (e.g., taskbar).
     pub down: i32,
 }
 
-fn default_window_padding() -> i32 {
+fn default_window_gap() -> i32 {
     4
 }
 
 impl Default for Padding {
     fn default() -> Self {
         Self {
-            window: default_window_padding(),
+            window_gap: default_window_gap(),
             up: 0,
             down: 0,
         }
@@ -187,10 +228,10 @@ impl Padding {
     ///
     /// Returns `Err` with a descriptive message for the first invalid field.
     pub fn validate(&self) -> Result<(), String> {
-        if self.window < 0 {
+        if self.window_gap < 0 {
             return Err(format!(
-                "padding.window must be non-negative, got {}",
-                self.window
+                "padding.window_gap must be non-negative, got {}",
+                self.window_gap
             ));
         }
         if self.up < 0 {
@@ -212,15 +253,24 @@ impl StmConfig {
     /// Call this after deserializing a config file to catch
     /// semantically invalid values like negative padding or
     /// min_column_width_px exceeding column_width.
+    ///
+    /// When `column_width` is `None`, the comparison against
+    /// `min_column_width_px` is deferred to runtime (after the
+    /// daemon computes the actual width from `columns_per_screen`).
     pub fn validate(&self) -> Result<(), String> {
         self.padding.validate()?;
+        if self.columns_per_screen == 0 {
+            return Err("columns_per_screen must be at least 1, got 0".into());
+        }
         if self.min_column_width_px == 0 {
             return Err("min_column_width_px must be positive, got 0".into());
         }
-        if self.min_column_width_px > self.column_width {
+        if let Some(cw) = self.column_width
+            && self.min_column_width_px > cw
+        {
             return Err(format!(
                 "min_column_width_px ({}) must not exceed column_width ({})",
-                self.min_column_width_px, self.column_width
+                self.min_column_width_px, cw
             ));
         }
         Ok(())
@@ -511,9 +561,10 @@ mod tests {
         let toml_str = toml::to_string(&config).expect("serialize");
         let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.super_key, "VK_F24");
-        assert_eq!(parsed.column_width, 960);
+        assert_eq!(parsed.columns_per_screen, 4);
+        assert_eq!(parsed.column_width, None);
         assert_eq!(parsed.min_column_width_px, 320);
-        assert_eq!(parsed.padding.window, 4);
+        assert_eq!(parsed.padding.window_gap, 4);
         assert_eq!(parsed.padding.up, 0);
         assert_eq!(parsed.padding.down, 0);
         assert_eq!(parsed.animation.duration_ms, 180);
@@ -525,11 +576,12 @@ mod tests {
         // Full TOML required since there are no serde defaults.
         let toml_str = r#"
 super_key = "VK_LWIN"
+columns_per_screen = 3
 column_width = 1200
 min_column_width_px = 400
 
 [padding]
-window = 8
+window_gap = 8
 up = 10
 down = 40
 
@@ -558,8 +610,9 @@ strategy = "original_slot"
 "#;
         let config: StmConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.super_key, "VK_LWIN");
-        assert_eq!(config.column_width, 1200);
-        assert_eq!(config.padding.window, 8);
+        assert_eq!(config.columns_per_screen, 3);
+        assert_eq!(config.column_width, Some(1200));
+        assert_eq!(config.padding.window_gap, 8);
         assert_eq!(config.padding.up, 10);
         assert_eq!(config.padding.down, 40);
         assert!(!config.animation.enabled);
@@ -587,7 +640,7 @@ strategy = "original_slot"
     /// Negative: partial TOML (missing fields) should fail to parse.
     #[test]
     fn config_from_partial_toml_is_rejected() {
-        let toml_str = "column_width = 960\n";
+        let toml_str = "columns_per_screen = 4\n";
         let result = toml::from_str::<StmConfig>(toml_str);
         assert!(
             result.is_err(),
@@ -602,10 +655,11 @@ strategy = "original_slot"
         // Positive: every field survives TOML → StmConfig → TOML
         let config = StmConfig {
             super_key: "VK_LWIN".into(),
-            column_width: 1200,
+            columns_per_screen: 3,
+            column_width: Some(1200),
             min_column_width_px: 400,
             padding: Padding {
-                window: 6,
+                window_gap: 6,
                 up: 10,
                 down: 40,
             },
@@ -638,9 +692,10 @@ strategy = "original_slot"
         let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize all fields");
 
         assert_eq!(parsed.super_key, "VK_LWIN");
-        assert_eq!(parsed.column_width, 1200);
+        assert_eq!(parsed.columns_per_screen, 3);
+        assert_eq!(parsed.column_width, Some(1200));
         assert_eq!(parsed.min_column_width_px, 400);
-        assert_eq!(parsed.padding.window, 6);
+        assert_eq!(parsed.padding.window_gap, 6);
         assert_eq!(parsed.padding.up, 10);
         assert_eq!(parsed.padding.down, 40);
         assert_eq!(parsed.hotkeys.focus_left, "Alt+H");
@@ -657,9 +712,14 @@ strategy = "original_slot"
     #[test]
     fn config_validate_rejects_negative_window_padding() {
         let mut config = StmConfig::default();
-        config.padding.window = -1;
+        config.padding.window_gap = -1;
         assert!(config.validate().is_err());
-        assert!(config.validate().unwrap_err().contains("padding.window"));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("padding.window_gap")
+        );
     }
 
     #[test]
@@ -681,7 +741,7 @@ strategy = "original_slot"
     #[test]
     fn config_validate_accepts_zero_padding() {
         let mut config = StmConfig::default();
-        config.padding.window = 0;
+        config.padding.window_gap = 0;
         config.padding.up = 0;
         config.padding.down = 0;
         assert!(config.validate().is_ok());
@@ -709,7 +769,7 @@ strategy = "original_slot"
     fn config_validate_rejects_min_exceeding_column_width() {
         let mut config = StmConfig::default();
         config.min_column_width_px = 1000;
-        config.column_width = 960;
+        config.column_width = Some(960);
         assert!(config.validate().is_err());
         assert!(
             config
@@ -723,7 +783,29 @@ strategy = "original_slot"
     fn config_validate_accepts_min_equal_to_column_width() {
         let mut config = StmConfig::default();
         config.min_column_width_px = 960;
-        config.column_width = 960;
+        config.column_width = Some(960);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_columns_per_screen() {
+        let mut config = StmConfig::default();
+        config.columns_per_screen = 0;
+        assert!(config.validate().is_err());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("columns_per_screen")
+        );
+    }
+
+    #[test]
+    fn config_validate_accepts_column_width_none() {
+        // When column_width is None (auto-compute mode), min check is deferred.
+        let mut config = StmConfig::default();
+        config.column_width = None;
+        config.min_column_width_px = 9999;
         assert!(config.validate().is_ok());
     }
 

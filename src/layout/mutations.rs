@@ -712,7 +712,7 @@ pub fn toggle_monocle(
 ///     default_column_width_eighths: 4,
 ///     min_column_eighths: 2,
 ///     max_column_eighths: 8,
-///     padding: Padding { window: 4, up: 0, down: 0 },
+///     padding: Padding { window_gap: 4, up: 0, down: 0 },
 /// };
 /// let layout = initialize_windows(
 ///     &[WindowId(1), WindowId(2), WindowId(3)],
@@ -853,7 +853,7 @@ mod tests {
             // (1920 * 4) / 960 = 8 eighths
             max_column_eighths: 8,
             padding: Padding {
-                window: 4,
+                window_gap: 4,
                 up: 0,
                 down: 0,
             },

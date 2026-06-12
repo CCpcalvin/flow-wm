@@ -88,7 +88,12 @@ use crate::registry::{HookEvent, WindowRegistry, hooks, win32 as registry_win32}
 /// [`StmConfig`]. Used during construction to keep the parameter list
 /// readable and avoid recomputing values.
 struct LayoutConfig {
-    /// Default column width in pixels (from `StmConfig::column_width`).
+    /// Default column width in pixels.
+    ///
+    /// When `StmConfig::column_width` is `Some`, this is that value directly.
+    /// When `None`, this is computed from `columns_per_screen`, the monitor width,
+    /// and `window_gap`:
+    /// `base_content_width = (monitor_width - (N+1) * window_gap) / N`
     column_width: u32,
     /// Default column width in eighths of the monitor (computed as 4 for
     /// a 960px column on a 1920px monitor).
@@ -127,8 +132,20 @@ pub struct ScrollTilingManager {
     /// IPC named pipe server — accepts commands from the `stm` CLI.
     server: PipeServer,
 
-    /// Application configuration loaded from `stm.yml`.
+    /// Application configuration loaded from `stm.toml`.
+    ///
+    /// Stored for future config hot-reload support. Currently, only
+    /// [`resolved_column_width`](Self::resolved_column_width) is read at runtime.
+    #[allow(dead_code)] // Stored for future config reload functionality.
     config: StmConfig,
+
+    /// Resolved column width in pixels — concrete value used by the layout engine.
+    ///
+    /// When `config.column_width` is `Some(v)`, this equals `v`. When `None`,
+    /// this is computed from `config.columns_per_screen`, monitor width, and
+    /// `config.padding.window_gap`. Stored separately so IPC handlers don't
+    /// need to recompute or hold a monitor reference.
+    resolved_column_width: u32,
 
     /// Path to the configuration directory (for future reload support).
     #[allow(dead_code)] // Stored for future config reload functionality.
@@ -196,10 +213,11 @@ impl ScrollTilingManager {
         desktop_name: Option<String>,
     ) -> Result<Self, String> {
         log::debug!(
-            "effective config: column_width={}, min_column_width_px={}, padding.window={}, padding.up={}, padding.down={}, animation.duration_ms={}",
+            "effective config: columns_per_screen={}, column_width={:?}, min_column_width_px={}, padding.window_gap={}, padding.up={}, padding.down={}, animation.duration_ms={}",
+            app_config.columns_per_screen,
             app_config.column_width,
             app_config.min_column_width_px,
-            app_config.padding.window,
+            app_config.padding.window_gap,
             app_config.padding.up,
             app_config.padding.down,
             app_config.animation.duration_ms,
@@ -300,6 +318,7 @@ impl ScrollTilingManager {
             floating: FloatingManager::new(),
             server,
             config: app_config,
+            resolved_column_width: layout_config.column_width,
             config_dir,
             hook_receiver,
             _hook_handle,
@@ -729,14 +748,14 @@ impl ScrollTilingManager {
     /// Dispatch an explicit column width setting.
     ///
     /// Converts the `eighths` value (1–8) to pixel width based on
-    /// the configured `column_width` and passes it to the layout engine.
+    /// the resolved `column_width` and passes it to the layout engine.
     fn dispatch_set_column_width(&mut self, eighths: u8) -> SocketResponse {
         if !(1..=8).contains(&eighths) {
             return SocketResponse::Error {
                 message: format!("eighths must be 1–8, got {eighths}"),
             };
         }
-        let target_px = self.config.column_width as i32 * eighths as i32 / 4;
+        let target_px = self.resolved_column_width as i32 * eighths as i32 / 4;
         match self.layout.set_column_width(target_px) {
             Some(diff) => {
                 self.animate_diff(&diff);
@@ -818,21 +837,55 @@ impl ScrollTilingManager {
 
     /// Derive layout engine parameters from [`StmConfig`].
     ///
-    /// Converts the user-facing config types (from `stm.yml`) into the
+    /// Converts the user-facing config types (from `stm.toml`) into the
     /// layout-engine-specific types needed by [`LayoutEngine::new`].
     ///
-    /// # Default Column Width Eighths
+    /// # Column Width Resolution
     ///
-    /// Computed as 4 (meaning the column occupies 4/8 = half the monitor width).
-    /// This matches the default `column_width` on a 1920px monitor regardless
-    /// of whether the shipped default (1280px) or an older default (960px) is used.
-    fn derive_layout_config(app_config: &StmConfig, _monitor: &MonitorInfo) -> LayoutConfig {
+    /// When `StmConfig::column_width` is `Some(v)`, that value is used directly
+    /// (power-user override). When `None`, the width is computed from
+    /// `columns_per_screen`:
+    ///
+    /// ```text
+    /// base_content_width = (monitor_width - (N+1) * window_gap) / N
+    /// ```
+    ///
+    /// where `N = columns_per_screen`. This ensures the layout fills the entire
+    /// screen with uniform gaps.
+    fn derive_layout_config(app_config: &StmConfig, monitor: &MonitorInfo) -> LayoutConfig {
+        let gap = app_config.padding.window_gap;
+        let column_width = match app_config.column_width {
+            Some(cw) => {
+                log::debug!(
+                    "column_width: using explicit override of {}px (ignoring columns_per_screen={})",
+                    cw,
+                    app_config.columns_per_screen,
+                );
+                cw
+            }
+            None => {
+                let monitor_width = monitor.work_area.width;
+                let n = app_config.columns_per_screen as i32;
+                // (N+1) gaps: one on each side plus N-1 between columns = N+1 total
+                let total_gap = (n + 1) * gap;
+                let computed = (monitor_width - total_gap) / n;
+                log::debug!(
+                    "column_width: auto-computed from columns_per_screen={}, monitor_width={}px, window_gap={}px → {}px",
+                    app_config.columns_per_screen,
+                    monitor_width,
+                    gap,
+                    computed,
+                );
+                computed as u32
+            }
+        };
+
         LayoutConfig {
-            column_width: app_config.column_width,
+            column_width,
             default_column_width_eighths: 4,
             min_column_width_px: app_config.min_column_width_px,
             padding: LayoutPadding {
-                window: app_config.padding.window,
+                window_gap: app_config.padding.window_gap,
                 up: app_config.padding.up,
                 down: app_config.padding.down,
             },
