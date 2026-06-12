@@ -128,6 +128,12 @@ mod hwnd_serde {
 ///   restored when it's un-minimized. This prevents the window from losing
 ///   its place in the layout.
 ///
+/// - **`tiled_rect`** — The window's current tiled position as computed by
+///   the layout engine's projection layer. Updated after every mutation.
+///   `None` if the window has never been positioned by the layout engine.
+///   This is distinct from `pre_manage_rect` (the position *before* stm
+///   managed the window) — `tiled_rect` is always the *current* position.
+///
 /// # Send Safety
 ///
 /// `Window` contains `HWND` (a raw pointer), but we treat it as an opaque
@@ -165,6 +171,14 @@ pub struct Window {
 
     /// Remembered virtual-slot position for minimize/restore cycles.
     pub last_virtual_slot: Option<VirtualSlot>,
+
+    /// Current tiled position computed by the layout engine's projection layer.
+    ///
+    /// Updated after every layout mutation. `None` if the window has never
+    /// been positioned by the layout engine (e.g., it was just classified).
+    /// This is the *live* position — distinct from `pre_manage_rect` which
+    /// is the snapshot from *before* stm managed the window.
+    pub tiled_rect: Option<Rect>,
 }
 
 // SAFETY: `Window` contains `HWND` (a raw pointer), but we treat it as an
@@ -203,6 +217,7 @@ impl Window {
             pre_manage_rect,
             last_natural_size,
             last_virtual_slot: None,
+            tiled_rect: None,
         }
     }
 }

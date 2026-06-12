@@ -307,15 +307,22 @@ pub(crate) fn ensure_column_visible(
 /// result during initialization — the user's most-recently-active window
 /// appears front-and-center rather than potentially hugging the left edge.
 ///
+/// # Small-canvas handling
+///
+/// When the total canvas width is **less than or equal to** the monitor width,
+/// *all* columns fit on screen at once. In this case the entire canvas is
+/// centered on the monitor — `viewport_offset` becomes negative so the canvas
+/// is shifted rightward into the middle of the viewport. The projection layer
+/// ([`super::projection::project`]) already handles negative offsets correctly.
+///
 /// # Algorithm
 ///
-/// 1. Walk columns left-to-right, accumulating `canvas_x` (virtual canvas
-///    pixel position) until reaching `col_idx`.
-/// 2. Convert the column's `width_eighths` to pixel width via
-///    [`column_eighths_to_pixels`].
-/// 3. Compute `col_center = canvas_x + col_px / 2`.
-/// 4. The ideal `viewport_offset = col_center - monitor_width / 2`.
-/// 5. Clamp to `>= 0` so the camera never scrolls past the left edge.
+/// 1. Compute total canvas width from all columns.
+/// 2. **If canvas ≤ monitor**: center the *entire canvas* with
+///    `viewport_offset = -(monitor_width - canvas_width) / 2`.
+/// 3. **If canvas > monitor**: walk columns left-to-right, find the target
+///    column's center, compute `viewport_offset = col_center - monitor_width/2`,
+///    clamped to `≥ 0`.
 ///
 /// # Panics
 ///
@@ -330,7 +337,7 @@ pub(crate) fn ensure_column_visible(
 /// # Returns
 ///
 /// A new [`VirtualLayout`] with `viewport_offset` adjusted to center the
-/// requested column.
+/// requested column (or the entire canvas, if it fits within the monitor).
 #[must_use]
 pub(crate) fn center_on_column(
     layout: &VirtualLayout,
@@ -344,13 +351,32 @@ pub(crate) fn center_on_column(
         layout.columns.len()
     );
 
+    let total_canvas: i32 = layout
+        .columns
+        .iter()
+        .map(|c| column_eighths_to_pixels(c.width_eighths, config.column_width))
+        .sum();
+
+    if total_canvas <= config.monitor_width {
+        // All columns fit on screen — center the *entire canvas* horizontally.
+        // A negative viewport_offset shifts the virtual canvas rightward
+        // relative to the monitor's left edge.
+        let viewport_offset = -(config.monitor_width - total_canvas) / 2;
+        return VirtualLayout {
+            viewport_offset,
+            ..layout.clone()
+        };
+    }
+
+    // Canvas exceeds monitor — center the requested column in the viewport.
+    // viewport_offset is always ≥ 0 here because col_center ≥ monitor_width/2
+    // when the canvas is wider than the monitor.
     let mut canvas_x: i32 = 0;
     for (i, col) in layout.columns.iter().enumerate() {
         let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         if i == col_idx {
             let col_center = canvas_x + col_px / 2;
-            let viewport_offset = col_center - config.monitor_width / 2;
-            let viewport_offset = viewport_offset.max(0);
+            let viewport_offset = (col_center - config.monitor_width / 2).max(0);
             return VirtualLayout {
                 viewport_offset,
                 ..layout.clone()
@@ -1715,13 +1741,14 @@ mod tests {
 
     #[test]
     fn center_on_column_single_column() {
-        // Positive: single column on 1920px monitor → clamped to 0.
-        // col_center = 0 + 960/2 = 480
-        // offset = 480 - 960 = -480 → clamped to 0
+        // Positive: single column (960px canvas) on 1920px monitor →
+        // entire canvas centered: offset = -(1920 - 960) / 2 = -480.
+        // This places the single column at screen_x = 0 + (0 - (-480)) = 480,
+        // centering it horizontally on the monitor.
         let layout = VirtualLayout::with_columns(vec![Column::new(4, WindowId(1))], 0);
         let config = test_config();
         let result = center_on_column(&layout, 0, &config);
-        assert_eq!(result.viewport_offset, 0);
+        assert_eq!(result.viewport_offset, -480);
     }
 
     #[test]

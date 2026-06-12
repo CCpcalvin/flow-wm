@@ -474,15 +474,33 @@ impl WindowRegistry {
     /// Serializes the registry state to a JSON value for the query API.
     ///
     /// Returns a JSON object with:
-    /// - `windows`: array of window state objects
+    /// - `windows`: array of window state objects, each containing:
+    ///   - Basic metadata (hwnd, exe, title, class, process_path)
+    ///   - `state`: lifecycle state with correct col/row indices
+    ///   - `tiled_rect`: current layout-engine position (or null if not tiled)
+    ///   - `pre_manage_rect`: position before stm touched the window
+    /// - `viewport_offset`: camera position on the virtual canvas
     /// - `focused`: the focused HWND value (or null)
     /// - `count`: number of tracked windows
+    ///
+    /// # Arguments
+    ///
+    /// * `viewport_offset` — The current camera position from the layout engine,
+    ///   included in the response for diagnostic purposes (e.g., debugging centering).
     #[must_use]
-    pub fn to_json_value(&self) -> serde_json::Value {
+    pub fn to_json_value(&self, viewport_offset: i32) -> serde_json::Value {
         let windows_json: Vec<serde_json::Value> = self
             .windows
             .values()
             .map(|w| {
+                let tiled_rect_json = w.tiled_rect.map(|r| {
+                    serde_json::json!({
+                        "x": r.x,
+                        "y": r.y,
+                        "width": r.width,
+                        "height": r.height,
+                    })
+                });
                 serde_json::json!({
                     "hwnd": w.hwnd.0 as isize,
                     "exe": w.exe,
@@ -490,7 +508,8 @@ impl WindowRegistry {
                     "class": w.class,
                     "process_path": w.process_path.to_string_lossy(),
                     "state": state_to_json(&w.state),
-                    "rect": serde_json::json!({
+                    "tiled_rect": tiled_rect_json,
+                    "pre_manage_rect": serde_json::json!({
                         "x": w.pre_manage_rect.x,
                         "y": w.pre_manage_rect.y,
                         "width": w.pre_manage_rect.width,
@@ -501,6 +520,7 @@ impl WindowRegistry {
             .collect();
 
         serde_json::json!({
+            "viewport_offset": viewport_offset,
             "windows": windows_json,
             "focused": self.focused,
             "count": self.windows.len(),
@@ -560,6 +580,58 @@ impl WindowRegistry {
             .collect();
         ids.sort_by_key(|(_, x)| *x);
         ids.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Synchronize tiling state from the layout engine's virtual layout.
+    ///
+    /// Walks all columns in the [`VirtualLayout`] and updates each window's
+    /// [`TilingState::Active { col, row }`](TilingState::Active) to reflect
+    /// its current position in the layout grid. This must be called after
+    /// every layout mutation to keep registry state in sync with the engine.
+    ///
+    /// # Arguments
+    ///
+    /// * `virtual_layout` — The current virtual layout from the layout engine.
+    ///
+    /// # Design Decision
+    ///
+    /// Rather than giving the layout engine direct access to the registry,
+    /// this method provides a *pull-based* sync: the orchestrator calls it
+    /// after each mutation, passing the new layout. This keeps the layout
+    /// engine pure (no Win32, no registry dependency) while ensuring the
+    /// registry always has up-to-date position data for queries.
+    pub fn update_tiling_slots_from_layout(
+        &mut self,
+        virtual_layout: &crate::layout::types::VirtualLayout,
+    ) {
+        for (col_idx, column) in virtual_layout.columns.iter().enumerate() {
+            for (row_idx, window_id) in column.rows.iter().enumerate() {
+                if let Some(window) = self.windows.get_mut(&window_id.0) {
+                    window.state = WindowState::Tiling(TilingState::Active {
+                        col: col_idx,
+                        row: row_idx,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Synchronize tiled rectangles from the layout engine's actual layout.
+    ///
+    /// Updates each tiling window's `tiled_rect` field with its current
+    /// screen position from the projected [`ActualLayout`]. This must be
+    /// called after every layout mutation so that queries return the live
+    /// tiled position rather than the stale `pre_manage_rect`.
+    ///
+    /// # Arguments
+    ///
+    /// * `actual_layout` — The current actual layout (projected screen coords).
+    pub fn update_tiled_rects(&mut self, actual_layout: &crate::layout::types::ActualLayout) {
+        for entry in &actual_layout.entries {
+            if let Some(window) = self.windows.get_mut(&entry.window_id.0) {
+                window.tiled_rect = Some(entry.rect);
+            }
+        }
     }
 
     /// Check if a window is in tiling state (before removal).
@@ -793,22 +865,24 @@ mod tests {
     fn to_json_value_empty_registry() {
         let (user, default) = default_rules();
         let reg = WindowRegistry::new(&user, &default);
-        let json = reg.to_json_value();
+        let json = reg.to_json_value(0);
 
         assert_eq!(json["count"], 0);
         assert!(json["windows"].as_array().unwrap().is_empty());
         assert!(json["focused"].is_null());
+        assert_eq!(json["viewport_offset"], 0);
     }
 
     #[test]
     fn to_json_value_has_correct_structure() {
         let (user, default) = default_rules();
         let reg = WindowRegistry::new(&user, &default);
-        let json = reg.to_json_value();
+        let json = reg.to_json_value(0);
 
         assert!(json.get("windows").is_some());
         assert!(json.get("focused").is_some());
         assert!(json.get("count").is_some());
+        assert!(json.get("viewport_offset").is_some());
     }
 
     #[test]

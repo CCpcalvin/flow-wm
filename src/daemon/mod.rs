@@ -277,6 +277,11 @@ impl ScrollTilingManager {
             // — animate_diff takes &mut self, but we don't have Self yet.
             log::debug!("init: submitting {} moves to animator", diff.moves.len());
             animate_diff_raw(&mut animator, diff);
+
+            // Sync registry tiling state from the initial layout so that
+            // queries return correct col/row and tiled_rect immediately.
+            registry.update_tiling_slots_from_layout(&diff.virtual_layout);
+            registry.update_tiled_rects(&diff.actual_layout);
         }
 
         // 9. Start hook thread.
@@ -553,11 +558,66 @@ impl ScrollTilingManager {
             SocketMessage::CloseWindow => unimplemented_command("close_window"),
 
             // --- Queries ---
-            SocketMessage::QueryWindowsAll => SocketResponse::Data {
-                payload: self.registry.to_json_value(),
-            },
-            SocketMessage::QueryLayoutVirtual => unimplemented_command("query_layout_virtual"),
-            SocketMessage::QueryLayoutActual => unimplemented_command("query_layout_actual"),
+            SocketMessage::QueryWindowsAll => {
+                let viewport_offset = self.layout.virtual_layout().viewport_offset;
+                SocketResponse::Data {
+                    payload: self.registry.to_json_value(viewport_offset),
+                }
+            }
+            SocketMessage::QueryLayoutVirtual => {
+                let vl = self.layout.virtual_layout();
+                let columns_json: Vec<serde_json::Value> = vl
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, col)| {
+                        let rows: Vec<serde_json::Value> = col
+                            .rows
+                            .iter()
+                            .map(|wid| serde_json::json!(wid.0))
+                            .collect();
+                        serde_json::json!({
+                            "index": i,
+                            "width_eighths": col.width_eighths,
+                            "rows": rows,
+                        })
+                    })
+                    .collect();
+                SocketResponse::Data {
+                    payload: serde_json::json!({
+                        "viewport_offset": vl.viewport_offset,
+                        "column_count": vl.columns.len(),
+                        "window_count": vl.window_count(),
+                        "columns": columns_json,
+                    }),
+                }
+            }
+            SocketMessage::QueryLayoutActual => {
+                let vl = self.layout.virtual_layout();
+                let al = self.layout.actual_layout();
+                let entries_json: Vec<serde_json::Value> = al
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "window_id": e.window_id.0,
+                            "rect": {
+                                "x": e.rect.x,
+                                "y": e.rect.y,
+                                "width": e.rect.width,
+                                "height": e.rect.height,
+                            },
+                        })
+                    })
+                    .collect();
+                SocketResponse::Data {
+                    payload: serde_json::json!({
+                        "viewport_offset": vl.viewport_offset,
+                        "entry_count": al.entries.len(),
+                        "entries": entries_json,
+                    }),
+                }
+            }
             SocketMessage::QueryState => unimplemented_command("query_state"),
 
             // --- Config mutation ---
@@ -716,10 +776,21 @@ impl ScrollTilingManager {
     /// | `Rect { x, y, width, height }` position | `IVec2::new(x, y)` |
     /// | `Rect { x, y, width, height }` size | `IVec2::new(width, height)` |
     ///
-    /// If the diff contains no moves, this is a no-op. Animation errors are
-    /// logged as warnings but not propagated — a jarring animation is better
-    /// than a crash.
+    /// Also synchronizes the registry's tiling state (col/row indices and tiled
+    /// rects) from the new layout. This happens even when there are no animation
+    /// moves — a swap can change a window's logical position without triggering
+    /// a pixel-level move if the swapped columns have the same width.
+    ///
+    /// If the diff contains no moves, the animation step is skipped but the
+    /// registry sync still runs. Animation errors are logged as warnings but
+    /// not propagated — a jarring animation is better than a crash.
     fn animate_diff(&mut self, diff: &LayoutDiff) {
+        // Always sync registry state from the new layout, even if no windows
+        // physically moved (col/row indices may have changed).
+        self.registry
+            .update_tiling_slots_from_layout(&diff.virtual_layout);
+        self.registry.update_tiled_rects(&diff.actual_layout);
+
         if diff.moves.is_empty() {
             return;
         }

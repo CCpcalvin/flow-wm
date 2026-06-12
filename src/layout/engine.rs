@@ -152,6 +152,15 @@ impl LayoutEngine {
         &self.virtual_layout
     }
 
+    /// Get a reference to the previous actual layout (projected screen coords).
+    ///
+    /// This is the last layout produced by [`apply_mutation`](Self::apply_mutation).
+    /// It contains the current pixel-accurate rectangles for every window.
+    #[must_use]
+    pub fn actual_layout(&self) -> &ActualLayout {
+        &self.prev_actual
+    }
+
     /// Get the currently focused window.
     #[must_use]
     pub fn focused(&self) -> Option<WindowId> {
