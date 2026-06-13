@@ -186,14 +186,13 @@ impl ScrollTilingManager {
     ///
     /// # Config Model
     ///
-    /// The `app_config` parameter is already the result of TOML-level merging
-    /// (see [`config::lifecycle::load_merged_app_config`]): shipped defaults
-    /// from `default-config.toml` overlaid with user overrides from `stm.toml`.
-    /// No further merging is needed here.
+    /// The `app_config` parameter is already a fully-resolved [`StmConfig`]:
+    /// serde defaults (see [`config::defaults`]) fill in any fields absent from
+    /// the user's `stm.toml`. No further merging is needed here.
     ///
     /// # Arguments
     ///
-    /// * `app_config` - Merged application settings (shipped + user overrides).
+    /// * `app_config` - Application settings (serde defaults + user overrides).
     /// * `user_rules` - User-defined window rules from `stm-rules.toml`.
     /// * `default_rules` - Bundled default rules.
     /// * `config_dir` - Path to the configuration directory.
@@ -235,7 +234,7 @@ impl ScrollTilingManager {
             work_area: registry_win32::get_primary_monitor_work_area()?,
         };
 
-        // 4. Derive layout parameters from the merged config.
+        // 4. Derive layout parameters from the app config.
         let layout_config = Self::derive_layout_config(&app_config, &monitor);
 
         // 5. Create layout engine.
@@ -245,6 +244,7 @@ impl ScrollTilingManager {
             layout_config.default_column_width_eighths,
             layout_config.min_column_width_px,
             layout_config.padding,
+            app_config.columns_per_screen,
         );
 
         // 6. Batch-initialize layout from existing tiling windows.
@@ -253,9 +253,14 @@ impl ScrollTilingManager {
         let tiling_ids = registry.tiling_window_ids_sorted_by_x();
         log::debug!("init: {} tiling windows (sorted by x)", tiling_ids.len());
         let initial_diff = if !tiling_ids.is_empty() {
-            // Focus the rightmost (last) window — most likely the user's active
-            // window on a typical left-to-right layout.
-            let focus_col = Some(tiling_ids.len() - 1);
+            // Query the actual foreground window so init focuses the column
+            // the user was last interacting with, rather than blindly picking
+            // the rightmost window.
+            let focus_col = registry_win32::get_foreground_window().and_then(|hwnd| {
+                let wid = WindowId(hwnd);
+                tiling_ids.iter().position(|&id| id == wid)
+            });
+            log::debug!("init: focus_col = {focus_col:?} (foreground window lookup)");
             let diff = layout.initialize_windows(tiling_ids, focus_col);
             for m in &diff.moves {
                 log::trace!(

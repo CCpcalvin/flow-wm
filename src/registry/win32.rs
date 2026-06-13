@@ -41,9 +41,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetSystemMetrics, GetWindowLongW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsZoomed,
-    SM_CXSCREEN, SM_CYSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_EX_APPWINDOW,
+    GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    IsZoomed, SM_CXSCREEN, SM_CYSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_EX_APPWINDOW,
     WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
@@ -330,6 +330,33 @@ pub fn is_window_visible(hwnd: HWND) -> bool {
 pub fn is_zoomed(hwnd: HWND) -> bool {
     let result = unsafe { IsZoomed(hwnd) };
     result.as_bool()
+}
+
+/// Query the currently foreground (active) window handle.
+///
+/// Wraps the Win32 `GetForegroundWindow()` call. Returns the HWND as an
+/// `isize`, or `None` if there is no foreground window (e.g., the desktop
+/// has focus or no window is active).
+///
+/// # Usage
+///
+/// During daemon initialization, this is called to determine which tiling
+/// column should be treated as the focus column for viewport centering.
+/// The caller checks whether the returned handle belongs to a managed
+/// (tiling) window before using it.
+///
+/// # Returns
+///
+/// `Some(isize)` — the foreground window handle, or `None` if the handle
+/// is null (no foreground window).
+#[must_use]
+pub fn get_foreground_window() -> Option<isize> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        None
+    } else {
+        Some(hwnd.0 as isize)
+    }
 }
 
 /// Returns `true` if the window would appear in the Alt+Tab switcher.
