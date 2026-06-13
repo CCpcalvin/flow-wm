@@ -12,7 +12,8 @@
 //! stm config edit               Open config directory in the system editor
 //! stm config path               Print resolved config directory path
 //! stm config check              Validate configuration files
-//! stm query windows             List all tracked windows
+//! stm query all                 List all tracked windows (full debug dump)
+//! stm dispatch focus <dir>      Focus a window in the given direction
 //! ```
 //!
 //! # Configuration
@@ -70,6 +71,14 @@ enum Commands {
         #[command(subcommand)]
         command: QueryCommands,
     },
+    /// Dispatch a command to the daemon (focus, swap, scroll, etc.).
+    ///
+    /// Use `stm dispatch help` to see available subcommands. New action
+    /// categories (e.g. `swapcolumn`, `swapwindow`) will be added here.
+    Dispatch {
+        #[command(subcommand)]
+        command: DispatchCommands,
+    },
 }
 
 /// Configuration management subcommands.
@@ -93,8 +102,34 @@ enum ConfigCommands {
 /// Query subcommands.
 #[derive(Debug, Subcommand)]
 enum QueryCommands {
-    /// List all tracked windows.
-    Windows,
+    /// Dump all tracked windows with full debug info (state, rect, col/row, etc.).
+    All,
+}
+
+/// Dispatch subcommands — one per action category.
+///
+/// Each variant wraps a further subcommand tree so the CLI stays organized as
+/// more actions are added (swapcolumn, swapwindow, etc.).
+#[derive(Debug, Subcommand)]
+enum DispatchCommands {
+    /// Focus a window in the given direction.
+    Focus {
+        #[command(subcommand)]
+        direction: FocusDirection,
+    },
+}
+
+/// Cardinal direction for `stm dispatch focus <dir>`.
+#[derive(Debug, Subcommand)]
+enum FocusDirection {
+    /// Focus the window to the left.
+    Left,
+    /// Focus the window to the right.
+    Right,
+    /// Focus the window above.
+    Up,
+    /// Focus the window below.
+    Down,
 }
 
 fn main() {
@@ -105,6 +140,7 @@ fn main() {
         Commands::Stop => cmd_stop(),
         Commands::Config { command } => cmd_config(command),
         Commands::Query { command } => cmd_query(command),
+        Commands::Dispatch { command } => cmd_dispatch(command),
     };
 
     if let Err(e) = result {
@@ -268,12 +304,12 @@ fn cmd_config_check() -> Result<(), String> {
 /// Dispatch a query subcommand.
 fn cmd_query(command: QueryCommands) -> Result<(), String> {
     match command {
-        QueryCommands::Windows => cmd_query_windows(),
+        QueryCommands::All => cmd_query_all(),
     }
 }
 
-/// List all tracked windows from the daemon.
-fn cmd_query_windows() -> Result<(), String> {
+/// Dump all tracked windows from the daemon as pretty-printed JSON.
+fn cmd_query_all() -> Result<(), String> {
     let response = transport::send_message(&SocketMessage::QueryWindowsAll)
         .map_err(|e| format!("failed to send command: {e}"))?;
 
@@ -290,6 +326,27 @@ fn cmd_query_windows() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Dispatch a dispatch subcommand.
+///
+/// Routes each [`DispatchCommands`] variant to its handler. New action
+/// categories will be added here as match arms.
+fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
+    match command {
+        DispatchCommands::Focus { direction } => cmd_dispatch_focus(direction),
+    }
+}
+
+/// Send a focus-direction command to the daemon.
+fn cmd_dispatch_focus(direction: FocusDirection) -> Result<(), String> {
+    let msg = match direction {
+        FocusDirection::Left => SocketMessage::FocusLeft,
+        FocusDirection::Right => SocketMessage::FocusRight,
+        FocusDirection::Up => SocketMessage::FocusUp,
+        FocusDirection::Down => SocketMessage::FocusDown,
+    };
+    send_command(msg, "focus changed")
 }
 
 /// Send a command to the daemon and print a success message on Ok.
@@ -508,14 +565,100 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_windows() {
-        let cli = Cli::try_parse_from(["stm", "query", "windows"]).unwrap();
+    fn parse_query_all() {
+        let cli = Cli::try_parse_from(["stm", "query", "all"]).unwrap();
         match cli.command {
             Commands::Query {
-                command: QueryCommands::Windows,
+                command: QueryCommands::All,
             } => {}
-            other => panic!("expected Query::Windows, got: {other:?}"),
+            other => panic!("expected Query::All, got: {other:?}"),
         }
+    }
+
+    // --- Dispatch command parsing ---
+
+    #[test]
+    fn parse_dispatch_focus_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "focus", "left"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::Focus {
+                        direction: FocusDirection::Left,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::Focus::Left, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_focus_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "focus", "right"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::Focus {
+                        direction: FocusDirection::Right,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::Focus::Right, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_focus_up() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "focus", "up"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::Focus {
+                        direction: FocusDirection::Up,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::Focus::Up, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_focus_down() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "focus", "down"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::Focus {
+                        direction: FocusDirection::Down,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::Focus::Down, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_without_subcommand_fails() {
+        // Negative: `stm dispatch` without a subcommand should fail to parse
+        // (clap requires a subcommand).
+        let result = Cli::try_parse_from(["stm", "dispatch"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch' without a subcommand should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_focus_without_direction_fails() {
+        // Negative: `stm dispatch focus` without a direction should fail.
+        let result = Cli::try_parse_from(["stm", "dispatch", "focus"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch focus' without a direction should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_invalid_subcommand_fails() {
+        // Negative: unknown dispatch subcommand should fail.
+        let result = Cli::try_parse_from(["stm", "dispatch", "nonexistent"]);
+        assert!(result.is_err(), "unknown dispatch subcommand should fail");
     }
 
     // --- Negative: invalid invocations ---

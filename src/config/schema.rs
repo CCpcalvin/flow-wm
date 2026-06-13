@@ -50,10 +50,8 @@ mod tests {
     #[test]
     fn schema_references_stm_config() {
         let json = generate_config_schema().expect("schema gen");
-        assert!(json.contains("super_key"));
         assert!(json.contains("column_width"));
         assert!(json.contains("padding"));
-        assert!(json.contains("hotkeys"));
         assert!(json.contains("animation"));
     }
 
@@ -69,11 +67,9 @@ mod tests {
             .expect("properties is object");
 
         let expected_keys = [
-            "super_key",
             "column_width",
             "min_column_width_px",
             "padding",
-            "hotkeys",
             "animation",
             "minimize_restore",
         ];
@@ -114,49 +110,6 @@ mod tests {
         );
         assert!(obj.contains_key("up"), "padding missing 'up'");
         assert!(obj.contains_key("down"), "padding missing 'down'");
-    }
-
-    #[test]
-    fn schema_hotkeys_has_all_bindings() {
-        let json = generate_config_schema().expect("schema gen");
-
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
-
-        let hk_schema = parsed
-            .pointer("/properties/hotkeys")
-            .expect("has /properties/hotkeys");
-
-        let ref_path = hk_schema
-            .get("allOf")
-            .and_then(|v| v.get(0))
-            .and_then(|v| v.get("$ref"))
-            .and_then(|v| v.as_str())
-            .expect("hotkeys has allOf > $ref");
-        let ref_path = ref_path.trim_start_matches("#/");
-        let hk_props = parsed
-            .pointer(&format!("/{ref_path}/properties"))
-            .expect(&format!("resolved ref {ref_path} has properties"));
-
-        let obj = hk_props.as_object().expect("hotkeys properties is object");
-
-        let expected_hotkeys = [
-            "focus_left",
-            "focus_right",
-            "focus_up",
-            "focus_down",
-            "swap_left",
-            "swap_right",
-            "scroll_left",
-            "scroll_right",
-            "toggle_float",
-            "toggle_monocle",
-            "close_window",
-            "reload_config",
-            "place_above",
-        ];
-        for key in &expected_hotkeys {
-            assert!(obj.contains_key(*key), "hotkeys missing binding: {key}");
-        }
     }
 
     #[test]

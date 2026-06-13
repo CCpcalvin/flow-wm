@@ -217,7 +217,7 @@ pub fn user_app_config_path_in(dir: &Path) -> PathBuf {
 /// config directory resolution.
 ///
 /// The path is resolved via [`config_dir`]`, then `stm.toml` is appended.
-/// This file contains application settings such as hotkeys, padding, and
+/// This file contains application settings such as padding and
 /// animation preferences.
 ///
 /// # Returns

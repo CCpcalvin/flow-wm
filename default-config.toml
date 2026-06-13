@@ -16,10 +16,6 @@
 #
 # For field documentation, see the StmConfig docstring in src/config/types.rs.
 
-# The virtual key code treated as the Super/modifier key.
-# VK_F24 is F24 — an uncommon key that avoids conflicts with system shortcuts.
-super_key = "VK_F24"
-
 # Number of columns that fit side-by-side on one monitor screen.
 # The actual pixel width of each column is computed at runtime from this value,
 # the monitor resolution, and window_gap — so the layout always fills the screen.
@@ -40,23 +36,6 @@ min_column_width_px = 640
 window_gap = 16
 up = 16
 down = 16
-
-# Hotkey bindings (13 total).
-# Uses Vim-style Super+H/J/K/L for focus navigation.
-[hotkeys]
-focus_left = "Super+H"
-focus_right = "Super+L"
-focus_up = "Super+K"
-focus_down = "Super+J"
-swap_left = "Super+Shift+H"
-swap_right = "Super+Shift+L"
-scroll_left = "Super+Left"
-scroll_right = "Super+Right"
-toggle_float = "Super+Space"
-toggle_monocle = "Super+M"
-close_window = "Super+Q"
-reload_config = "Super+Shift+R"
-place_above = "Super+A"
 
 # Animation settings for layout transitions.
 [animation]

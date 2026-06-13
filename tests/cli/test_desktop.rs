@@ -232,7 +232,7 @@ pub fn start_test_daemon(pipe: &str, desktop_name: &str) -> Result<std::process:
 
 /// Check if the named pipe is available.
 fn is_pipe_available(pipe: &str) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, OPEN_EXISTING,

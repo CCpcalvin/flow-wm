@@ -1,0 +1,187 @@
+//! ScrollTilingManager constructor — performs all startup work.
+//!
+//! This module contains the [`ScrollTilingManager::new`] method which:
+//!
+//! 1. Creates [`WindowRegistry`] from user and default rules.
+//! 2. Scans existing windows (populates registry before hooks start).
+//! 3. Queries monitor work area via Win32.
+//! 4. Derives layout parameters from the [`StmConfig`].
+//! 5. Creates [`LayoutEngine`] with those parameters.
+//! 6. Batch-initializes layout from existing tiling windows (sorted by x
+//!    coordinate for deterministic column assignment; viewport centered
+///    on the focused column).
+/// 7. Creates [`WindowAnimator`] with Win32 backend and the user's
+///    configured animation duration (instant if animation is disabled).
+/// 8. Animates the initial layout diff (windows animate to tiling positions).
+/// 9. Starts the WinEvent hook thread.
+/// 10. Creates the IPC named pipe server.
+///
+/// # Config Model
+///
+/// The `app_config` parameter is already a fully-resolved [`StmConfig`]:
+/// serde defaults (see [`config::defaults`]) fill in any fields absent from
+/// the user's `stm.toml`. No further merging is needed here.
+use std::time::Duration;
+
+use crate::animation::WindowAnimator;
+use crate::animation::backend::win32::Win32Backend;
+use crate::common::WindowId;
+use crate::config::types::{StmConfig, WindowRulesConfig};
+use crate::floating::FloatingManager;
+use crate::ipc::transport::PipeServer;
+use crate::layout::engine::LayoutEngine;
+use crate::layout::types::MonitorInfo;
+use crate::registry::{WindowRegistry, hooks, win32 as registry_win32};
+
+use super::animation::animate_diff_raw;
+use super::config_derive;
+use super::types::ScrollTilingManager;
+
+impl ScrollTilingManager {
+    /// Construct and initialize the daemon.
+    ///
+    /// Performs all startup work in sequence. See the [module documentation](self)
+    /// for the complete initialization flow.
+    ///
+    /// # Arguments
+    ///
+    /// * `app_config` - Application settings (serde defaults + user overrides).
+    /// * `user_rules` - User-defined window rules from `stm-rules.toml`.
+    /// * `default_rules` - Bundled default rules.
+    /// * `config_dir` - Path to the configuration directory.
+    /// * `desktop_name` - Optional test desktop name (debug builds only).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` if any startup step fails:
+    /// - Window scan failure (non-fatal — logged, returns `Ok`).
+    /// - Monitor work area query failure.
+    /// - Hook thread start failure.
+    /// - Named pipe creation failure (likely another daemon running).
+    pub fn new(
+        app_config: StmConfig,
+        user_rules: WindowRulesConfig,
+        default_rules: WindowRulesConfig,
+        config_dir: std::path::PathBuf,
+        desktop_name: Option<String>,
+    ) -> Result<Self, String> {
+        log::debug!(
+            "effective config: columns_per_screen={}, column_width={:?}, min_column_width_px={}, padding.window_gap={}, padding.up={}, padding.down={}, animation.duration_ms={}",
+            app_config.columns_per_screen,
+            app_config.column_width,
+            app_config.min_column_width_px,
+            app_config.padding.window_gap,
+            app_config.padding.up,
+            app_config.padding.down,
+            app_config.animation.duration_ms,
+        );
+
+        // 1. Create registry from rules.
+        let mut registry = WindowRegistry::new(&user_rules, &default_rules);
+
+        // 2. Scan existing windows before hooks start.
+        registry.scan_existing_windows()?;
+
+        // 3. Get monitor work area via Win32.
+        let monitor = MonitorInfo {
+            work_area: registry_win32::get_primary_monitor_work_area()?,
+        };
+
+        // 4. Derive layout parameters from the app config.
+        let layout_config = config_derive::derive_layout_config(&app_config, &monitor);
+
+        // 5. Create layout engine.
+        let mut layout = LayoutEngine::new(
+            monitor,
+            layout_config.column_width,
+            layout_config.default_column_width_eighths,
+            layout_config.min_column_width_px,
+            layout_config.padding,
+            app_config.columns_per_screen,
+        );
+
+        // 6. Batch-initialize layout from existing tiling windows.
+        //    Sort by x-coordinate so column assignment is deterministic and
+        //    windows travel the shortest distance to their tiling positions.
+        let tiling_ids = registry.tiling_window_ids_sorted_by_x();
+        log::debug!("init: {} tiling windows (sorted by x)", tiling_ids.len());
+        let initial_diff = if !tiling_ids.is_empty() {
+            // Query the actual foreground window so init focuses the column
+            // the user was last interacting with, rather than blindly picking
+            // the rightmost window.
+            let focus_col = registry_win32::get_foreground_window().and_then(|hwnd| {
+                let wid = WindowId(hwnd);
+                tiling_ids.iter().position(|&id| id == wid)
+            });
+            log::debug!("init: focus_col = {focus_col:?} (foreground window lookup)");
+            let diff = layout.initialize_windows(tiling_ids, focus_col);
+            for m in &diff.moves {
+                log::trace!(
+                    "init move: {:?} from ({},{},{},{}) to ({},{},{},{})",
+                    m.window_id,
+                    m.from.x,
+                    m.from.y,
+                    m.from.width,
+                    m.from.height,
+                    m.to.x,
+                    m.to.y,
+                    m.to.width,
+                    m.to.height,
+                );
+            }
+            Some(diff)
+        } else {
+            log::warn!("init: no tiling windows found — skipping initial layout");
+            None
+        };
+
+        // 7. Create animator with the user's configured animation duration.
+        //    On startup, windows animate from their current positions to tiling
+        //    positions using the user's configured speed. If animation is disabled
+        //    in config, duration will be zero (instant snap).
+        let backend = Win32Backend::new();
+        let init_config = config_derive::derive_animator_config(&app_config, Duration::ZERO);
+        log::debug!(
+            "init: animator config duration={:?}ms, animation.enabled={}",
+            init_config.duration,
+            app_config.animation.enabled,
+        );
+        let mut animator = WindowAnimator::new(backend, init_config);
+
+        // 8. Animate initial layout with user-configured duration.
+        if let Some(ref diff) = initial_diff {
+            // Use a standalone function to avoid borrow checker issues
+            // — animate_diff takes &mut self, but we don't have Self yet.
+            log::debug!("init: submitting {} moves to animator", diff.moves.len());
+            animate_diff_raw(&mut animator, diff, &registry);
+
+            // Sync registry tiling state from the initial layout so that
+            // queries return correct col/row and tiled_rect immediately.
+            registry.update_tiling_slots_from_layout(&diff.virtual_layout);
+            registry.update_tiled_rects(&diff.actual_layout);
+        }
+
+        // 9. Start hook thread.
+        let (hook_receiver, _hook_handle) = hooks::start_hook_thread(desktop_name)?;
+
+        // 10. Create IPC server.
+        let server = PipeServer::create()
+            .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
+
+        log::info!("stmd: daemon initialized successfully");
+
+        Ok(Self {
+            registry,
+            layout,
+            animator,
+            floating: FloatingManager::new(),
+            server,
+            config: app_config,
+            resolved_column_width: layout_config.column_width,
+            config_dir,
+            hook_receiver,
+            _hook_handle,
+            shutting_down: false,
+        })
+    }
+}

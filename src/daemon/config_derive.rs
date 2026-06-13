@@ -1,0 +1,171 @@
+//! Configuration derivation helpers.
+//!
+//! This module contains methods that derive configuration values from
+//! [`StmConfig`] for use by the layout engine and animator.
+
+use std::time::Duration;
+
+use crate::animation::AnimatorConfig;
+use crate::config::types::StmConfig;
+use crate::layout::types::{MonitorInfo, Padding as LayoutPadding};
+
+use super::types::LayoutConfig;
+
+/// Derive layout engine parameters from [`StmConfig`].
+///
+/// Converts the user-facing config types (from `stm.toml`) into the
+/// layout-engine-specific types needed by [`LayoutEngine::new`].
+///
+/// # Column Width Resolution
+///
+/// When `StmConfig::column_width` is `Some(v)`, that value is used directly
+/// (power-user override). When `None`, the width is computed from
+/// `columns_per_screen`:
+///
+/// ```text
+/// base_content_width = (monitor_width - (N+1) * window_gap) / N
+/// ```
+///
+/// where `N = columns_per_screen`. This ensures the layout fills the entire
+/// screen with uniform gaps.
+pub(super) fn derive_layout_config(app_config: &StmConfig, monitor: &MonitorInfo) -> LayoutConfig {
+    let gap = app_config.padding.window_gap;
+    let column_width = match app_config.column_width {
+        Some(cw) => {
+            log::debug!(
+                "column_width: using explicit override of {}px (ignoring columns_per_screen={})",
+                cw,
+                app_config.columns_per_screen,
+            );
+            cw
+        }
+        None => {
+            let monitor_width = monitor.work_area.width;
+            let n = app_config.columns_per_screen as i32;
+            // (N+1) gaps: one on each side plus N-1 between columns = N+1 total
+            let total_gap = (n + 1) * gap;
+            let computed = (monitor_width - total_gap) / n;
+            log::debug!(
+                "column_width: auto-computed from columns_per_screen={}, monitor_width={}px, window_gap={}px → {}px",
+                app_config.columns_per_screen,
+                monitor_width,
+                gap,
+                computed,
+            );
+            computed as u32
+        }
+    };
+
+    LayoutConfig {
+        column_width,
+        default_column_width_eighths: 4,
+        min_column_width_px: app_config.min_column_width_px,
+        padding: LayoutPadding {
+            window_gap: app_config.padding.window_gap,
+            up: app_config.padding.up,
+            down: app_config.padding.down,
+        },
+    }
+}
+
+/// Derive animator configuration from [`StmConfig`].
+///
+/// The `override_duration` parameter allows the caller to force a specific
+/// animation duration. Pass `Duration::ZERO` to let the config decide
+/// (enabled → user-configured ms, disabled → zero/instant).
+pub(super) fn derive_animator_config(
+    app_config: &StmConfig,
+    override_duration: Duration,
+) -> AnimatorConfig {
+    let duration = if override_duration != Duration::ZERO {
+        override_duration
+    } else if app_config.animation.enabled {
+        Duration::from_millis(app_config.animation.duration_ms as u64)
+    } else {
+        Duration::ZERO
+    };
+
+    AnimatorConfig {
+        duration,
+        ..AnimatorConfig::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::AnimationConfig;
+
+    /// Build a default [`StmConfig`] with animation enabled and a given duration.
+    fn make_enabled_config(duration_ms: u32) -> StmConfig {
+        let mut cfg = StmConfig::default();
+        cfg.animation = AnimationConfig {
+            enabled: true,
+            duration_ms,
+            ..AnimationConfig::default()
+        };
+        cfg
+    }
+
+    /// Build a [`StmConfig`] with animation disabled.
+    fn make_disabled_config() -> StmConfig {
+        let mut cfg = StmConfig::default();
+        cfg.animation = AnimationConfig {
+            enabled: false,
+            ..AnimationConfig::default()
+        };
+        cfg
+    }
+
+    // W2-related: verify derive_animator_config with Duration::ZERO sentinel
+    // (meaning "no override — use config defaults") respects the user's
+    // enabled/disabled setting and returns the configured duration_ms when
+    // animation is enabled.
+    //
+    // Note: the W2 fix does NOT call derive_animator_config for the snap —
+    // it constructs AnimatorConfig { duration: Duration::ZERO, ..Default::default() }
+    // directly. derive_animator_config is only used for the runtime config (W3).
+
+    #[test]
+    fn derive_animator_config_zero_sentinel_uses_user_settings() {
+        // Positive: animation enabled + zero sentinel → user's configured duration.
+        // This is the W3 case (runtime config after initial snap).
+        let cfg = make_enabled_config(250);
+        let result = derive_animator_config(&cfg, Duration::ZERO);
+        assert_eq!(
+            result.duration,
+            Duration::from_millis(250),
+            "Duration::ZERO sentinel with animation enabled should use user's 250ms"
+        );
+
+        // Positive: animation disabled + zero sentinel → zero duration.
+        let cfg = make_disabled_config();
+        let result = derive_animator_config(&cfg, Duration::ZERO);
+        assert_eq!(
+            result.duration,
+            Duration::ZERO,
+            "Duration::ZERO sentinel with animation disabled should produce zero duration"
+        );
+    }
+
+    /// Negative: verify that a non-zero override takes precedence over user config.
+    #[test]
+    fn derive_animator_config_nonzero_override_overrides_user() {
+        let cfg = make_enabled_config(250);
+        let result = derive_animator_config(&cfg, Duration::from_millis(50));
+        assert_eq!(
+            result.duration,
+            Duration::from_millis(50),
+            "non-zero override should take precedence over user's 250ms"
+        );
+
+        // Also test with animation disabled — override still wins.
+        let cfg = make_disabled_config();
+        let result = derive_animator_config(&cfg, Duration::from_millis(100));
+        assert_eq!(
+            result.duration,
+            Duration::from_millis(100),
+            "non-zero override should take precedence even when animation is disabled"
+        );
+    }
+}

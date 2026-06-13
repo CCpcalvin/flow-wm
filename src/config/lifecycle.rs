@@ -458,7 +458,6 @@ mod tests {
     #[test]
     fn load_app_config_valid_file_parses_correctly() {
         let toml_content = r#"
-super_key = "VK_LWIN"
 columns_per_screen = 3
 column_width = 1200
 min_column_width_px = 400
@@ -467,21 +466,6 @@ min_column_width_px = 400
 window_gap = 8
 up = 10
 down = 40
-
-[hotkeys]
-focus_left = "Super+H"
-focus_right = "Super+L"
-focus_up = "Super+K"
-focus_down = "Super+J"
-swap_left = "Super+Shift+H"
-swap_right = "Super+Shift+L"
-scroll_left = "Super+Left"
-scroll_right = "Super+Right"
-toggle_float = "Super+Space"
-toggle_monocle = "Super+M"
-close_window = "Super+Q"
-reload_config = "Super+Shift+R"
-place_above = "Super+A"
 
 [animation]
 enabled = false
@@ -495,7 +479,6 @@ strategy = "original_slot"
         f.write_all(toml_content.as_bytes()).unwrap();
 
         let config = load_app_config(f.path());
-        assert_eq!(config.super_key, "VK_LWIN");
         assert_eq!(config.columns_per_screen, 3);
         assert_eq!(config.column_width, Some(1200));
         assert_eq!(config.min_column_width_px, 400);
@@ -524,7 +507,6 @@ strategy = "original_slot"
         f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
 
         let config = load_app_config(f.path());
-        assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.column_width, None);
     }
 
@@ -555,7 +537,6 @@ strategy = "original_slot"
             "user-specified field must be preserved"
         );
         // Everything else should be defaults.
-        assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.min_column_width_px, 640);
         assert_eq!(config.padding.window_gap, 16);
         assert_eq!(config.animation.duration_ms, 240);
@@ -638,7 +619,7 @@ strategy = "original_slot"
         let dir = tmp.path();
 
         // Create stm.toml with custom content BEFORE init.
-        let custom_content = "super_key = \"VK_LWIN\"\ncolumn_width = 9999\n";
+        let custom_content = "column_width = 9999\n";
         std::fs::write(dir.join("stm.toml"), custom_content).unwrap();
 
         let result = init_config_dir(dir);
@@ -941,7 +922,6 @@ initial_width_eighths = 4
         );
 
         // Spot-check: file should have all top-level sections.
-        assert!(!config.super_key.is_empty(), "super_key should be set");
         assert!(
             config.columns_per_screen > 0,
             "columns_per_screen should be positive"
@@ -949,10 +929,6 @@ initial_width_eighths = 4
         assert!(
             config.min_column_width_px > 0,
             "min_column_width_px should be positive"
-        );
-        assert!(
-            !config.hotkeys.focus_left.is_empty(),
-            "hotkeys should be populated"
         );
     }
 

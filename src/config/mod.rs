@@ -2,7 +2,7 @@
 //!
 //! Defines two TOML config file structures:
 //!
-//! - [`StmConfig`] — Application settings (hotkeys, padding, animation).
+//! - [`StmConfig`] — Application settings (padding, animation).
 //!   Loaded from `stm.toml` in the config directory.
 //!
 //! - [`WindowRulesConfig`] — Window classification rules and default action.

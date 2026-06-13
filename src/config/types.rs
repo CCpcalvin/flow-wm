@@ -29,7 +29,7 @@
 //!
 //! Configuration is split across two TOML files:
 //!
-//! - **`stm.toml`** ([`StmConfig`]) — Application settings (hotkeys, padding,
+//! - **`stm.toml`** ([`StmConfig`]) — Application settings (padding,
 //!   animation, etc.). Loaded from `%USERPROFILE%\.config\stm\stm.toml`
 //!   (see [`config::dirs`](crate::config::dirs) for the full resolution chain).
 //!
@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 /// The canonical default values live in the `Default` impl below. The `default-config.toml` file is
 /// a hand-written **example** copied to users by `stm config init` — it is not read at runtime.
 ///
-/// This struct contains **application settings only** — hotkeys, padding,
+/// This struct contains **application settings only** — padding,
 /// animation, etc. Window classification rules live in a separate file
 /// ([`WindowRulesConfig`]) to allow independent editing.
 ///
@@ -69,7 +69,6 @@ use serde::{Deserialize, Serialize};
 /// # Example
 ///
 /// ```toml
-/// super_key = "VK_F24"
 /// columns_per_screen = 4
 /// min_column_width_px = 640
 ///
@@ -77,10 +76,6 @@ use serde::{Deserialize, Serialize};
 /// window_gap = 16
 /// up = 16
 /// down = 16
-///
-/// [hotkeys]
-/// focus_left = "Super+H"
-/// focus_right = "Super+L"
 ///
 /// [animation]
 /// enabled = true
@@ -92,9 +87,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct StmConfig {
-    /// The virtual key code treated as the Super/modifier key.
-    pub super_key: String,
-
     /// Number of columns that fit side-by-side on one monitor screen.
     ///
     /// The daemon computes the actual pixel width at startup:
@@ -122,9 +114,6 @@ pub struct StmConfig {
     /// Padding settings.
     pub padding: Padding,
 
-    /// Hotkey bindings.
-    pub hotkeys: Hotkeys,
-
     /// Animation settings.
     pub animation: AnimationConfig,
 
@@ -139,12 +128,10 @@ fn default_window_action() -> WindowAction {
 impl Default for StmConfig {
     fn default() -> Self {
         Self {
-            super_key: "VK_F24".to_string(),
             columns_per_screen: 4,
             column_width: None,
             min_column_width_px: 640,
             padding: Padding::default(),
-            hotkeys: Hotkeys::default(),
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
         }
@@ -259,61 +246,6 @@ impl StmConfig {
             ));
         }
         Ok(())
-    }
-}
-
-/// All hotkey bindings (13 total).
-///
-/// Default keybinds use Vim-style `Super+H/J/K/L` for focus. All defaults are
-/// defined in the `Default` impl below.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct Hotkeys {
-    /// Focus left: default `Super+H`.
-    pub focus_left: String,
-    /// Focus right: default `Super+L`.
-    pub focus_right: String,
-    /// Focus up: default `Super+K`.
-    pub focus_up: String,
-    /// Focus down: default `Super+J`.
-    pub focus_down: String,
-    /// Swap left: default `Super+Shift+H`.
-    pub swap_left: String,
-    /// Swap right: default `Super+Shift+L`.
-    pub swap_right: String,
-    /// Scroll left: default `Super+Left`.
-    pub scroll_left: String,
-    /// Scroll right: default `Super+Right`.
-    pub scroll_right: String,
-    /// Toggle float/tiling: default `Super+Space`.
-    pub toggle_float: String,
-    /// Toggle monocle mode: default `Super+M`.
-    pub toggle_monocle: String,
-    /// Close focused window: default `Super+Q`.
-    pub close_window: String,
-    /// Reload config from disk: default `Super+Shift+R`.
-    pub reload_config: String,
-    /// Place window above others in column: default `Super+A`.
-    pub place_above: String,
-}
-
-impl Default for Hotkeys {
-    fn default() -> Self {
-        Self {
-            focus_left: "Super+H".into(),
-            focus_right: "Super+L".into(),
-            focus_up: "Super+K".into(),
-            focus_down: "Super+J".into(),
-            swap_left: "Super+Shift+H".into(),
-            swap_right: "Super+Shift+L".into(),
-            scroll_left: "Super+Left".into(),
-            scroll_right: "Super+Right".into(),
-            toggle_float: "Super+Space".into(),
-            toggle_monocle: "Super+M".into(),
-            close_window: "Super+Q".into(),
-            reload_config: "Super+Shift+R".into(),
-            place_above: "Super+A".into(),
-        }
     }
 }
 
@@ -548,7 +480,6 @@ mod tests {
         let config = StmConfig::default();
         let toml_str = toml::to_string(&config).expect("serialize");
         let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize");
-        assert_eq!(parsed.super_key, "VK_F24");
         assert_eq!(parsed.columns_per_screen, 4);
         assert_eq!(parsed.column_width, None);
         assert_eq!(parsed.min_column_width_px, 640);
@@ -564,7 +495,6 @@ mod tests {
         // Full TOML exercises every field end-to-end. (Serde defaults now exist,
         // but a complete file is the clearest way to verify full-population.)
         let toml_str = r#"
-super_key = "VK_LWIN"
 columns_per_screen = 3
 column_width = 1200
 min_column_width_px = 400
@@ -573,21 +503,6 @@ min_column_width_px = 400
 window_gap = 8
 up = 10
 down = 40
-
-[hotkeys]
-focus_left = "Super+H"
-focus_right = "Super+L"
-focus_up = "Super+K"
-focus_down = "Super+J"
-swap_left = "Super+Shift+H"
-swap_right = "Super+Shift+L"
-scroll_left = "Super+Left"
-scroll_right = "Super+Right"
-toggle_float = "Super+Space"
-toggle_monocle = "Super+M"
-close_window = "Super+Q"
-reload_config = "Super+Shift+R"
-place_above = "Super+A"
 
 [animation]
 enabled = false
@@ -598,7 +513,6 @@ easing = "ease-out-expo"
 strategy = "original_slot"
 "#;
         let config: StmConfig = toml::from_str(toml_str).expect("parse");
-        assert_eq!(config.super_key, "VK_LWIN");
         assert_eq!(config.columns_per_screen, 3);
         assert_eq!(config.column_width, Some(1200));
         assert_eq!(config.padding.window_gap, 8);
@@ -627,7 +541,6 @@ strategy = "original_slot"
             toml::from_str("columns_per_screen = 3\n").expect("partial TOML should parse");
         assert_eq!(config.columns_per_screen, 3);
         // Everything else comes from defaults.
-        assert_eq!(config.super_key, "VK_F24");
         assert_eq!(config.min_column_width_px, 640);
         assert_eq!(config.padding.window_gap, 16);
         assert_eq!(config.animation.duration_ms, 240);
@@ -646,29 +559,6 @@ strategy = "original_slot"
         assert_eq!(config.padding.down, 16);
         // Top-level defaults still apply.
         assert_eq!(config.columns_per_screen, 4);
-    }
-
-    /// Positive: a nested-partial `[hotkeys]` block fills missing bindings.
-    ///
-    /// Only `focus_left` is overridden; all other 12 hotkey fields must come
-    /// from serde defaults. This verifies that per-field defaults work inside
-    /// the `Hotkeys` nested struct, not just `Padding`.
-    #[test]
-    fn config_from_nested_partial_hotkeys_uses_defaults() {
-        let toml_str = "[hotkeys]\nfocus_left = \"Alt+H\"\n";
-        let config: StmConfig =
-            toml::from_str(toml_str).expect("nested-partial hotkeys should parse");
-        assert_eq!(config.hotkeys.focus_left, "Alt+H");
-        // All other hotkeys should still be their defaults.
-        assert_eq!(config.hotkeys.focus_right, "Super+L");
-        assert_eq!(config.hotkeys.focus_up, "Super+K");
-        assert_eq!(config.hotkeys.focus_down, "Super+J");
-        assert_eq!(config.hotkeys.swap_left, "Super+Shift+H");
-        assert_eq!(config.hotkeys.close_window, "Super+Q");
-        assert_eq!(config.hotkeys.reload_config, "Super+Shift+R");
-        // Top-level and other nested defaults should be untouched.
-        assert_eq!(config.columns_per_screen, 4);
-        assert_eq!(config.padding.window_gap, 16);
     }
 
     /// Positive: a nested-partial `[animation]` block fills missing fields.
@@ -717,7 +607,6 @@ strategy = "original_slot"
     fn config_roundtrip_preserves_all_fields() {
         // Positive: every field survives TOML → StmConfig → TOML
         let config = StmConfig {
-            super_key: "VK_LWIN".into(),
             columns_per_screen: 3,
             column_width: Some(1200),
             min_column_width_px: 400,
@@ -725,21 +614,6 @@ strategy = "original_slot"
                 window_gap: 6,
                 up: 10,
                 down: 40,
-            },
-            hotkeys: Hotkeys {
-                focus_left: "Alt+H".into(),
-                focus_right: "Alt+L".into(),
-                focus_up: "Alt+K".into(),
-                focus_down: "Alt+J".into(),
-                swap_left: "Alt+Shift+H".into(),
-                swap_right: "Alt+Shift+L".into(),
-                scroll_left: "Alt+Left".into(),
-                scroll_right: "Alt+Right".into(),
-                toggle_float: "Alt+Space".into(),
-                toggle_monocle: "Alt+M".into(),
-                close_window: "Alt+Q".into(),
-                reload_config: "Alt+Shift+R".into(),
-                place_above: "Alt+A".into(),
             },
             animation: AnimationConfig {
                 enabled: false,
@@ -754,15 +628,12 @@ strategy = "original_slot"
         let toml_str = toml::to_string(&config).expect("serialize all fields");
         let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize all fields");
 
-        assert_eq!(parsed.super_key, "VK_LWIN");
         assert_eq!(parsed.columns_per_screen, 3);
         assert_eq!(parsed.column_width, Some(1200));
         assert_eq!(parsed.min_column_width_px, 400);
         assert_eq!(parsed.padding.window_gap, 6);
         assert_eq!(parsed.padding.up, 10);
         assert_eq!(parsed.padding.down, 40);
-        assert_eq!(parsed.hotkeys.focus_left, "Alt+H");
-        assert_eq!(parsed.hotkeys.place_above, "Alt+A");
         assert!(!parsed.animation.enabled);
         assert_eq!(parsed.animation.duration_ms, 250);
         assert_eq!(parsed.animation.easing, "ease-in-out-cubic");
