@@ -119,6 +119,7 @@ mod tests {
     #[test]
     fn schema_hotkeys_has_all_bindings() {
         let json = generate_config_schema().expect("schema gen");
+
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
 
         let hk_schema = parsed

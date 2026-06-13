@@ -177,7 +177,7 @@ fn cmd_config(command: ConfigCommands) -> Result<(), String> {
 ///
 /// Calls [`config::dirs::config_dir`] to resolve the config directory, then
 /// [`config::init_config_dir`] to create it and write default config files
-/// (`stm.yml`, `stm-rules.yml`) and JSON Schemas. Existing files are never
+/// (`stm.toml`, `stm-rules.toml`) and JSON Schemas. Existing files are never
 /// overwritten.
 ///
 /// # Errors
@@ -250,8 +250,8 @@ fn cmd_config_path() -> Result<(), String> {
 
 /// Validate configuration files without loading them into the daemon.
 ///
-/// Calls [`config::check_config`] which reads and validates both `stm.yml` and
-/// `stm-rules.yml` if they exist. Missing files are not errors — they simply
+/// Calls [`config::check_config`] which reads and validates both `stm.toml` and
+/// `stm-rules.toml` if they exist. Missing files are not errors — they simply
 /// mean defaults will be used.
 ///
 /// # Errors

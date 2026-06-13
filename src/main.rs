@@ -5,7 +5,7 @@
 //!
 //! The daemon:
 //! 1. Optionally switches to a test desktop (`--desktop` flag, debug only)
-//! 2. Loads configuration from `stm.yml` and `stm-rules.yml`
+//! 2. Loads configuration from `stm.toml` and `stm-rules.toml`
 //! 3. Constructs a [`ScrollTilingManager`](scrolling_tiling_manager::daemon::ScrollTilingManager)
 //!    which performs all initialization (window scan, layout init, hook setup)
 //! 4. Enters the IPC event loop via `stm.run()`
@@ -15,7 +15,7 @@ use std::path::Path;
 use clap::Parser;
 
 use scrolling_tiling_manager::config::{
-    dirs, init_config_dir, load_default_rules, load_merged_app_config, load_rules_config,
+    dirs, init_config_dir, load_app_config, load_default_rules, load_rules_config,
 };
 use scrolling_tiling_manager::daemon::ScrollTilingManager;
 
@@ -82,14 +82,10 @@ fn run(args: Args) -> Result<(), String> {
 
     // 3. Load configuration.
     //
-    // Two-layer config model (TOML-level merge):
-    //   Layer 1: Shipped defaults from `default-config.toml` (next to stmd.exe).
-    //   Layer 2: User overrides from `stm.toml` (in config dir).
-    //
-    // `load_merged_app_config` merges both TOML files before deserializing,
-    // so the shipped defaults are the single source of truth. The Rust
-    // `Default` impl serves as an emergency fallback only.
-    let app_config = load_merged_app_config(&dirs::user_app_config_path_in(&config_dir));
+    // CODE is the single source of truth: every field carries a serde default
+    // (see `config::defaults`), so the user's `stm.toml` may be partial or even
+    // empty. There is no shipped-defaults TOML merged at runtime.
+    let app_config = load_app_config(&dirs::user_app_config_path_in(&config_dir));
     let user_rules = load_rules_config(&dirs::user_rules_path_in(&config_dir));
     let default_rules = load_default_rules();
 

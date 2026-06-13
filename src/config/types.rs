@@ -1,28 +1,29 @@
-//! Configuration type definitions matching the TOML schema.
+//! Configuration type definitions for ScrollingTilingManager.
 //!
-//! Every field in [`StmConfig`] and its nested types is **required** in TOML —
-//! there are no `#[serde(default)]` annotations. The single source of truth for
-//! default values is `default-config.toml` shipped next to `stmd.exe`.
+//! # CODE is the single source of truth
 //!
-//! # Design: No Serde Defaults
+//! Every config struct carries a `#[serde(default)]` container attribute, so
+//! any field missing from the user's `stm.toml` is filled from the struct's
+//! [`Default`] implementation. These `Default` impls — defined inline below —
+//! are the **canonical default values**. There is no shipped-defaults TOML
+//! merged at runtime.
 //!
-//! Intentionally omitting `#[serde(default)]` creates a built-in safety net:
+//! As a result, a user's `stm.toml` may be **partial, empty, or even
+//! nested-partial** (e.g. a `[padding]` block with only `window_gap` set).
+//! Serde creates a `Default` instance first, then overrides only the fields
+//! present in the TOML. This is simpler and more robust than the previous
+//! two-layer TOML merge, which silently fell back to stale compiled-in values
+//! when the shipped file was absent during development.
 //!
-//! - `default-config.toml` **must** contain every field. If a developer adds a
-//!   new field to a Rust struct but forgets to add it to `default-config.toml`,
-//!   deserialization fails with a clear `"missing field 'xyz'"` error.
-//! - Users' `stm.toml` files can still be partial — the TOML-level merge in
-//!   [`lifecycle::load_merged_app_config`] fills in missing fields from shipped
-//!   defaults before deserializing.
-//! - The compiled-in Rust `Default` impl serves as an **emergency fallback only**
-//!   (e.g., dev environments without the shipped file). It is NOT the canonical
-//!   source of default values.
+//! # `default-config.toml` is an example
 //!
-//! # Exceptions
-//!
-//! `Vec` fields (like `WindowRulesConfig::rules`) retain `#[serde(default)]`
-//! because an empty collection is unambiguous. Per-entry boolean flags
-//! (like `WindowRule::override_persist`) also keep defaults for convenience.
+//! [`default-config.toml`](../../../../default-config.toml) in the project root
+//! is a hand-written, fully-commented **example** file. It is copied verbatim
+//! into a user's config directory by `stm config init` (see
+//! [`lifecycle::init_config_dir`](crate::config::lifecycle::init_config_dir)).
+//! It is **not** read at runtime. It must stay in sync with the compiled
+//! defaults; the `default_config_toml_matches_compiled_defaults` test enforces
+//! this automatically.
 //!
 //! # Config File Split
 //!
@@ -36,7 +37,7 @@
 //!   and default action. Loaded from `%USERPROFILE%\.config\stm\stm-rules.toml`.
 //!
 //! This separation allows users to edit rules frequently (adding ignore patterns
-//! for new apps) without risk of corrupting their app settings, and vice versa.
+//! for new apps) without risk of corrupting their app settings, and vice-versa.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,12 +46,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// Loaded from `%USERPROFILE%\.config\stm\stm.toml` (see [`config::dirs`](crate::config::dirs)
 /// for the full resolution chain including `--config` flag and `STM_CONFIG_DIR` env var
-/// overrides). Every field is **required** in TOML — there are no serde defaults.
+/// overrides). The struct carries `#[serde(default)]`, so the file may be partial or even empty —
+/// serde fills missing fields from the [`Default`] impl.
 ///
-/// The canonical default values live in `default-config.toml` shipped next to `stmd.exe`.
-/// The TOML-level merge (see [`lifecycle::load_merged_app_config`]) fills in missing
-/// fields from shipped defaults before deserializing, so users' `stm.toml` files can
-/// be partial.
+/// The canonical default values live in the `Default` impl below. The `default-config.toml` file is
+/// a hand-written **example** copied to users by `stm config init` — it is not read at runtime.
 ///
 /// This struct contains **application settings only** — hotkeys, padding,
 /// animation, etc. Window classification rules live in a separate file
@@ -71,12 +71,12 @@ use serde::{Deserialize, Serialize};
 /// ```toml
 /// super_key = "VK_F24"
 /// columns_per_screen = 4
-/// min_column_width_px = 320
+/// min_column_width_px = 640
 ///
 /// [padding]
-/// window_gap = 4
-/// up = 0
-/// down = 0
+/// window_gap = 16
+/// up = 16
+/// down = 16
 ///
 /// [hotkeys]
 /// focus_left = "Super+H"
@@ -84,12 +84,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// [animation]
 /// enabled = true
-/// duration_ms = 180
+/// duration_ms = 240
 /// easing = "ease-out-expo"
 /// ```
 ///
 /// See `docs/spec/04-config-and-persistence.md` for the full schema.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct StmConfig {
     /// The virtual key code treated as the Super/modifier key.
     pub super_key: String,
@@ -111,6 +112,7 @@ pub struct StmConfig {
     /// and `window_gap`.
     ///
     /// This field is **optional** in TOML — most users should rely on `columns_per_screen`.
+    /// A missing `Option` field deserializes to `None` automatically.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_width: Option<u32>,
 
@@ -130,31 +132,17 @@ pub struct StmConfig {
     pub minimize_restore: MinimizeRestore,
 }
 
-fn default_super_key() -> String {
-    "VK_F24".into()
-}
-
 fn default_window_action() -> WindowAction {
     WindowAction::Tile
-}
-
-/// Default number of columns per screen.
-const fn default_columns_per_screen() -> u32 {
-    4
-}
-
-/// Default minimum column width in pixels.
-const fn default_min_column_width_px() -> u32 {
-    320
 }
 
 impl Default for StmConfig {
     fn default() -> Self {
         Self {
-            super_key: default_super_key(),
-            columns_per_screen: default_columns_per_screen(),
+            super_key: "VK_F24".to_string(),
+            columns_per_screen: 4,
             column_width: None,
-            min_column_width_px: default_min_column_width_px(),
+            min_column_width_px: 640,
             padding: Padding::default(),
             hotkeys: Hotkeys::default(),
             animation: AnimationConfig::default(),
@@ -188,20 +176,21 @@ impl Default for StmConfig {
 /// ┌─────────────────── monitor work area ────────────────────┐
 /// │ ↑ padding.up                                             │
 /// │ ↑ window_gap                                             │
-/// │ ┌──── window (HWND) ────┐   ┌──── window (HWND) ────┐   │
-/// │ │                       │   │                       │   │
-/// │ └───────────────────────┘   └───────────────────────┘   │
+/// │ ┌──── window (HWND) ────┐   ┌──── window (HWND) ────┐    │
+/// │ │                       │   │                       │    │
+/// │ └───────────────────────┘   └───────────────────────┘    │
 /// │ ↓ window_gap                                             │
 /// │ ↓ padding.down                                           │
 /// └──────────────────────────────────────────────────────────┘
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct Padding {
     /// Uniform gap between all elements (windows and screen edges), in pixels.
     ///
     /// This single value controls horizontal (inter-column), vertical (inter-row),
-    /// and edge-to-window spacing. Setting `window_gap = 4` means every gap
-    /// everywhere is 4 pixels.
+    /// and edge-to-window spacing. Setting `window_gap = 16` means every gap
+    /// everywhere is 16 pixels.
     pub window_gap: i32,
     /// Top screen margin — reserved space above the tiling area.
     pub up: i32,
@@ -209,16 +198,12 @@ pub struct Padding {
     pub down: i32,
 }
 
-fn default_window_gap() -> i32 {
-    4
-}
-
 impl Default for Padding {
     fn default() -> Self {
         Self {
-            window_gap: default_window_gap(),
-            up: 0,
-            down: 0,
+            window_gap: 16,
+            up: 16,
+            down: 16,
         }
     }
 }
@@ -280,8 +265,9 @@ impl StmConfig {
 /// All hotkey bindings (13 total).
 ///
 /// Default keybinds use Vim-style `Super+H/J/K/L` for focus. All defaults are
-/// defined in a manual `Default` impl (emergency fallback for dev environments).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// defined in the `Default` impl below.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct Hotkeys {
     /// Focus left: default `Super+H`.
     pub focus_left: String,
@@ -498,7 +484,8 @@ impl Default for WindowRulesConfig {
 ///
 /// When disabled, all [`WindowMove`](crate::layout::WindowMove)s are applied
 /// instantly (hint set to [`Restore`](crate::layout::AnimationHint::Restore)).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct AnimationConfig {
     /// Whether layout transitions are animated.
     pub enabled: bool,
@@ -512,8 +499,8 @@ impl Default for AnimationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            duration_ms: 180,
-            easing: "ease-out-expo".into(),
+            duration_ms: 240,
+            easing: "ease-out-expo".to_string(),
         }
     }
 }
@@ -523,7 +510,8 @@ impl Default for AnimationConfig {
 /// - `OriginalSlot` — put the window back where it was before minimize
 /// - `RightOfFocused` — insert as a new column to the right of focused
 /// - `AppendRight` — append as the rightmost column on the canvas
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct MinimizeRestore {
     /// Strategy for placing restored windows.
     pub strategy: MinimizeRestoreStrategy,
@@ -563,17 +551,18 @@ mod tests {
         assert_eq!(parsed.super_key, "VK_F24");
         assert_eq!(parsed.columns_per_screen, 4);
         assert_eq!(parsed.column_width, None);
-        assert_eq!(parsed.min_column_width_px, 320);
-        assert_eq!(parsed.padding.window_gap, 4);
-        assert_eq!(parsed.padding.up, 0);
-        assert_eq!(parsed.padding.down, 0);
-        assert_eq!(parsed.animation.duration_ms, 180);
+        assert_eq!(parsed.min_column_width_px, 640);
+        assert_eq!(parsed.padding.window_gap, 16);
+        assert_eq!(parsed.padding.up, 16);
+        assert_eq!(parsed.padding.down, 16);
+        assert_eq!(parsed.animation.duration_ms, 240);
         assert_eq!(parsed.animation.easing, "ease-out-expo");
     }
 
     #[test]
     fn config_from_toml_with_settings() {
-        // Full TOML required since there are no serde defaults.
+        // Full TOML exercises every field end-to-end. (Serde defaults now exist,
+        // but a complete file is the clearest way to verify full-population.)
         let toml_str = r#"
 super_key = "VK_LWIN"
 columns_per_screen = 3
@@ -618,33 +607,107 @@ strategy = "original_slot"
         assert!(!config.animation.enabled);
     }
 
-    /// Negative: empty TOML should fail to parse since all fields are required.
+    /// Positive: empty TOML deserializes to compiled defaults.
     ///
-    /// This is the safety net — if a field is missing from `default-config.toml`,
-    /// the error is caught at deserialization time.
+    /// Because `StmConfig` carries `#[serde(default)]` at the container level,
+    /// an empty file
+    /// (or a file with no recognized keys) yields a fully-defaulted [`StmConfig`].
+    /// This is the core of the "code is the source of truth" model: there is no
+    /// separate shipped-defaults file to merge.
     #[test]
-    fn config_from_empty_toml_is_rejected() {
-        let toml_str = "";
-        let result = toml::from_str::<StmConfig>(toml_str);
+    fn config_from_empty_toml_uses_defaults() {
+        let config: StmConfig = toml::from_str("").expect("empty TOML should use defaults");
+        assert_eq!(config, StmConfig::default());
+    }
+
+    /// Positive: partial TOML (a single field) fills the rest from defaults.
+    #[test]
+    fn config_from_partial_toml_uses_defaults() {
+        let config: StmConfig =
+            toml::from_str("columns_per_screen = 3\n").expect("partial TOML should parse");
+        assert_eq!(config.columns_per_screen, 3);
+        // Everything else comes from defaults.
+        assert_eq!(config.super_key, "VK_F24");
+        assert_eq!(config.min_column_width_px, 640);
+        assert_eq!(config.padding.window_gap, 16);
+        assert_eq!(config.animation.duration_ms, 240);
+    }
+
+    /// Positive: a nested-partial `[padding]` block fills missing sub-fields.
+    ///
+    /// Only `window_gap` is set; `up` and `down` must come from their serde
+    /// defaults. This verifies the per-field defaults reach inside nested structs.
+    #[test]
+    fn config_from_nested_partial_toml_uses_defaults() {
+        let toml_str = "[padding]\nwindow_gap = 20\n";
+        let config: StmConfig = toml::from_str(toml_str).expect("nested-partial should parse");
+        assert_eq!(config.padding.window_gap, 20);
+        assert_eq!(config.padding.up, 16);
+        assert_eq!(config.padding.down, 16);
+        // Top-level defaults still apply.
+        assert_eq!(config.columns_per_screen, 4);
+    }
+
+    /// Positive: a nested-partial `[hotkeys]` block fills missing bindings.
+    ///
+    /// Only `focus_left` is overridden; all other 12 hotkey fields must come
+    /// from serde defaults. This verifies that per-field defaults work inside
+    /// the `Hotkeys` nested struct, not just `Padding`.
+    #[test]
+    fn config_from_nested_partial_hotkeys_uses_defaults() {
+        let toml_str = "[hotkeys]\nfocus_left = \"Alt+H\"\n";
+        let config: StmConfig =
+            toml::from_str(toml_str).expect("nested-partial hotkeys should parse");
+        assert_eq!(config.hotkeys.focus_left, "Alt+H");
+        // All other hotkeys should still be their defaults.
+        assert_eq!(config.hotkeys.focus_right, "Super+L");
+        assert_eq!(config.hotkeys.focus_up, "Super+K");
+        assert_eq!(config.hotkeys.focus_down, "Super+J");
+        assert_eq!(config.hotkeys.swap_left, "Super+Shift+H");
+        assert_eq!(config.hotkeys.close_window, "Super+Q");
+        assert_eq!(config.hotkeys.reload_config, "Super+Shift+R");
+        // Top-level and other nested defaults should be untouched.
+        assert_eq!(config.columns_per_screen, 4);
+        assert_eq!(config.padding.window_gap, 16);
+    }
+
+    /// Positive: a nested-partial `[animation]` block fills missing fields.
+    ///
+    /// Only `duration_ms` is set; `enabled` and `easing` must come from serde
+    /// defaults. This verifies per-field defaults inside `AnimationConfig`.
+    #[test]
+    fn config_from_nested_partial_animation_uses_defaults() {
+        let toml_str = "[animation]\nduration_ms = 500\n";
+        let config: StmConfig =
+            toml::from_str(toml_str).expect("nested-partial animation should parse");
+        assert_eq!(config.animation.duration_ms, 500);
+        // Missing fields should be their compiled defaults.
         assert!(
-            result.is_err(),
-            "empty TOML should fail without serde defaults"
+            config.animation.enabled,
+            "animation.enabled should default to true"
         );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("missing field"),
-            "error should mention missing field: {err}"
+        assert_eq!(
+            config.animation.easing, "ease-out-expo",
+            "animation.easing should default to ease-out-expo"
         );
     }
 
-    /// Negative: partial TOML (missing fields) should fail to parse.
+    /// Sync guard: the hand-written `default-config.toml` example must parse to
+    /// exactly the compiled [`StmConfig::default()`].
+    ///
+    /// This enforces the AGENTS.md rule that `default-config.toml` stays in sync
+    /// with the compiled `Default` impl. If you change a
+    /// default in code, update the example file too (or this test fails).
     #[test]
-    fn config_from_partial_toml_is_rejected() {
-        let toml_str = "columns_per_screen = 4\n";
-        let result = toml::from_str::<StmConfig>(toml_str);
-        assert!(
-            result.is_err(),
-            "partial TOML should fail without serde defaults"
+    fn default_config_toml_matches_compiled_defaults() {
+        let example: &str = include_str!("../../default-config.toml");
+        let parsed: StmConfig =
+            toml::from_str(example).expect("default-config.toml must parse as StmConfig");
+        assert_eq!(
+            parsed,
+            StmConfig::default(),
+            "default-config.toml drifted from compiled defaults; \
+             update one to match the other"
         );
     }
 
@@ -711,8 +774,13 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_negative_window_padding() {
-        let mut config = StmConfig::default();
-        config.padding.window_gap = -1;
+        let config = StmConfig {
+            padding: Padding {
+                window_gap: -1,
+                ..Padding::default()
+            },
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_err());
         assert!(
             config
@@ -724,26 +792,40 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_negative_up_padding() {
-        let mut config = StmConfig::default();
-        config.padding.up = -5;
+        let config = StmConfig {
+            padding: Padding {
+                up: -5,
+                ..Padding::default()
+            },
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_err());
         assert!(config.validate().unwrap_err().contains("padding.up"));
     }
 
     #[test]
     fn config_validate_rejects_negative_down_padding() {
-        let mut config = StmConfig::default();
-        config.padding.down = -10;
+        let config = StmConfig {
+            padding: Padding {
+                down: -10,
+                ..Padding::default()
+            },
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_err());
         assert!(config.validate().unwrap_err().contains("padding.down"));
     }
 
     #[test]
     fn config_validate_accepts_zero_padding() {
-        let mut config = StmConfig::default();
-        config.padding.window_gap = 0;
-        config.padding.up = 0;
-        config.padding.down = 0;
+        let config = StmConfig {
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_ok());
     }
 
@@ -754,8 +836,10 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_zero_min_column_width() {
-        let mut config = StmConfig::default();
-        config.min_column_width_px = 0;
+        let config = StmConfig {
+            min_column_width_px: 0,
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_err());
         assert!(
             config
@@ -767,9 +851,11 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_min_exceeding_column_width() {
-        let mut config = StmConfig::default();
-        config.min_column_width_px = 1000;
-        config.column_width = Some(960);
+        let config = StmConfig {
+            min_column_width_px: 1000,
+            column_width: Some(960),
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_err());
         assert!(
             config
@@ -781,16 +867,21 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_accepts_min_equal_to_column_width() {
-        let mut config = StmConfig::default();
-        config.min_column_width_px = 960;
-        config.column_width = Some(960);
+        // When column_width is explicitly set, min must be <= it (equality is ok).
+        let config = StmConfig {
+            min_column_width_px: 960,
+            column_width: Some(960),
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn config_validate_rejects_zero_columns_per_screen() {
-        let mut config = StmConfig::default();
-        config.columns_per_screen = 0;
+        let config = StmConfig {
+            columns_per_screen: 0,
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_err());
         assert!(
             config
@@ -803,9 +894,11 @@ strategy = "original_slot"
     #[test]
     fn config_validate_accepts_column_width_none() {
         // When column_width is None (auto-compute mode), min check is deferred.
-        let mut config = StmConfig::default();
-        config.column_width = None;
-        config.min_column_width_px = 9999;
+        let config = StmConfig {
+            column_width: None,
+            min_column_width_px: 9999,
+            ..StmConfig::default()
+        };
         assert!(config.validate().is_ok());
     }
 

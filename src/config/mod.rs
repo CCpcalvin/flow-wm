@@ -16,7 +16,9 @@
 //!    default config files and JSON Schemas.
 //!
 //! 2. **Load** — [`lifecycle::load_app_config`] and [`lifecycle::load_rules_config`] read TOML
-//!    files from disk, with shipped defaults as the base layer.
+//!    files from disk. Each config struct carries `#[serde(default)]` at the container level,
+//!    so files may be partial or empty — serde fills missing fields from the struct's
+//!    [`Default`] implementation.
 //!
 //! 3. **Validate** — [`lifecycle::check_config`] validates config files without loading
 //!    them into the running daemon.
@@ -31,8 +33,7 @@ pub mod schema;
 pub mod types;
 
 pub use lifecycle::{
-    check_config, init_config_dir, load_app_config, load_default_config, load_default_rules,
-    load_merged_app_config, load_rules_config,
+    check_config, init_config_dir, load_app_config, load_default_rules, load_rules_config,
 };
 pub use types::StmConfig;
 pub use types::WindowRulesConfig;

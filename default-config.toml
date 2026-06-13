@@ -1,17 +1,18 @@
 #:schema ./schemas/stm-config.schema.json
 
-# Default application configuration for ScrollingTilingManager.
+# Example application configuration for ScrollingTilingManager.
 #
-# This file ships alongside stmd.exe and provides the canonical defaults for
-# all application settings. Users can override any of these values by editing
-# their own stm.toml in the config directory (~/.config/stm/stm.toml).
+# This file is a HAND-WRITTEN EXAMPLE. `stm config init` copies it verbatim
+# into your config directory (~/.config/stm/stm.toml) as a fully-commented
+# starting point.
 #
-# This file must contain ALL StmConfig fields. If a field is missing,
-# deserialization fails with "missing field 'xyz'" — that's intentional,
-# it catches forgotten updates when adding new config fields.
+# It is NOT read at runtime. The canonical default values live in code, in
+# src/config/defaults.rs, and are applied by serde when fields are absent from
+# your stm.toml. That means your stm.toml may be partial or even empty.
 #
-# Users' stm.toml files can be partial; the TOML-level merge fills gaps
-# from this file before deserializing. See src/config/lifecycle.rs.
+# Keep this file in sync with src/config/defaults.rs: the test
+# `default_config_toml_matches_compiled_defaults` enforces that deserializing
+# this file yields exactly StmConfig::default().
 #
 # For field documentation, see the StmConfig docstring in src/config/types.rs.
 
@@ -36,9 +37,9 @@ min_column_width_px = 640
 # - up: reserved space above the tiling area
 # - down: reserved space below the tiling area (e.g., for taskbar clearance)
 [padding]
-window_gap = 4
-up = 4
-down = 4
+window_gap = 16
+up = 16
+down = 16
 
 # Hotkey bindings (13 total).
 # Uses Vim-style Super+H/J/K/L for focus navigation.
