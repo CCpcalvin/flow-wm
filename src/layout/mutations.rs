@@ -262,12 +262,19 @@ pub fn focus(
 ///
 /// This is used by focus, swap, resize, and other operations that need
 /// to ensure a specific column is on-screen.
+///
+/// # Slot Model
+///
+/// Columns are laid out in slots: `slot_width = col_width + window_gap`.
+/// The canvas starts at `window_gap` (left-edge gap). Each column `i`
+/// is at canvas position `window_gap + i * slot_width`.
 pub(crate) fn ensure_column_visible(
     layout: &VirtualLayout,
     col_idx: usize,
     config: &MutationConfig,
 ) -> VirtualLayout {
-    let mut canvas_x: i32 = 0;
+    let gap = config.padding.window_gap;
+    let mut canvas_x: i32 = gap;
     for (i, col) in layout.columns.iter().enumerate() {
         let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         if i == col_idx {
@@ -293,7 +300,7 @@ pub(crate) fn ensure_column_visible(
             // Already visible
             return layout.clone();
         }
-        canvas_x += col_px;
+        canvas_x += col_px + gap;
     }
     layout.clone()
 }
@@ -315,12 +322,18 @@ pub(crate) fn ensure_column_visible(
 /// is shifted rightward into the middle of the viewport. The projection layer
 /// ([`super::projection::project`]) already handles negative offsets correctly.
 ///
+/// # Slot Model
+///
+/// Columns are laid out in slots: `slot_width = col_width + window_gap`.
+/// The canvas starts at `window_gap` (left-edge gap). The total canvas width
+/// uses [`slot_based_canvas_width`].
+///
 /// # Algorithm
 ///
-/// 1. Compute total canvas width from all columns.
+/// 1. Compute total canvas width from all columns (slot-based).
 /// 2. **If canvas ≤ monitor**: center the *entire canvas* with
 ///    `viewport_offset = -(monitor_width - canvas_width) / 2`.
-/// 3. **If canvas > monitor**: walk columns left-to-right, find the target
+/// 3. **If canvas > monitor**: walk columns left-to-right (slot-based), find the target
 ///    column's center, compute `viewport_offset = col_center - monitor_width/2`,
 ///    clamped to `≥ 0`.
 ///
@@ -351,11 +364,7 @@ pub(crate) fn center_on_column(
         layout.columns.len()
     );
 
-    let total_canvas: i32 = layout
-        .columns
-        .iter()
-        .map(|c| column_eighths_to_pixels(c.width_eighths, config.column_width))
-        .sum();
+    let total_canvas = slot_based_canvas_width(layout, config);
 
     if total_canvas <= config.monitor_width {
         // All columns fit on screen — center the *entire canvas* horizontally.
@@ -369,9 +378,8 @@ pub(crate) fn center_on_column(
     }
 
     // Canvas exceeds monitor — center the requested column in the viewport.
-    // viewport_offset is always ≥ 0 here because col_center ≥ monitor_width/2
-    // when the canvas is wider than the monitor.
-    let mut canvas_x: i32 = 0;
+    let gap = config.padding.window_gap;
+    let mut canvas_x: i32 = gap;
     for (i, col) in layout.columns.iter().enumerate() {
         let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         if i == col_idx {
@@ -382,7 +390,7 @@ pub(crate) fn center_on_column(
                 ..layout.clone()
             };
         }
-        canvas_x += col_px;
+        canvas_x += col_px + gap;
     }
 
     // Unreachable because we asserted `col_idx < len`, but satisfy the compiler.
@@ -805,32 +813,43 @@ pub fn remove_window(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Compute the step width of the first visible column.
+/// Compute the step width of the first visible column (slot width).
 fn first_visible_step(layout: &VirtualLayout, config: &MutationConfig) -> Option<i32> {
-    let mut canvas_x: i32 = 0;
+    let gap = config.padding.window_gap;
+    let mut canvas_x: i32 = gap;
     let vp_right = layout.viewport_offset + config.monitor_width;
     for col in &layout.columns {
         let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
         let col_left = canvas_x;
         let col_right = canvas_x + col_px;
         if col_right > layout.viewport_offset && col_left < vp_right {
-            return Some(column_step_width(col, config.column_width));
+            return Some(column_step_width(col, config.column_width, gap));
         }
-        canvas_x += col_px;
+        canvas_x += col_px + gap;
     }
     None
 }
 
-/// Total pixel span of all columns (packed, no inter-column gap).
-fn total_column_span(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
+/// Total pixel span of all columns using the slot model.
+///
+/// Canvas width = `window_gap` (leading) + `sum(col_width_i + window_gap)`.
+fn slot_based_canvas_width(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
     if layout.columns.is_empty() {
         return 0;
     }
-    layout
+    let gap = config.padding.window_gap;
+    let total_slots: i32 = layout
         .columns
         .iter()
-        .map(|c| column_eighths_to_pixels(c.width_eighths, config.column_width))
-        .sum()
+        .map(|c| column_eighths_to_pixels(c.width_eighths, config.column_width) + gap)
+        .sum();
+    gap + total_slots
+}
+
+/// Legacy alias for canvas width calculation used by `remove_window`.
+/// Uses the slot-based canvas model.
+fn total_column_span(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
+    slot_based_canvas_width(layout, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -879,8 +898,8 @@ mod tests {
         let config = test_config();
         let result = scroll_right(&layout, &config).expect("scroll right");
         assert!(result.viewport_offset > 0);
-        // Step = col_width = 960 (packed, no inter-column gap)
-        assert_eq!(result.viewport_offset, 960);
+        // Slot model: step = col_width + window_gap = 960 + 4 = 964
+        assert_eq!(result.viewport_offset, 964);
     }
 
     #[test]
@@ -1029,12 +1048,27 @@ mod tests {
 
     #[test]
     fn swap_column_no_viewport_change_when_both_visible() {
-        let config = test_config();
-        let layout = three_column_layout(); // viewport=0, cols 0+1 fully visible
+        // With zero gap, both columns fit exactly on the monitor
+        let config = MutationConfig {
+            monitor_width: 1920,
+            column_width: 960,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 8,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+        };
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
         let result = swap_column(&layout, WindowId(1), Direction::Right, &config).expect("swap");
         assert_eq!(
             result.viewport_offset, 0,
-            "camera should not shift when both columns are visible"
+            "camera should not shift when both columns are visible (zero gap)"
         );
     }
 
@@ -1167,7 +1201,19 @@ mod tests {
 
     #[test]
     fn swap_window_no_viewport_change_when_both_visible() {
-        let config = test_config();
+        // With zero gap, both columns fit exactly on the monitor
+        let config = MutationConfig {
+            monitor_width: 1920,
+            column_width: 960,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 8,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+        };
         let layout = VirtualLayout::with_columns(
             vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
             0,
@@ -1567,9 +1613,11 @@ mod tests {
     #[test]
     fn scroll_right_at_max_offset_returns_none() {
         // Negative: can't scroll beyond rightmost column
+        // Slot model: single 8/8 column = 1920px. Canvas = 4 + (1920+4) = 1928
+        // max_offset = 1928 - 1920 = 8. But viewport_offset=0 + step=1924 > 8 → None
         let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
         let config = test_config();
-        // Single column fills viewport exactly — no scroll possible
+        // Single column fills viewport — no scroll possible (step would exceed max)
         assert!(scroll_right(&layout, &config).is_none());
     }
 
@@ -1706,11 +1754,10 @@ mod tests {
 
     #[test]
     fn center_on_column_first_column() {
-        // Positive: centering on column 0 clamps to offset 0 because the column
-        // is already visible from the left edge. 3 columns × 4 eighths (960px)
-        // on a 1920px monitor.
-        // col_center = 0 + 960/2 = 480
-        // offset = 480 - 1920/2 = 480 - 960 = -480 → clamped to 0
+        // Positive: centering on column 0 clamps to offset because the slot-based
+        // canvas starts at window_gap=4.
+        // Slot model: col 0 at canvas_x=4, center=4+480=484
+        // offset = 484 - 960 = -476 → clamped to 0
         let layout = three_column_layout();
         let config = test_config();
         let result = center_on_column(&layout, 0, &config);
@@ -1720,35 +1767,36 @@ mod tests {
     #[test]
     fn center_on_column_middle_column() {
         // Positive: centering on column 1 centers it in the viewport.
-        // col_center = 960 + 960/2 = 1440
-        // offset = 1440 - 960 = 480
+        // Slot model: col 0 at 4 (960px), col 1 at 4+960+4=968
+        // col_center = 968 + 480 = 1448
+        // offset = 1448 - 960 = 488
         let layout = three_column_layout();
         let config = test_config();
         let result = center_on_column(&layout, 1, &config);
-        assert_eq!(result.viewport_offset, 480);
+        assert_eq!(result.viewport_offset, 488);
     }
 
     #[test]
     fn center_on_column_last_column() {
         // Positive: centering on the last column (index 2) scrolls right.
-        // col_center = 1920 + 960/2 = 2400
-        // offset = 2400 - 960 = 1440
+        // Slot model: col 0 at 4, col 1 at 968, col 2 at 1932
+        // col_center = 1932 + 480 = 2412
+        // offset = 2412 - 960 = 1452
         let layout = three_column_layout();
         let config = test_config();
         let result = center_on_column(&layout, 2, &config);
-        assert_eq!(result.viewport_offset, 1440);
+        assert_eq!(result.viewport_offset, 1452);
     }
 
     #[test]
     fn center_on_column_single_column() {
-        // Positive: single column (960px canvas) on 1920px monitor →
-        // entire canvas centered: offset = -(1920 - 960) / 2 = -480.
-        // This places the single column at screen_x = 0 + (0 - (-480)) = 480,
-        // centering it horizontally on the monitor.
+        // Positive: single column (960px) on 1920px monitor →
+        // Canvas = 4 + (960+4) = 968. 968 ≤ 1920 → center entire canvas.
+        // offset = -(1920 - 968) / 2 = -476
         let layout = VirtualLayout::with_columns(vec![Column::new(4, WindowId(1))], 0);
         let config = test_config();
         let result = center_on_column(&layout, 0, &config);
-        assert_eq!(result.viewport_offset, -480);
+        assert_eq!(result.viewport_offset, -476);
     }
 
     #[test]
@@ -1767,6 +1815,7 @@ mod tests {
     fn initialize_windows_with_focus_produces_centered_viewport() {
         // Positive: passing focus_col_idx=Some(2) (last column of 3) produces
         // a viewport_offset > 0 because the camera centers on the last column.
+        // Slot model: col 2 at canvas_x=1932, center=2412, offset=1452
         let layout = initialize_windows(
             &[WindowId(1), WindowId(2), WindowId(3)],
             &test_config(),
@@ -1777,8 +1826,7 @@ mod tests {
             layout.viewport_offset > 0,
             "viewport should be centered on last column, not left-aligned"
         );
-        // Expected: 1440 (col_center = 2400, offset = 2400 - 960 = 1440)
-        assert_eq!(layout.viewport_offset, 1440);
+        assert_eq!(layout.viewport_offset, 1452);
     }
 
     #[test]

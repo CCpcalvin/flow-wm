@@ -277,8 +277,9 @@ pub struct MonitorInfo {
 /// - Canvas starts at `window_gap` (initial left-edge gap)
 /// - The last column's embedded right gap serves as the right-edge gap
 ///
-/// Vertically, the same model applies: `(row_count + 1) * window_gap` gaps
-/// are distributed within the available height.
+/// Vertically, each window is inset by `window_gap` on top and bottom within
+/// its row cell, producing `2 * window_gap` gap between adjacent rows and
+/// `window_gap` gap at the top/bottom edges of the tiling area.
 ///
 /// See the [crate-level documentation](crate#padding-strategy) for a visual diagram.
 #[derive(Debug, Clone, Copy, PartialEq)]
