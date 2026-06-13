@@ -65,7 +65,7 @@
 
 use std::path::PathBuf;
 
-use crate::common::{Rect, Size};
+use crate::common::{InvisibleBounds, Rect, Size};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::HWND;
 
@@ -179,6 +179,16 @@ pub struct Window {
     /// This is the *live* position — distinct from `pre_manage_rect` which
     /// is the snapshot from *before* stm managed the window.
     pub tiled_rect: Option<Rect>,
+
+    /// Invisible border sizes for this window.
+    ///
+    /// Measured once at registration time by comparing `GetWindowRect`
+    /// (full rect) against DWM extended frame bounds (visible rect).
+    /// Used by the daemon to translate between the layout engine's visible-rect
+    /// coordinates and Win32's window-rect coordinates for `SetWindowPos`.
+    ///
+    /// Defaults to [`InvisibleBounds::zero()`] if the measurement failed.
+    pub invisible_bounds: InvisibleBounds,
 }
 
 // SAFETY: `Window` contains `HWND` (a raw pointer), but we treat it as an
@@ -193,6 +203,19 @@ impl Window {
     /// `last_virtual_slot` starts as `None`; it is populated when the window
     /// is assigned a virtual layout position. `last_natural_size` defaults to
     /// the size component of `pre_manage_rect`.
+    ///
+    /// # Arguments
+    ///
+    /// * `hwnd` — Win32 window handle.
+    /// * `exe` — Executable name (e.g. `"code.exe"`).
+    /// * `title` — Window title bar text.
+    /// * `class` — Win32 window class name.
+    /// * `process_path` — Full path to the executable.
+    /// * `pre_manage_rect` — Window's position/size before stm manages it.
+    /// * `initial_state` — Classified lifecycle state.
+    /// * `invisible_bounds` — Per-edge invisible border sizes, measured by
+    ///   comparing `GetWindowRect` against DWM extended frame bounds.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         hwnd: HWND,
@@ -202,6 +225,7 @@ impl Window {
         process_path: PathBuf,
         pre_manage_rect: Rect,
         initial_state: WindowState,
+        invisible_bounds: InvisibleBounds,
     ) -> Self {
         let last_natural_size = Size {
             w: pre_manage_rect.width,
@@ -218,6 +242,7 @@ impl Window {
             last_natural_size,
             last_virtual_slot: None,
             tiled_rect: None,
+            invisible_bounds,
         }
     }
 }

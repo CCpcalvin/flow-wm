@@ -126,6 +126,124 @@ impl Rect {
     }
 }
 
+/// Pixel offsets between the full window rect and the visible rect.
+///
+/// On Windows 10/11, most top-level windows have invisible borders used for
+/// shadows and resize hit-testing. `GetWindowRect` returns the larger rect
+/// including these borders, while `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`
+/// returns the smaller visible rect that the user actually sees.
+///
+/// This struct stores the per-edge difference and provides conversion methods
+/// between the two coordinate spaces.
+///
+/// # Coordinate Relationship
+///
+/// ```text
+/// Window rect (GetWindowRect):
+/// ┌──────────────────────────────────────┐
+/// │ invisible │                  │ invisi │
+/// │  border   │  Visible content │  ble   │
+/// │ (left)    │                  │ border │
+/// │           │                  │(right) │
+/// │           │                  │        │
+/// │           ├──────────────────┤        │  ← top of visible
+/// │           │                  │        │
+/// └──────────────────────────────────────┘
+///              ↑                   ↑
+///           visible left      visible right
+///           window left is further left, window right is further right
+/// ```
+///
+/// All fields are ≥ 0 in normal operation. A window with no invisible borders
+/// (e.g., a borderless fullscreen window) has all zeros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct InvisibleBounds {
+    /// Invisible border width on the left edge (visible_left - window_left).
+    pub left: i32,
+    /// Invisible border height on the top edge (visible_top - window_top).
+    pub top: i32,
+    /// Invisible border width on the right edge (window_right - visible_right).
+    pub right: i32,
+    /// Invisible border height on the bottom edge (window_bottom - visible_bottom).
+    pub bottom: i32,
+}
+
+impl InvisibleBounds {
+    /// Creates an `InvisibleBounds` with all edges set to zero.
+    ///
+    /// Represents a window with no invisible borders (e.g., borderless
+    /// fullscreen). Used as a safe fallback when DWM queries fail.
+    #[must_use]
+    pub fn zero() -> Self {
+        Self {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        }
+    }
+
+    /// Converts a **visible rect** to the corresponding **window rect**.
+    ///
+    /// Expands the rect outward by the invisible border amounts. This is
+    /// used when translating layout-engine output (visible rects) into
+    /// `SetWindowPos` coordinates (window rects).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use scrolling_tiling_manager::common::{InvisibleBounds, Rect};
+    /// let bounds = InvisibleBounds { left: 7, top: 0, right: 7, bottom: 7 };
+    /// let visible = Rect { x: 100, y: 0, width: 800, height: 600 };
+    /// let window = bounds.visible_to_window(visible);
+    /// // Window rect is larger and shifted left
+    /// assert_eq!(window.x, 93);       // 100 - 7
+    /// assert_eq!(window.y, 0);        // 0 - 0
+    /// assert_eq!(window.width, 814);  // 800 + 7 + 7
+    /// assert_eq!(window.height, 607); // 600 + 0 + 7
+    /// ```
+    #[must_use]
+    pub fn visible_to_window(self, visible: Rect) -> Rect {
+        Rect {
+            x: visible.x - self.left,
+            y: visible.y - self.top,
+            width: visible.width + self.left + self.right,
+            height: visible.height + self.top + self.bottom,
+        }
+    }
+
+    /// Converts a **window rect** to the corresponding **visible rect**.
+    ///
+    /// Shrinks the rect inward by the invisible border amounts. This is
+    /// the inverse of [`visible_to_window`](Self::visible_to_window).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use scrolling_tiling_manager::common::{InvisibleBounds, Rect};
+    /// let bounds = InvisibleBounds { left: 7, top: 0, right: 7, bottom: 7 };
+    /// let window = Rect { x: 93, y: 0, width: 814, height: 607 };
+    /// let visible = bounds.window_to_visible(window);
+    /// assert_eq!(visible, Rect { x: 100, y: 0, width: 800, height: 600 });
+    /// ```
+    #[must_use]
+    pub fn window_to_visible(self, window: Rect) -> Rect {
+        Rect {
+            x: window.x + self.left,
+            y: window.y + self.top,
+            width: window.width - self.left - self.right,
+            height: window.height - self.top - self.bottom,
+        }
+    }
+}
+
+impl Default for InvisibleBounds {
+    /// Returns all-zeros bounds (no invisible borders).
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +486,133 @@ mod tests {
             result.is_err(),
             "number should not deserialize as Direction"
         );
+    }
+
+    // --- InvisibleBounds tests ---
+
+    #[test]
+    fn invisible_bounds_zero_all_zeros() {
+        let b = InvisibleBounds::zero();
+        assert_eq!(b.left, 0);
+        assert_eq!(b.top, 0);
+        assert_eq!(b.right, 0);
+        assert_eq!(b.bottom, 0);
+    }
+
+    #[test]
+    fn invisible_bounds_default_is_zero() {
+        assert_eq!(InvisibleBounds::default(), InvisibleBounds::zero());
+    }
+
+    #[test]
+    fn invisible_bounds_visible_to_window_expands() {
+        let bounds = InvisibleBounds {
+            left: 7,
+            top: 0,
+            right: 7,
+            bottom: 7,
+        };
+        let visible = Rect {
+            x: 100,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let window = bounds.visible_to_window(visible);
+        assert_eq!(window.x, 93);
+        assert_eq!(window.y, 0);
+        assert_eq!(window.width, 814);
+        assert_eq!(window.height, 607);
+    }
+
+    #[test]
+    fn invisible_bounds_window_to_visible_shrinks() {
+        let bounds = InvisibleBounds {
+            left: 7,
+            top: 0,
+            right: 7,
+            bottom: 7,
+        };
+        let window = Rect {
+            x: 93,
+            y: 0,
+            width: 814,
+            height: 607,
+        };
+        let visible = bounds.window_to_visible(window);
+        assert_eq!(visible.x, 100);
+        assert_eq!(visible.y, 0);
+        assert_eq!(visible.width, 800);
+        assert_eq!(visible.height, 600);
+    }
+
+    #[test]
+    fn invisible_bounds_roundtrip_visible_to_window_to_visible() {
+        // Positive: converting visible→window→visible should be identity
+        let bounds = InvisibleBounds {
+            left: 7,
+            top: 3,
+            right: 7,
+            bottom: 7,
+        };
+        let original = Rect {
+            x: 500,
+            y: 200,
+            width: 1000,
+            height: 800,
+        };
+        let roundtrip = bounds.window_to_visible(bounds.visible_to_window(original));
+        assert_eq!(original, roundtrip);
+    }
+
+    #[test]
+    fn invisible_bounds_zero_bounds_is_identity() {
+        // Positive: zero bounds means visible_to_window and window_to_visible are identity
+        let bounds = InvisibleBounds::zero();
+        let rect = Rect {
+            x: 100,
+            y: 200,
+            width: 300,
+            height: 400,
+        };
+        assert_eq!(bounds.visible_to_window(rect), rect);
+        assert_eq!(bounds.window_to_visible(rect), rect);
+    }
+
+    #[test]
+    fn invisible_bounds_asymmetric() {
+        // Positive: asymmetric bounds (common on Windows — top=0, others=7)
+        let bounds = InvisibleBounds {
+            left: 7,
+            top: 0,
+            right: 7,
+            bottom: 7,
+        };
+        let visible = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let window = bounds.visible_to_window(visible);
+        // Top has no invisible border, so y stays at 0
+        assert_eq!(window.y, 0);
+        // But x goes negative (window extends further left)
+        assert_eq!(window.x, -7);
+        assert_eq!(window.width, 114); // 100 + 7 + 7
+        assert_eq!(window.height, 107); // 100 + 0 + 7
+    }
+
+    #[test]
+    fn invisible_bounds_serialize_roundtrip() {
+        let bounds = InvisibleBounds {
+            left: 7,
+            top: 0,
+            right: 7,
+            bottom: 7,
+        };
+        let json = serde_json::to_string(&bounds).unwrap();
+        let parsed: InvisibleBounds = serde_json::from_str(&json).unwrap();
+        assert_eq!(bounds, parsed);
     }
 }

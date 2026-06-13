@@ -34,7 +34,9 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
-use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
@@ -46,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PWSTR;
 
-use crate::common::Rect;
+use crate::common::{InvisibleBounds, Rect};
 
 // ── WindowInfo struct ───────────────────────────────────────────────
 
@@ -187,6 +189,125 @@ pub fn get_window_rect(hwnd: HWND) -> Result<Rect, String> {
         width: rect.right - rect.left,
         height: rect.bottom - rect.top,
     })
+}
+
+/// Retrieves the window's **visible** screen rectangle via DWM extended frame bounds.
+///
+/// Unlike [`get_window_rect`] (which returns the full rect including invisible
+/// borders), this function returns the rectangle that the user actually sees on
+/// screen. On Windows 10/11, the difference is typically ~7px on left, right,
+/// and bottom edges (used for shadows and resize hit-testing).
+///
+/// # How It Works
+///
+/// `DwmGetWindowAttribute` with `DWMWA_EXTENDED_FRAME_BOUNDS` queries the
+/// Desktop Window Manager (DWM) for the compositor's knowledge of the window's
+/// visible bounds. This is more accurate than `GetWindowRect` for tiling
+/// purposes because it excludes the invisible "extended frame" area.
+///
+/// # Fail-Open Behavior
+///
+/// If DWM is unavailable (e.g., on older systems without DWM, or during
+/// certain fullscreen transitions), this function returns an error. The caller
+/// ([`get_invisible_bounds`]) handles this by falling back to zero bounds.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the DWM query fails.
+///
+/// # Example
+///
+/// ```no_run
+/// use scrolling_tiling_manager::registry::win32::get_extended_frame_bounds;
+/// use windows::Win32::Foundation::HWND;
+/// use windows::core::PCWSTR;
+/// // hwnd would come from EnumWindows or a hook event
+/// // let visible_rect = get_extended_frame_bounds(hwnd).expect("visible rect");
+/// let _ = get_extended_frame_bounds(HWND(std::ptr::null_mut())); // returns Err
+/// ```
+pub fn get_extended_frame_bounds(hwnd: HWND) -> Result<Rect, String> {
+    let mut rect = RECT::default();
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut core::ffi::c_void,
+            size_of::<RECT>() as u32,
+        )
+    }
+    .map_err(|e| format!("DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS) failed: {e}"))?;
+
+    Ok(Rect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    })
+}
+
+/// Computes the per-edge invisible border sizes for a window.
+///
+/// Compares [`get_window_rect`] (full rect including invisible borders) against
+/// [`get_extended_frame_bounds`] (visible rect) to determine how many pixels
+/// of invisible border exist on each edge.
+///
+/// # Fail-Open Strategy
+///
+/// If either query fails (e.g., DWM unavailable, window destroyed mid-query),
+/// returns [`InvisibleBounds::zero()`]. This means the window will be treated
+/// as having no invisible borders — the window may have slightly larger gaps,
+/// but this is preferable to crashing or excluding the window entirely.
+///
+/// # Coordinate Math
+///
+/// Given:
+/// - Window rect (from `GetWindowRect`): left=WL, top=WT, right=WR, bottom=WB
+/// - Visible rect (from DWM): left=VL, top=VT, right=VR, bottom=VB
+///
+/// The window rect is always larger (or equal):
+/// ```text
+/// left   = VL - WL  (≥ 0)
+/// top    = VT - WT  (≥ 0)
+/// right  = WR - VR  (≥ 0)
+/// bottom = WB - VB  (≥ 0)
+/// ```
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Example
+///
+/// ```no_run
+/// use scrolling_tiling_manager::registry::win32::get_invisible_bounds;
+/// use windows::Win32::Foundation::HWND;
+/// let bounds = get_invisible_bounds(HWND(std::ptr::null_mut()));
+/// // For an invalid HWND, returns zero bounds (fail-open)
+/// assert_eq!(bounds, scrolling_tiling_manager::common::InvisibleBounds::zero());
+/// ```
+#[must_use]
+pub fn get_invisible_bounds(hwnd: HWND) -> InvisibleBounds {
+    match (
+        get_window_rect(hwnd).ok(),
+        get_extended_frame_bounds(hwnd).ok(),
+    ) {
+        (Some(window_rect), Some(visible_rect)) => {
+            // Clamp negative values to zero — in rare edge cases (e.g.,
+            // window transitioning between states), the visible rect might
+            // extend slightly beyond the window rect.
+            InvisibleBounds {
+                left: (visible_rect.x - window_rect.x).max(0),
+                top: (visible_rect.y - window_rect.y).max(0),
+                right: (window_rect.right() - visible_rect.right()).max(0),
+                bottom: (window_rect.bottom() - visible_rect.bottom()).max(0),
+            }
+        }
+        _ => InvisibleBounds::zero(),
+    }
 }
 
 /// Returns `true` if the window has the `WS_VISIBLE` style.
@@ -620,4 +741,83 @@ pub fn get_primary_monitor_work_area() -> Result<Rect, String> {
         width: rect.right - rect.left,
         height: rect.bottom - rect.top,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a null HWND (invalid, not a real window).
+    fn null_hwnd() -> HWND {
+        HWND(std::ptr::null_mut())
+    }
+
+    /// Helper to create an arbitrary invalid HWND (non-null but not a real window).
+    fn invalid_hwnd() -> HWND {
+        HWND(0xDEAD_BEEF as *mut _)
+    }
+
+    #[test]
+    fn get_extended_frame_bounds_null_hwnd_returns_err() {
+        // Positive: null HWND should fail (DWM cannot query a non-existent window).
+        let result = get_extended_frame_bounds(null_hwnd());
+        assert!(
+            result.is_err(),
+            "get_extended_frame_bounds should return Err for null HWND"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("EXTENDED_FRAME_BOUNDS"),
+            "error message should mention the DWM attribute name, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn get_extended_frame_bounds_invalid_hwnd_returns_err() {
+        // Negative: arbitrary non-null invalid HWND should also fail.
+        let result = get_extended_frame_bounds(invalid_hwnd());
+        assert!(
+            result.is_err(),
+            "get_extended_frame_bounds should return Err for invalid HWND"
+        );
+    }
+
+    #[test]
+    fn get_invisible_bounds_null_hwnd_returns_zero() {
+        // Positive: fail-open behavior - null HWND means both GetWindowRect
+        // and DwmGetWindowAttribute fail, so we should get zero bounds (not panic).
+        let bounds = get_invisible_bounds(null_hwnd());
+        assert_eq!(
+            bounds,
+            InvisibleBounds::zero(),
+            "invalid HWND should produce zero invisible bounds (fail-open)"
+        );
+    }
+
+    #[test]
+    fn get_invisible_bounds_invalid_hwnd_returns_zero() {
+        // Negative: non-null invalid HWND should also produce zero bounds.
+        let bounds = get_invisible_bounds(invalid_hwnd());
+        assert_eq!(
+            bounds,
+            InvisibleBounds::zero(),
+            "non-null invalid HWND should produce zero invisible bounds (fail-open)"
+        );
+    }
+
+    #[test]
+    fn get_invisible_bounds_zero_is_identity_for_any_rect() {
+        // Positive: verify that zero bounds means the conversion is identity.
+        // This is the fail-open contract: layout engine visible rect equals
+        // Win32 window rect when there are no invisible borders.
+        let zero = InvisibleBounds::zero();
+        let r = Rect {
+            x: 100,
+            y: 200,
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(zero.visible_to_window(r), r);
+        assert_eq!(zero.window_to_visible(r), r);
+    }
 }

@@ -15,4 +15,4 @@ pub mod error;
 pub mod types;
 
 pub use error::{StmError, StmResult};
-pub use types::{Direction, Point, Rect, Size, WindowId};
+pub use types::{Direction, InvisibleBounds, Point, Rect, Size, WindowId};

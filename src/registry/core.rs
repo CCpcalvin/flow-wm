@@ -106,6 +106,7 @@ use std::collections::HashMap;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GW_OWNER, GetWindow};
 
+use crate::common::Rect;
 use crate::config::types::WindowRulesConfig;
 
 use super::classification;
@@ -305,6 +306,8 @@ impl WindowRegistry {
             &self.pipeline,
         );
 
+        let invisible_bounds = win32::get_invisible_bounds(info.hwnd);
+
         let window = Window::new(
             info.hwnd,
             info.exe.clone(),
@@ -313,6 +316,7 @@ impl WindowRegistry {
             std::path::PathBuf::from(&info.process_path),
             info.rect,
             state,
+            invisible_bounds,
         );
 
         self.windows.insert(key, window);
@@ -478,8 +482,12 @@ impl WindowRegistry {
     ///   - Basic metadata (hwnd, exe, title, class, process_path)
     ///   - `state`: lifecycle state with correct col/row indices
     ///   - `tiled_rect`: current layout-engine position (or null if not tiled)
-    ///   - `actual_rect`: current window position from Windows OS (via `GetWindowRect`),
+    ///   - `window_rect`: current full window position from Windows OS (via `GetWindowRect`),
     ///     or null if the window cannot be queried (destroyed, minimized, etc.)
+    ///   - `visible_rect`: the user-visible portion of the window, derived from
+    ///     `window_rect` minus the stored invisible borders, or null if `window_rect`
+    ///     is unavailable
+    ///   - `invisible_bounds`: per-edge invisible border sizes (left, top, right, bottom)
     ///   - `pre_manage_rect`: position before stm touched the window
     /// - `viewport_offset`: camera position on the virtual canvas
     /// - `focused`: the focused HWND value (or null)
@@ -504,16 +512,37 @@ impl WindowRegistry {
                     })
                 });
 
-                // Query the actual window position from Windows OS.
-                // This allows comparing computed (tiled_rect) vs actual (actual_rect)
-                // to diagnose animation or positioning issues.
-                let actual_rect_json = win32::get_window_rect(w.hwnd).ok().map(|r| {
+                // Query the actual window position from Windows OS (full rect
+                // including invisible borders).
+                let window_rect_json = win32::get_window_rect(w.hwnd).ok().map(|r| {
                     serde_json::json!({
                         "x": r.x,
                         "y": r.y,
                         "width": r.width,
                         "height": r.height,
                     })
+                });
+
+                // Compute the visible rect from the window rect using stored
+                // invisible bounds (or null if no window rect available).
+                let visible_rect_json = window_rect_json.as_ref().and_then(|wr| {
+                    let wr_obj = wr.as_object()?;
+                    let x = wr_obj.get("x")?.as_i64()?;
+                    let y = wr_obj.get("y")?.as_i64()?;
+                    let width = wr_obj.get("width")?.as_i64()?;
+                    let height = wr_obj.get("height")?.as_i64()?;
+                    let visible = w.invisible_bounds.window_to_visible(Rect {
+                        x: x as i32,
+                        y: y as i32,
+                        width: width as i32,
+                        height: height as i32,
+                    });
+                    Some(serde_json::json!({
+                        "x": visible.x,
+                        "y": visible.y,
+                        "width": visible.width,
+                        "height": visible.height,
+                    }))
                 });
 
                 serde_json::json!({
@@ -524,7 +553,14 @@ impl WindowRegistry {
                     "process_path": w.process_path.to_string_lossy(),
                     "state": state_to_json(&w.state),
                     "tiled_rect": tiled_rect_json,
-                    "actual_rect": actual_rect_json,
+                    "window_rect": window_rect_json,
+                    "visible_rect": visible_rect_json,
+                    "invisible_bounds": serde_json::json!({
+                        "left": w.invisible_bounds.left,
+                        "top": w.invisible_bounds.top,
+                        "right": w.invisible_bounds.right,
+                        "bottom": w.invisible_bounds.bottom,
+                    }),
                     "pre_manage_rect": serde_json::json!({
                         "x": w.pre_manage_rect.x,
                         "y": w.pre_manage_rect.y,
@@ -902,15 +938,15 @@ mod tests {
     }
 
     #[test]
-    fn to_json_value_includes_actual_rect_field_for_windows() {
-        // Positive: each window entry in the JSON must contain an "actual_rect" field.
-        // Fix 2 added `actual_rect` via GetWindowRect to the query output.
-        // For windows with invalid HWNDs (unit test), actual_rect will be null.
+    fn to_json_value_includes_window_rect_field_for_windows() {
+        // Positive: each window entry in the JSON must contain a "window_rect" field.
+        // The field is populated via GetWindowRect in the query output.
+        // For windows with invalid HWNDs (unit test), window_rect will be null.
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
 
         // Insert a tiling-active window with an invalid HWND (not a real Win32 window).
-        // GetWindowRect will fail, so actual_rect should be null.
+        // GetWindowRect will fail, so window_rect should be null.
         let hwnd_val = 12345isize;
         insert_test_window(
             &mut reg,
@@ -925,22 +961,22 @@ mod tests {
         assert_eq!(windows.len(), 1);
 
         let w = &windows[0];
-        // The actual_rect field must be present
+        // The window_rect field must be present
         assert!(
-            w.get("actual_rect").is_some(),
-            "actual_rect field must be present in JSON output"
+            w.get("window_rect").is_some(),
+            "window_rect field must be present in JSON output"
         );
-        // For an invalid HWND, actual_rect should be null (GetWindowRect fails)
+        // For an invalid HWND, window_rect should be null (GetWindowRect fails)
         assert!(
-            w["actual_rect"].is_null(),
-            "actual_rect should be null for invalid HWND (GetWindowRect fails)"
+            w["window_rect"].is_null(),
+            "window_rect should be null for invalid HWND (GetWindowRect fails)"
         );
     }
 
     #[test]
-    fn to_json_value_includes_tiled_rect_and_actual_rect() {
-        // Positive: both tiled_rect and actual_rect appear together in JSON.
-        // tiled_rect is set from layout engine data; actual_rect from Win32.
+    fn to_json_value_includes_tiled_rect_and_window_rect() {
+        // Positive: both tiled_rect and window_rect appear together in JSON.
+        // tiled_rect is set from layout engine data; window_rect from Win32.
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
 
@@ -959,6 +995,7 @@ mod tests {
                 height: 600,
             },
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            crate::common::InvisibleBounds::zero(),
         );
         // Set tiled_rect to simulate what the layout engine would produce
         let mut window = window;
@@ -983,16 +1020,25 @@ mod tests {
         assert_eq!(tiled["x"], 4);
         assert_eq!(tiled["width"], 952);
 
-        // actual_rect should be present (null for invalid HWND, but field exists)
+        // window_rect should be present (null for invalid HWND, but field exists)
         assert!(
-            w.get("actual_rect").is_some(),
-            "actual_rect field must be present alongside tiled_rect"
+            w.get("window_rect").is_some(),
+            "window_rect field must be present alongside tiled_rect"
         );
+
+        // invisible_bounds should be present with zero values
+        let ib = w["invisible_bounds"]
+            .as_object()
+            .expect("invisible_bounds should be an object");
+        assert_eq!(ib["left"], 0);
+        assert_eq!(ib["top"], 0);
+        assert_eq!(ib["right"], 0);
+        assert_eq!(ib["bottom"], 0);
     }
 
     #[test]
-    fn to_json_value_actual_rect_null_format() {
-        // Negative: actual_rect must be either null or a {x,y,width,height} object.
+    fn to_json_value_window_rect_null_format() {
+        // Negative: window_rect must be either null or a {x,y,width,height} object.
         // Verify the field exists and is null when GetWindowRect fails.
         let (user, default) = default_rules();
         let reg = WindowRegistry::new(&user, &default);
@@ -1000,6 +1046,130 @@ mod tests {
 
         // Empty registry: windows array is empty, but the field path is valid
         assert!(json["windows"].is_array());
+    }
+
+    #[test]
+    fn to_json_value_includes_visible_rect_and_invisible_bounds_fields() {
+        // Positive: each window entry must contain "visible_rect" and
+        // "invisible_bounds" fields. For an invalid HWND, window_rect is null
+        // (GetWindowRect fails), so visible_rect should also be null.
+        // invisible_bounds should always be present with zero values for
+        // test windows (which are constructed with InvisibleBounds::zero()).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let hwnd_val = 99999isize;
+        let hwnd = HWND(hwnd_val as *mut _);
+        let window = Window::new(
+            hwnd,
+            "visrect.exe".into(),
+            "VisRect".into(),
+            "VisClass".into(),
+            std::path::PathBuf::from("C:\\visrect.exe"),
+            crate::common::Rect {
+                x: 10,
+                y: 20,
+                width: 800,
+                height: 600,
+            },
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            crate::common::InvisibleBounds::zero(),
+        );
+        reg.windows.insert(hwnd_val, window);
+
+        let json = reg.to_json_value(0);
+        let w = &json["windows"].as_array().unwrap()[0];
+
+        // invisible_bounds must be present with all four fields
+        assert!(
+            w.get("invisible_bounds").is_some(),
+            "invisible_bounds field must be present in JSON output"
+        );
+        let ib = w["invisible_bounds"].as_object().unwrap();
+        assert_eq!(ib["left"], 0);
+        assert_eq!(ib["top"], 0);
+        assert_eq!(ib["right"], 0);
+        assert_eq!(ib["bottom"], 0);
+
+        // visible_rect must be present (null when window_rect is null)
+        assert!(
+            w.get("visible_rect").is_some(),
+            "visible_rect field must be present in JSON output"
+        );
+        // For invalid HWND, window_rect is null, so visible_rect must also be null
+        assert!(
+            w["visible_rect"].is_null(),
+            "visible_rect should be null when window_rect is null (invalid HWND)"
+        );
+    }
+
+    #[test]
+    fn to_json_value_visible_rect_null_when_window_rect_null() {
+        // Negative: if window_rect is null (GetWindowRect fails for invalid HWND),
+        // then visible_rect must also be null — no math on a missing rect.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let hwnd_val = 11111isize;
+        insert_test_window(
+            &mut reg,
+            hwnd_val,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+
+        let json = reg.to_json_value(0);
+        let w = &json["windows"].as_array().unwrap()[0];
+
+        assert!(
+            w["window_rect"].is_null(),
+            "window_rect should be null for test window with invalid HWND"
+        );
+        assert!(
+            w["visible_rect"].is_null(),
+            "visible_rect should be null when window_rect is null"
+        );
+    }
+
+    #[test]
+    fn register_window_from_info_stores_invisible_bounds() {
+        // Positive: register_window_from_info should call get_invisible_bounds
+        // and store the result on the Window entry. For an invalid HWND (the
+        // test hwnd is not a real window), get_invisible_bounds returns zero.
+        let user = WindowRulesConfig {
+            default_action: WindowAction::Tile,
+            rules: vec![],
+        };
+        let default = WindowRulesConfig::default();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let hwnd_val = 44444isize;
+        let info = win32::WindowInfo {
+            hwnd: HWND(hwnd_val as *mut _),
+            title: "BoundsTest".to_owned(),
+            class: "BoundsClass".to_owned(),
+            rect: crate::common::Rect {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            exe: "boundstest.exe".to_owned(),
+            process_path: "C:\\boundstest.exe".to_owned(),
+            is_visible: true,
+            is_maximized: false,
+            is_fullscreen: false,
+        };
+
+        reg.register_window_from_info(&info);
+        let w = reg.get_window(HWND(hwnd_val as *mut _)).unwrap();
+
+        // For an invalid HWND, get_invisible_bounds returns zero (fail-open).
+        // Verify it was actually stored.
+        assert_eq!(
+            w.invisible_bounds,
+            crate::common::InvisibleBounds::zero(),
+            "invisible_bounds should be stored as zero for invalid HWND"
+        );
     }
 
     #[test]
@@ -1023,6 +1193,7 @@ mod tests {
                 height: 100,
             },
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            crate::common::InvisibleBounds::zero(),
         );
         reg.windows.insert(hwnd_val, window);
         reg.focused = Some(hwnd_val);
@@ -1055,6 +1226,7 @@ mod tests {
                 height: 600,
             },
             WindowState::Tiling(TilingState::Active { col: 2, row: 1 }),
+            crate::common::InvisibleBounds::zero(),
         );
         reg.windows.insert(hwnd_val, window);
 
@@ -1110,6 +1282,7 @@ mod tests {
                 height: 100,
             },
             state,
+            crate::common::InvisibleBounds::zero(),
         );
         reg.windows.insert(hwnd_val, window);
     }
