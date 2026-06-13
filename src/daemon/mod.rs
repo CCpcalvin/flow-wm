@@ -655,10 +655,15 @@ impl ScrollTilingManager {
     /// Dispatch a focus movement in the given direction.
     ///
     /// Calls [`LayoutEngine::focus`] which returns the newly focused
-    /// [`WindowId`] (or `None` if no movement was possible).
+    /// [`WindowId`] and an optional [`LayoutDiff`] when the viewport scrolled.
+    /// The diff is animated so windows actually move to their new positions.
     fn dispatch_focus(&mut self, dir: Direction) -> SocketResponse {
         match self.layout.focus(dir) {
-            Some(_focused) => SocketResponse::Ok,
+            Some((_focused, Some(diff))) => {
+                self.animate_diff(&diff);
+                SocketResponse::Ok
+            }
+            Some((_focused, None)) => SocketResponse::Ok,
             None => SocketResponse::Error {
                 message: "no window to focus in that direction".into(),
             },
@@ -818,6 +823,19 @@ impl ScrollTilingManager {
             .moves
             .iter()
             .map(|wm| {
+                log::debug!(
+                    "animate: hwnd={} from ({},{},{},{}) to ({},{},{},{}) hint={:?}",
+                    wm.window_id.0,
+                    wm.from.x,
+                    wm.from.y,
+                    wm.from.width,
+                    wm.from.height,
+                    wm.to.x,
+                    wm.to.y,
+                    wm.to.width,
+                    wm.to.height,
+                    wm.hint,
+                );
                 WindowTarget::new(
                     WindowRef(wm.window_id.0),
                     IVec2::new(wm.to.x, wm.to.y),
@@ -825,6 +843,11 @@ impl ScrollTilingManager {
                 )
             })
             .collect();
+
+        log::debug!(
+            "animate_diff: submitting {} targets to animator",
+            targets.len()
+        );
 
         if let Err(e) = self.animator.animate(targets) {
             log::warn!("animation error: {e}");

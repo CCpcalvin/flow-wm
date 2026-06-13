@@ -79,8 +79,8 @@ use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, Virtu
 /// engine.add_window(WindowId(3));
 ///
 /// // Focus is on WindowId(3) (last added). Focus left to WindowId(2).
-/// let focused = engine.focus(Direction::Left);
-/// assert_eq!(focused, Some(WindowId(2)));
+/// let (focused, _viewport_diff) = engine.focus(Direction::Left).unwrap();
+/// assert_eq!(focused, WindowId(2));
 /// ```
 pub struct LayoutEngine {
     /// Current virtual layout (the infinite horizontal canvas).
@@ -226,14 +226,29 @@ impl LayoutEngine {
     /// Focus is tracked by [`WindowId`] — if the target column requires a
     /// camera shift, the viewport scrolls automatically. No focus fixup is
     /// needed because the window ID is stable regardless of layout changes.
-    pub fn focus(&mut self, direction: Direction) -> Option<WindowId> {
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(focused_window_id, optional_layout_diff)`:
+    /// - `focused_window_id` — the newly focused window.
+    /// - `Option<LayoutDiff>` — `Some` if the viewport scrolled (animation needed),
+    ///   `None` if the target was already visible (no position changes).
+    ///
+    /// The caller **must** pass the `LayoutDiff` to the animation system when present.
+    /// Failure to do so causes `prev_actual` to desync from the actual window positions,
+    /// producing incorrect diffs on subsequent mutations.
+    pub fn focus(&mut self, direction: Direction) -> Option<(WindowId, Option<LayoutDiff>)> {
         let focused = self.focused?;
         let result = mutations::focus(&self.virtual_layout, focused, direction, &self.config)?;
         self.focused = Some(result.focused);
-        if result.new_layout.viewport_offset != self.virtual_layout.viewport_offset {
-            self.apply_mutation(result.new_layout);
-        }
-        Some(result.focused)
+
+        let diff = if result.new_layout.viewport_offset != self.virtual_layout.viewport_offset {
+            Some(self.apply_mutation(result.new_layout))
+        } else {
+            None
+        };
+
+        Some((result.focused, diff))
     }
 
     /// Set the focused window explicitly by [`WindowId`].
@@ -449,7 +464,7 @@ mod tests {
     #[test]
     fn engine_focus_moves() {
         let mut engine = engine_with_three_columns();
-        let new_focus = engine.focus(Direction::Right).expect("focus right");
+        let (new_focus, _diff) = engine.focus(Direction::Right).expect("focus right");
         assert_eq!(new_focus, WindowId(2));
         assert_eq!(engine.focused(), Some(WindowId(2)));
     }
@@ -576,12 +591,12 @@ mod tests {
 
         // Focus right twice: col1→col2 (visible), col2→col3 (triggers scroll)
         let f1 = engine.focus(Direction::Right).expect("focus right 1");
-        assert_eq!(f1, WindowId(2));
+        assert_eq!(f1.0, WindowId(2));
         // After first focus (visible), viewport_offset unchanged
         let offset_after_first = engine.virtual_layout().viewport_offset;
 
         let f2 = engine.focus(Direction::Right).expect("focus right 2");
-        assert_eq!(f2, WindowId(3));
+        assert_eq!(f2.0, WindowId(3));
         assert!(
             engine.virtual_layout().viewport_offset > offset_after_first,
             "viewport should have scrolled to show col 3 (was {offset_after_first}, now {})",
@@ -758,6 +773,80 @@ mod tests {
         // Focus should be some remaining window (first of first column)
         assert!(engine.focused().is_some());
         assert_ne!(engine.focused(), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn engine_focus_returns_none_diff_when_no_scroll() {
+        // Positive: focus within fully visible columns → diff is None (no viewport change).
+        // The (WindowId, Option<LayoutDiff>) tuple must have None in the diff slot.
+        // Use a wider monitor (3840px) so all 3 columns fit in the viewport without scroll.
+        let monitor = MonitorInfo {
+            work_area: Rect {
+                x: 0,
+                y: 0,
+                width: 3840,
+                height: 1080,
+            },
+        };
+        let mut engine = LayoutEngine::new(monitor, 960, 4, 320, test_padding());
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(1));
+
+        let result = engine.focus(Direction::Right).expect("focus right");
+        assert_eq!(result.0, WindowId(2));
+        // Column 2 is visible within the 3840px viewport → no scroll needed → diff is None
+        assert!(
+            result.1.is_none(),
+            "focus within visible area should not produce a LayoutDiff, got Some"
+        );
+    }
+
+    #[test]
+    fn engine_focus_returns_some_diff_when_viewport_scrolls() {
+        // Positive: focus into off-screen column → diff is Some with non-empty moves.
+        // This is the core Fix 1 behavior: the caller receives the LayoutDiff to animate.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.add_window(WindowId(4)); // 4 columns × 4/8 each = 2× viewport width
+        engine.set_focus(WindowId(1));
+
+        // Focus right twice: first stays visible, second triggers scroll
+        let _ = engine.focus(Direction::Right).expect("focus right 1");
+        let result = engine.focus(Direction::Right).expect("focus right 2");
+
+        assert_eq!(result.0, WindowId(3));
+        // Viewport scrolled → diff must be Some
+        assert!(
+            result.1.is_some(),
+            "focus into off-screen column must produce Some(LayoutDiff)"
+        );
+        let diff = result.1.unwrap();
+        // The diff must contain moves because windows shifted on screen
+        assert!(
+            !diff.moves.is_empty(),
+            "LayoutDiff from viewport scroll must contain animation moves"
+        );
+    }
+
+    #[test]
+    fn engine_focus_vertical_never_produces_diff() {
+        // Positive: vertical focus (Up/Down) never scrolls viewport, so diff is always None.
+        // Even when the window has rows, vertical focus just changes the focused WindowId.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding());
+        engine.add_window(WindowId(1));
+        engine.add_window_to_focused_column(WindowId(2));
+        engine.set_focus(WindowId(1));
+
+        let result = engine.focus(Direction::Down).expect("focus down");
+        assert_eq!(result.0, WindowId(2));
+        assert!(
+            result.1.is_none(),
+            "vertical focus should never produce a LayoutDiff"
+        );
     }
 
     #[test]

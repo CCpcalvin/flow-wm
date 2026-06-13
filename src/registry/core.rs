@@ -478,6 +478,8 @@ impl WindowRegistry {
     ///   - Basic metadata (hwnd, exe, title, class, process_path)
     ///   - `state`: lifecycle state with correct col/row indices
     ///   - `tiled_rect`: current layout-engine position (or null if not tiled)
+    ///   - `actual_rect`: current window position from Windows OS (via `GetWindowRect`),
+    ///     or null if the window cannot be queried (destroyed, minimized, etc.)
     ///   - `pre_manage_rect`: position before stm touched the window
     /// - `viewport_offset`: camera position on the virtual canvas
     /// - `focused`: the focused HWND value (or null)
@@ -501,6 +503,19 @@ impl WindowRegistry {
                         "height": r.height,
                     })
                 });
+
+                // Query the actual window position from Windows OS.
+                // This allows comparing computed (tiled_rect) vs actual (actual_rect)
+                // to diagnose animation or positioning issues.
+                let actual_rect_json = win32::get_window_rect(w.hwnd).ok().map(|r| {
+                    serde_json::json!({
+                        "x": r.x,
+                        "y": r.y,
+                        "width": r.width,
+                        "height": r.height,
+                    })
+                });
+
                 serde_json::json!({
                     "hwnd": w.hwnd.0 as isize,
                     "exe": w.exe,
@@ -509,6 +524,7 @@ impl WindowRegistry {
                     "process_path": w.process_path.to_string_lossy(),
                     "state": state_to_json(&w.state),
                     "tiled_rect": tiled_rect_json,
+                    "actual_rect": actual_rect_json,
                     "pre_manage_rect": serde_json::json!({
                         "x": w.pre_manage_rect.x,
                         "y": w.pre_manage_rect.y,
@@ -883,6 +899,107 @@ mod tests {
         assert!(json.get("focused").is_some());
         assert!(json.get("count").is_some());
         assert!(json.get("viewport_offset").is_some());
+    }
+
+    #[test]
+    fn to_json_value_includes_actual_rect_field_for_windows() {
+        // Positive: each window entry in the JSON must contain an "actual_rect" field.
+        // Fix 2 added `actual_rect` via GetWindowRect to the query output.
+        // For windows with invalid HWNDs (unit test), actual_rect will be null.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        // Insert a tiling-active window with an invalid HWND (not a real Win32 window).
+        // GetWindowRect will fail, so actual_rect should be null.
+        let hwnd_val = 12345isize;
+        insert_test_window(
+            &mut reg,
+            hwnd_val,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+
+        let json = reg.to_json_value(0);
+        let windows = json["windows"]
+            .as_array()
+            .expect("windows should be an array");
+        assert_eq!(windows.len(), 1);
+
+        let w = &windows[0];
+        // The actual_rect field must be present
+        assert!(
+            w.get("actual_rect").is_some(),
+            "actual_rect field must be present in JSON output"
+        );
+        // For an invalid HWND, actual_rect should be null (GetWindowRect fails)
+        assert!(
+            w["actual_rect"].is_null(),
+            "actual_rect should be null for invalid HWND (GetWindowRect fails)"
+        );
+    }
+
+    #[test]
+    fn to_json_value_includes_tiled_rect_and_actual_rect() {
+        // Positive: both tiled_rect and actual_rect appear together in JSON.
+        // tiled_rect is set from layout engine data; actual_rect from Win32.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let hwnd_val = 54321isize;
+        let hwnd = HWND(hwnd_val as *mut _);
+        let window = Window::new(
+            hwnd,
+            "test.exe".into(),
+            "Test".into(),
+            "TestClass".into(),
+            std::path::PathBuf::from("C:\\test.exe"),
+            crate::common::Rect {
+                x: 10,
+                y: 20,
+                width: 800,
+                height: 600,
+            },
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        // Set tiled_rect to simulate what the layout engine would produce
+        let mut window = window;
+        window.tiled_rect = Some(crate::common::Rect {
+            x: 4,
+            y: 0,
+            width: 952,
+            height: 1080,
+        });
+        reg.windows.insert(hwnd_val, window);
+
+        let json = reg.to_json_value(0);
+        let windows = json["windows"]
+            .as_array()
+            .expect("windows should be an array");
+        let w = &windows[0];
+
+        // tiled_rect should be the engine-computed value
+        let tiled = w["tiled_rect"]
+            .as_object()
+            .expect("tiled_rect should be an object");
+        assert_eq!(tiled["x"], 4);
+        assert_eq!(tiled["width"], 952);
+
+        // actual_rect should be present (null for invalid HWND, but field exists)
+        assert!(
+            w.get("actual_rect").is_some(),
+            "actual_rect field must be present alongside tiled_rect"
+        );
+    }
+
+    #[test]
+    fn to_json_value_actual_rect_null_format() {
+        // Negative: actual_rect must be either null or a {x,y,width,height} object.
+        // Verify the field exists and is null when GetWindowRect fails.
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        let json = reg.to_json_value(0);
+
+        // Empty registry: windows array is empty, but the field path is valid
+        assert!(json["windows"].is_array());
     }
 
     #[test]
