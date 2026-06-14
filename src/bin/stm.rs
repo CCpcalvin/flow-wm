@@ -14,6 +14,8 @@
 //! stm config check              Validate configuration files
 //! stm query all                 List all tracked windows (full debug dump)
 //! stm dispatch focus <dir>      Focus a window in the given direction
+//! stm dispatch expandcolumn     Expand the focused column width by one step
+//! stm dispatch shrinkcolumn     Shrink the focused column width by one step
 //! ```
 //!
 //! # Configuration
@@ -110,6 +112,22 @@ enum QueryCommands {
 ///
 /// Each variant wraps a further subcommand tree so the CLI stays organized as
 /// more actions are added (swapcolumn, swapwindow, etc.).
+///
+/// # Layout pipeline
+///
+/// Every dispatch command that changes layout flows through the same 3-step
+/// pipeline inside the daemon:
+///
+/// 1. **Mutate** the virtual layout (e.g. widen the focused column).
+///    Widening a column naturally pushes every column to its right further
+///    along the virtual canvas — no explicit per-window shift is needed.
+/// 2. **Project** the virtual layout into actual screen coordinates, adjusting
+///    the viewport so the focused column stays visible (`ensure_column_visible`).
+/// 3. **Diff** the old and new actual layouts to produce `WindowMove`
+///    instructions, then **animate** them smoothly.
+///
+/// The CLI's only job is to send the right [`SocketMessage`]; the daemon
+/// owns the entire pipeline above.
 #[derive(Debug, Subcommand)]
 enum DispatchCommands {
     /// Focus a window in the given direction.
@@ -117,6 +135,18 @@ enum DispatchCommands {
         #[command(subcommand)]
         direction: FocusDirection,
     },
+    /// Expand the focused column width by one column step.
+    ///
+    /// Sends [`SocketMessage::ExpandColumn`]. The daemon widens the focused
+    /// column to the next `column_width` boundary and animates the result.
+    #[command(name = "expandcolumn")]
+    ExpandColumn,
+    /// Shrink the focused column width by one column step.
+    ///
+    /// Sends [`SocketMessage::ShrinkColumn`]. The daemon narrows the focused
+    /// column to the previous `column_width` boundary and animates the result.
+    #[command(name = "shrinkcolumn")]
+    ShrinkColumn,
 }
 
 /// Cardinal direction for `stm dispatch focus <dir>`.
@@ -335,6 +365,12 @@ fn cmd_query_all() -> Result<(), String> {
 fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
     match command {
         DispatchCommands::Focus { direction } => cmd_dispatch_focus(direction),
+        DispatchCommands::ExpandColumn => {
+            send_command(SocketMessage::ExpandColumn, "column expanded")
+        }
+        DispatchCommands::ShrinkColumn => {
+            send_command(SocketMessage::ShrinkColumn, "column shrunk")
+        }
     }
 }
 
@@ -659,6 +695,72 @@ mod tests {
         // Negative: unknown dispatch subcommand should fail.
         let result = Cli::try_parse_from(["stm", "dispatch", "nonexistent"]);
         assert!(result.is_err(), "unknown dispatch subcommand should fail");
+    }
+
+    // --- Dispatch expandcolumn / shrinkcolumn ---
+
+    #[test]
+    fn parse_dispatch_expandcolumn() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "expandcolumn"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::ExpandColumn,
+            } => {}
+            other => panic!("expected Dispatch::ExpandColumn, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_shrinkcolumn() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::ShrinkColumn,
+            } => {}
+            other => panic!("expected Dispatch::ShrinkColumn, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_expandcolumn_extra_arg_fails() {
+        // Negative: expandcolumn takes no arguments.
+        let result = Cli::try_parse_from(["stm", "dispatch", "expandcolumn", "extra"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch expandcolumn' with extra args should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_shrinkcolumn_extra_arg_fails() {
+        // Negative: shrinkcolumn takes no arguments — extra positional arg rejected.
+        let result = Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn", "extra"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch shrinkcolumn' with extra args should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_expandcolumn_multiple_extra_args_fails() {
+        // Negative: expandcolumn rejects more than one extra argument.
+        let result =
+            Cli::try_parse_from(["stm", "dispatch", "expandcolumn", "extra1", "extra2"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch expandcolumn' with multiple extra args should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_shrinkcolumn_multiple_extra_args_fails() {
+        // Negative: shrinkcolumn rejects more than one extra argument.
+        let result =
+            Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn", "extra1", "extra2"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch shrinkcolumn' with multiple extra args should fail"
+        );
     }
 
     // --- Negative: invalid invocations ---
