@@ -110,8 +110,8 @@
     "semantic_hash": "d361e551a236deb79bf4ceffa77cf4bb"
   },
   "src/bin/stm.rs": {
-    "mtime": 1781411314.1154282,
-    "ast_hash": "a08b80cf0d221d93afbca15ec2614a13",
+    "mtime": 1781413068.315981,
+    "ast_hash": "65eda85b935d797c80f5175d94a29d74",
     "semantic_hash": ""
   },
   "src/common/error.rs": {
@@ -135,8 +135,8 @@
     "semantic_hash": ""
   },
   "src/config/lifecycle.rs": {
-    "mtime": 1781412079.572263,
-    "ast_hash": "df70751288ca15e059650d7ce69ea6ed",
+    "mtime": 1781414480.9618642,
+    "ast_hash": "6f43c50873d6fe841090791633890b6a",
     "semantic_hash": ""
   },
   "src/config/mod.rs": {
@@ -215,13 +215,13 @@
     "semantic_hash": "27f62fa16630eaedb30851e993d42958"
   },
   "src/main.rs": {
-    "mtime": 1781411325.210752,
-    "ast_hash": "ee348fdd9a20ecf661c371f6681b1d00",
+    "mtime": 1781413068.316981,
+    "ast_hash": "7793ec9a7e74add6b79c03911a9ff5bd",
     "semantic_hash": ""
   },
   "src/registry/classification.rs": {
-    "mtime": 1781411043.7618666,
-    "ast_hash": "657bcad2d5b28816aae3a212a496b60e",
+    "mtime": 1781412116.8552575,
+    "ast_hash": "5302d1e6ba14778d28a83fb99a024dbe",
     "semantic_hash": ""
   },
   "src/registry/core.rs": {
@@ -240,8 +240,8 @@
     "semantic_hash": "c1ec9aca2a742122829f1484ee0e49e1"
   },
   "src/registry/mod.rs": {
-    "mtime": 1781410894.828479,
-    "ast_hash": "2fa4cef982587eca85b0c18673067dd8",
+    "mtime": 1781413068.316981,
+    "ast_hash": "7d08f8a7cc301666830fb85ad7aa238e",
     "semantic_hash": ""
   },
   "src/registry/types.rs": {
@@ -250,8 +250,8 @@
     "semantic_hash": "e4d2958f4c5d696b63297c4cd050acf1"
   },
   "src/registry/win32.rs": {
-    "mtime": 1781410926.2086868,
-    "ast_hash": "8f663c0780a8d82ff14cb92e0db2c30c",
+    "mtime": 1781413068.316981,
+    "ast_hash": "24ef16eebddef3004958440013f5631d",
     "semantic_hash": ""
   },
   "state.json": {
@@ -1385,8 +1385,8 @@
     "semantic_hash": "00896de0f61ecce735bc497d33bf86f7"
   },
   "TODO.md": {
-    "mtime": 1781410978.711426,
-    "ast_hash": "09273cc9a79bab548b7dfbb8631258fb",
+    "mtime": 1781414331.9917662,
+    "ast_hash": "c3687905369479bae29cd1f6e5cbc5be",
     "semantic_hash": ""
   },
   "docs/spec/00-overview.md": {
@@ -1467,11 +1467,6 @@
   "src/daemon/types.rs": {
     "mtime": 1781367469.3598804,
     "ast_hash": "dc98120cdb7a7f135248058c6c01bef0",
-    "semantic_hash": ""
-  },
-  "src/registry/restore.rs": {
-    "mtime": 1781411155.2166195,
-    "ast_hash": "46772b8a36cec811a2c42af88810b3f9",
     "semantic_hash": ""
   }
 }

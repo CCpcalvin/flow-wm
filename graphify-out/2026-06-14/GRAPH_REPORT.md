@@ -1,16 +1,16 @@
 # Graph Report - scrolling-tiling-manager  (2026-06-14)
 
 ## Corpus Check
-- 295 files · ~245,353 words
+- 294 files · ~243,707 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 5438 nodes · 7189 edges · 491 communities (432 shown, 59 thin omitted)
-- Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 177 edges (avg confidence: 0.81)
+- 5427 nodes · 7185 edges · 484 communities (428 shown, 56 thin omitted)
+- Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 174 edges (avg confidence: 0.81)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `f4baf0cc`
+- Built from commit: `0b07c6c8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -191,7 +191,6 @@
 - [[_COMMUNITY_Task Management Skill|Task Management Skill]]
 - [[_COMMUNITY_Matches Rule|Matches Rule]]
 - [[_COMMUNITY_Minimize Window|Minimize Window]]
-- [[_COMMUNITY_Restore Window|Restore Window]]
 - [[_COMMUNITY_WindowState Enum|WindowState Enum]]
 - [[_COMMUNITY_TODO & Open Issues|TODO & Open Issues]]
 - [[_COMMUNITY_Community 184|Community 184]]
@@ -323,7 +322,6 @@
 - [[_COMMUNITY_Community 310|Community 310]]
 - [[_COMMUNITY_Community 311|Community 311]]
 - [[_COMMUNITY_Community 312|Community 312]]
-- [[_COMMUNITY_Community 313|Community 313]]
 - [[_COMMUNITY_Community 314|Community 314]]
 - [[_COMMUNITY_Community 315|Community 315]]
 - [[_COMMUNITY_Community 316|Community 316]]
@@ -357,7 +355,6 @@
 - [[_COMMUNITY_Community 344|Community 344]]
 - [[_COMMUNITY_Community 345|Community 345]]
 - [[_COMMUNITY_Community 346|Community 346]]
-- [[_COMMUNITY_Community 347|Community 347]]
 - [[_COMMUNITY_Community 348|Community 348]]
 - [[_COMMUNITY_Community 349|Community 349]]
 - [[_COMMUNITY_Community 350|Community 350]]
@@ -377,7 +374,6 @@
 - [[_COMMUNITY_Community 364|Community 364]]
 - [[_COMMUNITY_Community 365|Community 365]]
 - [[_COMMUNITY_Community 366|Community 366]]
-- [[_COMMUNITY_Community 367|Community 367]]
 - [[_COMMUNITY_Community 368|Community 368]]
 - [[_COMMUNITY_Community 369|Community 369]]
 - [[_COMMUNITY_Community 370|Community 370]]
@@ -391,7 +387,6 @@
 - [[_COMMUNITY_Community 378|Community 378]]
 - [[_COMMUNITY_Community 379|Community 379]]
 - [[_COMMUNITY_Community 380|Community 380]]
-- [[_COMMUNITY_Community 381|Community 381]]
 - [[_COMMUNITY_Community 382|Community 382]]
 - [[_COMMUNITY_Community 383|Community 383]]
 - [[_COMMUNITY_Community 384|Community 384]]
@@ -408,7 +403,6 @@
 - [[_COMMUNITY_Community 395|Community 395]]
 - [[_COMMUNITY_Community 396|Community 396]]
 - [[_COMMUNITY_Community 397|Community 397]]
-- [[_COMMUNITY_Community 398|Community 398]]
 - [[_COMMUNITY_Community 399|Community 399]]
 - [[_COMMUNITY_Community 400|Community 400]]
 - [[_COMMUNITY_Community 401|Community 401]]
@@ -436,7 +430,6 @@
 - [[_COMMUNITY_Community 423|Community 423]]
 - [[_COMMUNITY_Community 424|Community 424]]
 - [[_COMMUNITY_Community 425|Community 425]]
-- [[_COMMUNITY_Community 426|Community 426]]
 - [[_COMMUNITY_Community 427|Community 427]]
 - [[_COMMUNITY_Community 428|Community 428]]
 - [[_COMMUNITY_Community 429|Community 429]]
@@ -499,7 +492,7 @@
 - [[_COMMUNITY_Community 490|Community 490]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `candidate()` - 74 edges
+1. `candidate()` - 76 edges
 2. `WindowId` - 65 edges
 3. `test_config()` - 47 edges
 4. `pipeline_from()` - 44 edges
@@ -508,7 +501,7 @@
 7. `default_rules()` - 33 edges
 8. `test_padding()` - 31 edges
 9. `test_monitor()` - 30 edges
-10. `agents` - 29 edges
+10. `WindowRegistry` - 29 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Image (could not read - model lacks vision)` --conceptually_related_to--> `Daemon Core Architecture Spec`  [AMBIGUOUS]
@@ -523,6 +516,8 @@
   src/config/types.rs → src/layout/types.rs
 
 ## Import Cycles
+- 1-file cycle: `src/config/lifecycle.rs -> src/config/lifecycle.rs`
+- 1-file cycle: `src/registry/core.rs -> src/registry/core.rs`
 - 1-file cycle: `src/animation/animator.rs -> src/animation/animator.rs`
 - 1-file cycle: `src/animation/backend/win32.rs -> src/animation/backend/win32.rs`
 - 1-file cycle: `src/animation/batch.rs -> src/animation/batch.rs`
@@ -532,7 +527,6 @@
 - 1-file cycle: `src/bin/stm.rs -> src/bin/stm.rs`
 - 1-file cycle: `tests/cli/common.rs -> tests/cli/common.rs`
 - 1-file cycle: `src/config/dirs.rs -> src/config/dirs.rs`
-- 1-file cycle: `src/config/lifecycle.rs -> src/config/lifecycle.rs`
 - 1-file cycle: `src/daemon/config_derive.rs -> src/daemon/config_derive.rs`
 - 1-file cycle: `src/daemon/animation.rs -> src/daemon/animation.rs`
 - 1-file cycle: `src/daemon/dispatch.rs -> src/daemon/dispatch.rs`
@@ -541,7 +535,6 @@
 - 1-file cycle: `src/layout/diff.rs -> src/layout/diff.rs`
 - 1-file cycle: `src/layout/projection.rs -> src/layout/projection.rs`
 - 1-file cycle: `src/layout/mutations.rs -> src/layout/mutations.rs`
-- 1-file cycle: `src/registry/core.rs -> src/registry/core.rs`
 - 1-file cycle: `src/registry/restore.rs -> src/registry/restore.rs`
 
 ## Hyperedges (group relationships)
@@ -576,7 +569,7 @@
 - **Design System Component Suite** — design-systems_oklch_color_space, design-systems_typography_system, design-systems_shadow_system, design-systems_spacing_system, design-systems_border_radius_system [EXTRACTED 0.95]
 - **Graphify Extraction Pipeline** — graphify_skill_ast_extraction, graphify_skill_semantic_extraction, references_extraction-spec_extraction_subagent_prompt, graphify_skill_community_detection, graphify_skill_god_nodes [EXTRACTED 0.95]
 
-## Communities (491 total, 59 thin omitted)
+## Communities (484 total, 56 thin omitted)
 
 ### Community 0 - "Layout Mutations"
 Cohesion: 0.08
@@ -584,7 +577,7 @@ Nodes (30): find_neighbor_left_at_edge_returns_none(), find_neighbor_nonexistent
 
 ### Community 1 - "Window Registry Core"
 Cohesion: 0.07
-Nodes (62): BOOL, ClassificationPipeline, Item, Iterator, default_rules(), direct_destroy_handler_works(), direct_foreground_handler_works(), enum_toplevel_windows() (+54 more)
+Nodes (62): ActualLayout, BOOL, ClassificationPipeline, HashMap, HWND, Item, Iterator, LPARAM (+54 more)
 
 ### Community 2 - "CLI Test Infrastructure"
 Cohesion: 0.07
@@ -599,12 +592,12 @@ Cohesion: 0.17
 Nodes (14): LayoutConfig, ScrollTilingManager, FloatingManager, HookEvent, HookThreadHandle, LayoutEngine, PipeServer, Padding (+6 more)
 
 ### Community 5 - "Window Classification"
-Cohesion: 0.08
-Nodes (61): candidate(), class_exact_case_sensitive(), class_regex_inline_flag_i_overrides_case_sensitivity(), class_regex_matches(), equivalence_all_invalid_regex_fields_both_return_false(), equivalence_class_regex_negative(), equivalence_class_regex_positive(), equivalence_comprehensive_all_fields() (+53 more)
+Cohesion: 0.05
+Nodes (100): MatchRule, action_to_state(), action_to_state_float(), action_to_state_ignore(), action_to_state_tile(), candidate(), check_equivalence(), class_exact_case_sensitive() (+92 more)
 
 ### Community 6 - "Config Lifecycle"
 Cohesion: 0.05
-Nodes (60): check_config(), check_config_empty_directory_returns_ok(), check_config_invalid_app_config_returns_err(), check_config_malformed_app_toml_returns_err(), check_config_malformed_rules_returns_err(), check_config_partial_toml_returns_ok(), check_config_valid_directory_returns_ok(), default_config_toml_parses_correctly() (+52 more)
+Nodes (58): check_config(), check_config_empty_directory_returns_ok(), check_config_invalid_app_config_returns_err(), check_config_malformed_app_toml_returns_err(), check_config_malformed_rules_returns_err(), check_config_partial_toml_returns_ok(), check_config_valid_directory_returns_ok(), default_config_toml_parses_correctly() (+50 more)
 
 ### Community 7 - "STM CLI Client"
 Cohesion: 0.06
@@ -615,8 +608,8 @@ Cohesion: 0.11
 Nodes (39): ActiveBatch, animate_empty_batch_returns_error(), animate_returns_handle(), animator_starts_idle(), AnimatorCmd, cancel_stops_animation(), drop_new_policy_discards_second_animate(), handle_animate() (+31 more)
 
 ### Community 9 - "Architecture Specs"
-Cohesion: 0.10
-Nodes (26): Spec 00 — Developer Wiki / Architecture Overview, Concept: Actual Layout (pixel projection), Concept: Scrolling Infinite Canvas Model, Concept: stm CLI Binary, Concept: stm-watchdog Binary, Concept: stmd Daemon Binary, Concept: Virtual Layout (infinite canvas), Spec 01 — WindowRegistry (+18 more)
+Cohesion: 0.15
+Nodes (19): Spec 00 — Developer Wiki / Architecture Overview, Concept: Actual Layout (pixel projection), Concept: Virtual Layout (infinite canvas), Spec 01 — WindowRegistry, Concept: Fullscreen Detection, Concept: Recovery Snapshot (stm-recovery.json), Concept: Window Classification Rules, Concept: WindowRegistry (+11 more)
 
 ### Community 10 - "Animation Mock Backend"
 Cohesion: 0.09
@@ -627,12 +620,12 @@ Cohesion: 0.06
 Nodes (41): Direction, invisible_bounds_asymmetric(), invisible_bounds_roundtrip_visible_to_window_to_visible(), invisible_bounds_visible_to_window_expands(), invisible_bounds_window_to_visible_shrinks(), invisible_bounds_zero_all_zeros(), invisible_bounds_zero_bounds_is_identity(), InvisibleBounds (+33 more)
 
 ### Community 12 - "Layout Projection"
-Cohesion: 0.15
-Nodes (29): ActualEntry, canvas_width(), compute_row_height(), off_screen_left_parked_one_column_beyond(), off_screen_right_parked_one_column_beyond(), park_column_rows(), project(), project_column_rows() (+21 more)
+Cohesion: 0.14
+Nodes (30): ActualEntry, canvas_width(), column_step_width(), compute_row_height(), off_screen_left_parked_one_column_beyond(), off_screen_right_parked_one_column_beyond(), park_column_rows(), project() (+22 more)
 
 ### Community 13 - "IPC Message Protocol"
-Cohesion: 0.06
-Nodes (46): decode_array_returns_none(), decode_empty_object_returns_none(), decode_empty_returns_none(), decode_invalid_returns_none(), decode_message(), decode_message_type_on_response_returns_none(), decode_missing_type_tag_returns_none(), decode_response_status_on_message_returns_none() (+38 more)
+Cohesion: 0.09
+Nodes (27): decode_array_returns_none(), decode_empty_object_returns_none(), decode_empty_returns_none(), decode_invalid_returns_none(), decode_message(), decode_message_type_on_response_returns_none(), decode_missing_type_tag_returns_none(), decode_response_status_on_message_returns_none() (+19 more)
 
 ### Community 14 - "Animation Batch"
 Cohesion: 0.16
@@ -707,8 +700,8 @@ Cohesion: 0.13
 Nodes (9): is_noop(), is_translation_only(), lerp_i32(), lerp_rect(), lerp_rect_at_one_returns_to(), lerp_rect_at_zero_returns_from(), lerp_rect_separate_position_and_size(), Animation Pipeline (Easing → Interpolation → Backend) (+1 more)
 
 ### Community 32 - "Classification Testing"
-Cohesion: 0.16
-Nodes (20): check_equivalence(), ClassificationPipeline, compile_regex(), compile_rules(), CompiledRegex, CompiledRule, matches_compiled_rule(), matches_rule() (+12 more)
+Cohesion: 0.17
+Nodes (19): connect_to_named_pipe(), connect_to_pipe(), is_daemon_running(), PipeHandle, PipeServer, read_line(), send_message(), send_message_to() (+11 more)
 
 ### Community 33 - "Agent Metadata System"
 Cohesion: 0.18
@@ -735,8 +728,8 @@ Cohesion: 0.13
 Nodes (15): allOf, description, description, format, minimum, type, allOf, description (+7 more)
 
 ### Community 40 - "Context Bundle Templates"
-Cohesion: 0.15
-Nodes (27): expand_column(), expand_column_from_sub_boundary(), expand_column_only_affects_target(), expand_column_snaps_to_next_column_width_boundary(), first_visible_step(), MutationConfig, pixels_to_eighths(), resize_column() (+19 more)
+Cohesion: 0.16
+Nodes (26): expand_column(), expand_column_from_sub_boundary(), expand_column_only_affects_target(), expand_column_snaps_to_next_column_width_boundary(), first_visible_step(), MutationConfig, pixels_to_eighths(), resize_column() (+18 more)
 
 ### Community 41 - "Action State Mapping"
 Cohesion: 0.05
@@ -939,8 +932,8 @@ Cohesion: 0.29
 Nodes (7): default_window_action(), WindowAction, WindowRule, WindowRulesConfig, MatchRule, Vec, WindowAction
 
 ### Community 91 - "Classification Pipeline"
-Cohesion: 0.05
-Nodes (37): Add New Component to Registry, Adding Aliases, Adding Component Manually, Auto-Detect (Recommended), Auto-Update on Merge, Automatic Validation, Best Practices, CI/CD Integration (+29 more)
+Cohesion: 0.06
+Nodes (33): Adding Aliases, Adding Component Manually, Auto-Detect (Recommended), Auto-Update on Merge, Automatic Validation, Best Practices, CI/CD Integration, Component-Specific Examples (+25 more)
 
 ### Community 92 - "Minimize Restore Schema"
 Cohesion: 0.06
@@ -967,8 +960,8 @@ Cohesion: 0.06
 Nodes (31): Analysis Output, Analyze factory patterns across codebase, Behavior, Command: analyze-patterns, Context Requirements, Custom Patterns, Delegation, Description (+23 more)
 
 ### Community 98 - "Schema Properties B"
-Cohesion: 0.07
-Nodes (27): All Tests (All Agents), All Tests for Agent, Best Practices, CI/CD Integration, Common Test Patterns, Continuous Testing, Debugging Failures, Fail Example (+19 more)
+Cohesion: 0.10
+Nodes (21): 1. Smoke Test, 2. Approval Gate Test, 3. Context Loading Test, 4. Tool Usage Test, Best Practices, CI/CD Integration, Common Test Patterns, Continuous Testing (+13 more)
 
 ### Community 99 - "Schema Properties C"
 Cohesion: 0.33
@@ -995,8 +988,8 @@ Cohesion: 0.40
 Nodes (5): strategy, allOf, default, description, minimize_restore
 
 ### Community 105 - "Direction Schema"
-Cohesion: 0.08
-Nodes (24): Agents That Need Fixing, Available Subagent Types, Best Practices, Check Subagent Type Before Using, ContextScout Special Case, ✅ Correct Format, Correct Subagent Invocation, Delegation Fails Silently (+16 more)
+Cohesion: 0.07
+Nodes (30): Agents That Need Fixing, Available Subagent Types, Best Practices, Check Subagent Type Before Using, Coder Agent, Common Subagent Invocations, ContextScout Special Case, ✅ Correct Format (+22 more)
 
 ### Community 106 - "Window Schema"
 Cohesion: 0.07
@@ -1035,12 +1028,12 @@ Cohesion: 0.50
 Nodes (4): default, description, type, focus_down
 
 ### Community 115 - "Schema Def B"
-Cohesion: 0.09
-Nodes (23): Content Agents, Core Agents, Core Context, Core Files, Development Agents, Directories, Directory Tree, Eval Framework (+15 more)
+Cohesion: 0.07
+Nodes (28): Agents, Content Agents, Context, Core Agents, Core Context, Core Files, Development Agents, Directories (+20 more)
 
 ### Community 116 - "Schema Def C"
-Cohesion: 0.40
-Nodes (5): 1. Smoke Test, 2. Approval Gate Test, 3. Context Loading Test, 4. Tool Usage Test, Test Types
+Cohesion: 0.33
+Nodes (6): Debugging Failures, Step 1: Run with Debug, Step 2: Check Session, Step 3: Analyze Events, Step 4: Identify Issue, Step 5: Fix Agent
 
 ### Community 117 - "Schema Def D"
 Cohesion: 0.50
@@ -1104,11 +1097,11 @@ Nodes (3): title_regex, description, type
 
 ### Community 140 - "EaseInExpo"
 Cohesion: 0.40
-Nodes (5): Agents, Context, Path Patterns, Scripts, Tests
+Nodes (4): Concept: Scrolling Infinite Canvas Model, Concept: stm CLI Binary, Concept: stm-watchdog Binary, Concept: stmd Daemon Binary
 
 ### Community 142 - "EaseInOutCubic"
 Cohesion: 0.40
-Nodes (5): Common Workflows, Completing Tasks, Starting a New Feature, Tracking Progress, Validating Everything
+Nodes (5): All Tests (All Agents), All Tests for Agent, Running Tests, Single Test, With Debug Output
 
 ### Community 145 - "EaseInOutQuart"
 Cohesion: 0.50
@@ -1126,6 +1119,14 @@ Nodes (13): Directory Structure, Future Subcategories, Overview, Quick Navigatio
 Cohesion: 0.14
 Nodes (13): animate_diff_raw(), ScrollTilingManager, ScrollTilingManager, LayoutDiff, WindowAnimator, WindowRegistry, Option, PathBuf (+5 more)
 
+### Community 178 - "Matches Rule"
+Cohesion: 0.50
+Nodes (4): AWS Lambda, Cloudflare Workers, Infrastructure & Deployment, Vercel
+
+### Community 179 - "Minimize Window"
+Cohesion: 0.50
+Nodes (4): Add New Component to Registry, Common Tasks, Remove Component, Update Component Metadata
+
 ### Community 184 - "Community 184"
 Cohesion: 0.36
 Nodes (11): derive_animator_config(), derive_animator_config_nonzero_override_overrides_user(), derive_animator_config_zero_sentinel_uses_user_settings(), derive_layout_config(), make_disabled_config(), make_enabled_config(), LayoutConfig, AnimatorConfig (+3 more)
@@ -1139,8 +1140,8 @@ Cohesion: 0.08
 Nodes (24): Available Context Files, Best Practices, Cleanup, Context Index System, Context System Guide, How to Use the Index, .opencode/context/core/standards/code-analysis.md, .opencode/context/core/standards/code-quality.md (+16 more)
 
 ### Community 187 - "Community 187"
-Cohesion: 0.11
-Nodes (19): 1. Use Meaningful Summaries, 2. Check Dependencies Before Starting, 3. Identify Parallelizable Work, 4. Regular Validation, Architecture, Command Reference, File Locations, How to Use Me (+11 more)
+Cohesion: 0.08
+Nodes (24): 1. Use Meaningful Summaries, 2. Check Dependencies Before Starting, 3. Identify Parallelizable Work, 4. Regular Validation, Architecture, Command Reference, Common Workflows, Completing Tasks (+16 more)
 
 ### Community 188 - "Community 188"
 Cohesion: 0.08
@@ -1323,8 +1324,8 @@ Cohesion: 0.13
 Nodes (14): Core Files (Future), Example Libraries, Overview, Planned Content, Planned Topics, Progress/Animation, React-based TUI, Related Categories (+6 more)
 
 ### Community 233 - "Community 233"
-Cohesion: 0.11
-Nodes (18): agent-metadata.json Centralized Metadata, Agent Metadata System, Adding Components, Agents vs Subagents, Auto-Detect System, Best Practices, Component Entry, Core Concept: Registry System (+10 more)
+Cohesion: 0.09
+Nodes (22): agent-metadata.json Centralized Metadata, Agent Metadata System, Adding Components, Agents vs Subagents, Auto-Detect System, Best Practices, Component Entry, Core Concept: Registry System (+14 more)
 
 ### Community 234 - "Community 234"
 Cohesion: 0.14
@@ -1368,7 +1369,7 @@ Nodes (12): After ContextScout Returns, 🔍 ContextScout — Your First Move, H
 
 ### Community 244 - "Community 244"
 Cohesion: 0.10
-Nodes (21): Authentication, AWS Lambda, Better Auth, Clerk, Cloudflare Workers, Database & ORM, Drizzle ORM, Infrastructure & Deployment (+13 more)
+Nodes (21): Authentication, Better Auth, Clerk, Database & ORM, Drizzle ORM, Jotai, NextAuth.js, Playwright (+13 more)
 
 ### Community 245 - "Community 245"
 Cohesion: 0.15
@@ -1639,12 +1640,8 @@ Cohesion: 0.14
 Nodes (13): Adding New Libraries, AWS Lambda, Better Auth, Cloudflare Workers, Detection Patterns, Drizzle ORM, External Library Registry, Next.js (+5 more)
 
 ### Community 312 - "Community 312"
-Cohesion: 0.40
-Nodes (5): By Type, OpenAgents Guides, Quick Routes, Related Context, Structure
-
-### Community 313 - "Community 313"
-Cohesion: 0.50
-Nodes (4): Updating Versions, Version Consistency, Version Fields, Version Management
+Cohesion: 0.17
+Nodes (10): By Type, OpenAgents Guides, Quick Routes, Related Context, Structure, By Type, OpenAgents Lookup, Quick Routes (+2 more)
 
 ### Community 314 - "Community 314"
 Cohesion: 0.29
@@ -1778,10 +1775,6 @@ Nodes (10): Anti-Patterns, Best Practices, Clean Code Principles, Go, JavaScript
 Cohesion: 0.22
 Nodes (8): Critical Rules in First 15% of Prompt, Core Principle, File Size Targets, Optimized Structure, Real Example, Related, Subagent Prompt Structure (Optimized), Validation Checklist
 
-### Community 347 - "Community 347"
-Cohesion: 0.15
-Nodes (14): action_to_state(), action_to_state_float(), action_to_state_ignore(), action_to_state_tile(), classify_with_state_pipeline(), classify_with_state_pipeline_default_used(), classify_with_state_pipeline_empty_candidate(), classify_with_state_pipeline_float_action() (+6 more)
-
 ### Community 348 - "Community 348"
 Cohesion: 0.33
 Nodes (6): 1. `/check-context-deps` Command, 2. `auto-detect-components.sh` Script, 3. `validate-registry.sh` Script, Pre-Commit Checklist, Validation Tools, Validation Workflow
@@ -1858,10 +1851,6 @@ Nodes (23): Subagents (Delegated Specialists), 1. Creation, 2. Testing, 3. Regis
 Cohesion: 0.40
 Nodes (5): Adding a New Category, Step 1: Create Directory Structure, Step 2: Add Category Metadata, Step 3: Add Context README, Step 4: Validate
 
-### Community 367 - "Community 367"
-Cohesion: 0.40
-Nodes (5): By Type, OpenAgents Lookup, Quick Routes, Related Context, Structure
-
 ### Community 368 - "Community 368"
 Cohesion: 0.29
 Nodes (7): Category System, Content Category (`content/`), Core Category (`core/`), Data Category (`data/`), Development Category (`development/`), Learning Category (`learning/`), Product Category (`product/`)
@@ -1909,10 +1898,6 @@ Nodes (5): Approval Gate Violation, Common Issues, Context Loading Violation, Te
 ### Community 380 - "Community 380"
 Cohesion: 0.40
 Nodes (4): Core Idea, Guide: Modular Mastra Building, Key Points, Quick Example
-
-### Community 381 - "Community 381"
-Cohesion: 0.25
-Nodes (7): pipeline_empty_user_and_default_returns_user_default_action(), pipeline_falls_through_to_default_action(), pipeline_falls_through_to_default_rules(), pipeline_learned_rules_slot_is_noop_when_empty(), pipeline_user_rule_takes_priority_over_default(), Self, WindowRulesConfig
 
 ### Community 382 - "Community 382"
 Cohesion: 0.40
@@ -1977,10 +1962,6 @@ Nodes (5): 2.1 The Single Orchestrator, 2.2 Why Not `DaemonCore`?, 2.3 Struct De
 ### Community 397 - "Community 397"
 Cohesion: 0.40
 Nodes (4): Core Standards Navigation, Files, Loading Strategy, Related
-
-### Community 398 - "Community 398"
-Cohesion: 0.33
-Nodes (6): Coder Agent, Common Subagent Invocations, Documentation, Reviewer, Task Manager, TestEngineer
 
 ### Community 400 - "Community 400"
 Cohesion: 0.40
@@ -2085,10 +2066,6 @@ Nodes (4): Cause, Error: Subagent Approval Gate Violation, Solution, Symptom
 ### Community 425 - "Community 425"
 Cohesion: 0.40
 Nodes (5): "Dependency not satisfied", "No tasks found", "task-cli.ts not found", Troubleshooting, "Validation failed"
-
-### Community 426 - "Community 426"
-Cohesion: 0.50
-Nodes (4): Radix UI, Shadcn/ui, Tailwind CSS, UI Libraries & Styling
 
 ### Community 427 - "Community 427"
 Cohesion: 0.50
@@ -2275,24 +2252,24 @@ Nodes (3): CI/CD Integration, GitHub Actions, Pre-Commit Hook
   image.png · relation: conceptually_related_to
 
 ## Knowledge Gaps
-- **3059 isolated node(s):** `$schema`, `schema_version`, `description`, `id`, `name` (+3054 more)
+- **3050 isolated node(s):** `Format Choice: TOML`, `Two-Layer Config Model`, `No Serde Defaults`, `Autocomplete`, `Config File Locations` (+3045 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **59 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **56 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **What is the exact relationship between `Daemon Core Architecture Spec` and `Image (could not read - model lacks vision)`?**
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
-- **Why does `LayoutEngine` connect `Layout Engine` to `Layout Mutations`, `Common Types`, `Layout Projection`, `Layout Types`?**
-  _High betweenness centrality (0.013) - this node is a cross-community bridge._
 - **Why does `StmConfig` connect `Animation Config Defaults` to `Config Schema Generation`, `Config Types`, `Config Lifecycle`?**
+  _High betweenness centrality (0.016) - this node is a cross-community bridge._
+- **Why does `Padding` connect `Animation Config Defaults` to `Config Types`?**
   _High betweenness centrality (0.013) - this node is a cross-community bridge._
-- **What connects `$schema`, `schema_version`, `description` to the rest of the system?**
-  _3065 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Why does `LayoutEngine` connect `Layout Engine` to `Layout Mutations`, `Common Types`, `Layout Projection`, `Layout Types`?**
+  _High betweenness centrality (0.012) - this node is a cross-community bridge._
+- **What connects `Format Choice: TOML`, `Two-Layer Config Model`, `No Serde Defaults` to the rest of the system?**
+  _3056 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Layout Mutations` be split into smaller, more focused modules?**
   _Cohesion score 0.07822410147991543 - nodes in this community are weakly interconnected._
 - **Should `Window Registry Core` be split into smaller, more focused modules?**
   _Cohesion score 0.07314814814814814 - nodes in this community are weakly interconnected._
-- **Should `CLI Test Infrastructure` be split into smaller, more focused modules?**
-  _Cohesion score 0.07365967365967366 - nodes in this community are weakly interconnected._

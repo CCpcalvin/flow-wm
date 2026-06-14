@@ -103,3 +103,9 @@ action = "float"
 [[rules]]
 match = { exe = "Microsoft.CmdPal.UI.exe" }
 action = "float"
+
+# ── Chrome ───────────────────────────────────────────────────
+[[rules]]
+match = { exe = "chrome.exe", title = "Picture in picture" }
+action = "float"
+

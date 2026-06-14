@@ -9,11 +9,6 @@
     "ast_hash": "fc9223c0c4827012f6ccec0ca5bf21b9",
     "semantic_hash": "fc9223c0c4827012f6ccec0ca5bf21b9"
   },
-  ".opencode/opencode.json": {
-    "mtime": 1781328701.1630075,
-    "ast_hash": "1efe24ecf938911d4f23e4b1c6ec91f7",
-    "semantic_hash": "1efe24ecf938911d4f23e4b1c6ec91f7"
-  },
   ".opencode/package.json": {
     "mtime": 1780737271.7397573,
     "ast_hash": "c9442b1dfba4cd254e8dc712cf2d3da8",
@@ -1385,8 +1380,8 @@
     "semantic_hash": "00896de0f61ecce735bc497d33bf86f7"
   },
   "TODO.md": {
-    "mtime": 1781414331.9917662,
-    "ast_hash": "c3687905369479bae29cd1f6e5cbc5be",
+    "mtime": 1781417270.63247,
+    "ast_hash": "c270a7ee7bea9c596314e2334aa25a35",
     "semantic_hash": ""
   },
   "docs/spec/00-overview.md": {
