@@ -316,6 +316,45 @@ pub fn query_windows(pipe: &str) -> Result<serde_json::Value, String> {
     }
 }
 
+/// Send `stm query layout virtual` and return the JSON response.
+///
+/// Returns the virtual layout structure: column count, window count, and
+/// each column's index / `width_eighths` / row window-ids. Used in
+/// integration tests to verify that window removal compacts columns and
+/// shifts remaining windows leftward.
+pub fn query_layout_virtual(pipe: &str) -> Result<serde_json::Value, String> {
+    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
+    use scrolling_tiling_manager::ipc::transport;
+
+    let response = transport::send_message_to(pipe, &SocketMessage::QueryLayoutVirtual)
+        .map_err(|e| format!("query layout virtual failed: {e}"))?;
+
+    match response {
+        SocketResponse::Data { payload } => Ok(payload),
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Ok => Err("unexpected Ok response".into()),
+    }
+}
+
+/// Send `stm query layout actual` and return the JSON response.
+///
+/// Returns the actual (projected) layout: pixel-level rects for each window
+/// after projection and padding. Used in integration tests to verify that
+/// remaining windows physically shift left after a column is removed.
+pub fn query_layout_actual(pipe: &str) -> Result<serde_json::Value, String> {
+    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
+    use scrolling_tiling_manager::ipc::transport;
+
+    let response = transport::send_message_to(pipe, &SocketMessage::QueryLayoutActual)
+        .map_err(|e| format!("query layout actual failed: {e}"))?;
+
+    match response {
+        SocketResponse::Data { payload } => Ok(payload),
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Ok => Err("unexpected Ok response".into()),
+    }
+}
+
 /// Stop the test daemon by sending the Stop IPC command.
 ///
 /// Uses [`transport::send_message_to`] with the pipe name directly — no

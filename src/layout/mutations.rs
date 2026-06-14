@@ -167,6 +167,78 @@ fn closest_row(column: &Column, preferred_row: usize) -> usize {
     preferred_row.min(column.rows.len().saturating_sub(1))
 }
 
+/// Find the next window to focus after a window is removed.
+///
+/// Given the `(col, row)` of a window that is **about to be removed** (on the
+/// layout *before* removal), returns the best candidate to receive focus:
+///
+/// 1. **Left column** — if `col > 0`, the window in column `col - 1` whose row
+///    is closest to the removed window's row.
+/// 2. **Right column** — otherwise, if a column exists to the right
+///    (`col + 1 < columns.len()`), the window in column `col + 1` whose row is
+///    closest to the removed window's row.
+/// 3. **None** — if there is no column on either side (the removed window was
+///    the only one in the layout).
+///
+/// # Design decision: horizontal neighbours only
+///
+/// This function deliberately considers only *horizontal* neighbours (adjacent
+/// columns), not vertical siblings within the same column. In the scrolling
+/// horizontal-canvas model, focus after removal snaps to an adjacent column so
+/// the user's attention stays at roughly the same horizontal position. Windows
+/// stacked in the same column as the removed one are *not* chosen even when
+/// they exist — this matches the left-then-right preference the tiling manager
+/// uses throughout its focus model.
+///
+/// # Column non-emptiness invariant
+///
+/// Every column in a [`VirtualLayout`] always contains at least one row: the
+/// mutation API deletes a column the moment its last row is removed, and no
+/// mutation ever creates an empty column. Therefore indexing into the chosen
+/// neighbour's `rows` after [`closest_row`] is always safe.
+///
+/// # Arguments
+///
+/// * `layout` — the virtual layout **before** the window is removed.
+/// * `col` — the column index of the window being removed.
+/// * `row` — the row index of the window being removed (used to pick the
+///   closest row in the neighbour column).
+///
+/// # Returns
+///
+/// The [`WindowId`] of the best focus candidate, or `None` if the layout has
+/// no horizontal neighbours for the removed window.
+///
+/// # Examples
+///
+/// ```text
+/// Col 0        Col 1        Col 2
+/// [W1]         [W3]         [W5]
+///              [W4]
+///
+/// Removing W3 (col 1, row 0) → left col 0, closest row → W1
+/// Removing W1 (col 0, row 0) → no left, right col 1, closest row → W3
+/// Removing W5 (col 2, row 0) → left col 1, closest row → W3
+/// ```
+#[must_use]
+pub fn next_available_window(layout: &VirtualLayout, col: usize, row: usize) -> Option<WindowId> {
+    // Prefer the column to the left.
+    if col > 0 {
+        let left = &layout.columns[col - 1];
+        let r = closest_row(left, row);
+        return Some(left.rows[r]);
+    }
+    // Otherwise, fall back to the column to the right.
+    let right_idx = col + 1;
+    if right_idx < layout.columns.len() {
+        let right = &layout.columns[right_idx];
+        let r = closest_row(right, row);
+        return Some(right.rows[r]);
+    }
+    // No neighbour on either side — the removed window was the only one.
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Scroll mutations
 // ---------------------------------------------------------------------------
@@ -993,6 +1065,84 @@ mod tests {
             ],
             0,
         )
+    }
+
+    // --- next_available_window ---
+
+    #[test]
+    fn next_available_prefers_left_column() {
+        // Layout: [W1][W2][W3]; removing W2 (col 1, row 0) → left col 0 → W1.
+        let layout = three_column_layout();
+        assert_eq!(next_available_window(&layout, 1, 0), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn next_available_leftmost_falls_to_right() {
+        // Removing W1 (col 0) has no left → right col 1 → W2.
+        let layout = three_column_layout();
+        assert_eq!(next_available_window(&layout, 0, 0), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn next_available_rightmost_falls_to_left() {
+        // Removing W3 (col 2) → left col 1 → W2.
+        let layout = three_column_layout();
+        assert_eq!(next_available_window(&layout, 2, 0), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn next_available_only_window_returns_none() {
+        // Single column [W1]; removing W1 (col 0) → no neighbours → None.
+        let layout = VirtualLayout::with_columns(vec![Column::new(4, WindowId(1))], 0);
+        assert_eq!(next_available_window(&layout, 0, 0), None);
+    }
+
+    #[test]
+    fn next_available_clamps_row_to_neighbour() {
+        // Layout: col 0 has 1 row [W1], col 1 has 2 rows [W2, W3].
+        // Removing a window at (col 1, row 1): left col 0 has only 1 row, so
+        // the closest row clamps to 0 → W1.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3)]),
+            ],
+            0,
+        );
+        assert_eq!(next_available_window(&layout, 1, 1), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn next_available_picks_closest_row_in_left_column() {
+        // Layout: col 0 has 2 rows [W1, W4], col 1 has 3 rows [W2, W3, W5].
+        // Removing (col 1, row 2): left col 0, closest row clamps 2 → 1 → W4.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_equal_rows(4, vec![WindowId(1), WindowId(4)]),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(5)]),
+            ],
+            0,
+        );
+        assert_eq!(next_available_window(&layout, 1, 2), Some(WindowId(4)));
+    }
+
+    #[test]
+    fn next_available_single_column_multirow_returns_none() {
+        // Negative: single column with multiple rows — no horizontal neighbours
+        // exist, so the result is None even though vertical siblings (W1, W3)
+        // remain in the same column. This validates the "horizontal neighbours
+        // only" design decision documented in next_available_window's docstring.
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(
+                4,
+                vec![WindowId(1), WindowId(2), WindowId(3)],
+            )],
+            0,
+        );
+        // Removing W2 at (col 0, row 1): no left, no right → None.
+        assert_eq!(next_available_window(&layout, 0, 1), None);
+        // Removing W1 at (col 0, row 0): same result.
+        assert_eq!(next_available_window(&layout, 0, 0), None);
     }
 
     // --- Scroll ---

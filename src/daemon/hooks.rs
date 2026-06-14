@@ -7,8 +7,18 @@
 //! - [`on_window_minimized`] — handles window minimize events
 //! - [`on_window_restored`] — handles window restore (un-minimize) events
 //! - [`on_focus_changed`] — handles focus changes
+//!
+//! # Window-removal pipeline
+//!
+//! Both [`on_window_destroyed`] and [`on_window_minimized`] share the
+//! [`remove_from_layout_and_refocus`] helper, which implements the full
+//! removal pipeline: remove from the virtual layout → push OS-level focus to
+//! the successor window if focus changed → animate the resulting layout diff.
+//! The successor window is chosen by [`LayoutEngine::remove_window`] via
+//! [`mutations::next_available_window`] (left column, then right).
 
 use crate::common::WindowId;
+use crate::registry::win32 as registry_win32;
 
 use super::types::ScrollTilingManager;
 
@@ -32,7 +42,8 @@ impl ScrollTilingManager {
     ///
     /// Pipeline:
     /// 1. Check if the window was in tiling state **before** removal.
-    /// 2. If tiling: `layout.remove_window(id)` → `animate_diff(diff)`.
+    /// 2. If tiling: [`remove_from_layout_and_refocus`] — removes from layout,
+    ///    pushes focus to the successor, and animates.
     /// 3. `registry.remove_window(hwnd)` — always, regardless of state.
     ///
     /// The tiling check happens before removal because `remove_window`
@@ -41,8 +52,7 @@ impl ScrollTilingManager {
         let was_tiling = self.registry.is_tiling(hwnd);
 
         if was_tiling {
-            let diff = self.layout.remove_window(WindowId(hwnd));
-            self.animate_diff(&diff);
+            self.remove_from_layout_and_refocus(WindowId(hwnd));
         }
 
         self.registry.remove_window(hwnd);
@@ -53,16 +63,59 @@ impl ScrollTilingManager {
     /// Pipeline:
     /// 1. `registry.minimize_window(hwnd)` — updates state to `Tiling::Minimized`.
     /// 2. If the window was tiling-active (before minimize):
-    ///    - `layout.remove_window(id)` — removes from layout.
-    ///    - `animate_diff(diff)` — animates remaining windows filling the gap.
+    ///    [`remove_from_layout_and_refocus`] — removes from layout, pushes
+    ///    focus to the successor, and animates remaining windows filling the gap.
     pub(super) fn on_window_minimized(&mut self, hwnd: isize) {
         let was_tiling = self.registry.is_tiling(hwnd);
         self.registry.minimize_window(hwnd);
 
         if was_tiling {
-            let diff = self.layout.remove_window(WindowId(hwnd));
-            self.animate_diff(&diff);
+            self.remove_from_layout_and_refocus(WindowId(hwnd));
         }
+    }
+
+    /// Shared window-removal pipeline for destroy and minimize events.
+    ///
+    /// This implements the focus-aware removal flow used by both
+    /// [`on_window_destroyed`] and [`on_window_minimized`]:
+    ///
+    /// 1. Capture the current focus (before removal).
+    /// 2. [`LayoutEngine::remove_window`] — removes the window from the virtual
+    ///    layout, resolving a focus successor via
+    ///    [`mutations::next_available_window`] when the removed window was
+    ///    focused (left column preferred, then right).
+    /// 3. **Push OS focus** — if the layout focus changed as a result of the
+    ///    removal, call [`registry_win32::set_foreground_window`] on the
+    ///    successor so the OS actually foregrounds it, then sync the registry's
+    ///    focus tracking via [`WindowRegistry::set_focused`].
+    /// 4. [`animate_diff`](Self::animate_diff) — animate the remaining windows
+    ///    into their new positions.
+    ///
+    /// # Why capture focus before *and* after
+    ///
+    /// Comparing focus before and after removal tells us whether the removed
+    /// window was the focused one. Only then do we need to push a new
+    /// foreground window to the OS — if focus is unchanged, the OS focus is
+    /// already correct and we avoid a redundant (and potentially disruptive)
+    /// `SetForegroundWindow` call.
+    fn remove_from_layout_and_refocus(&mut self, window: WindowId) {
+        let prev_focus = self.layout.focused();
+        let diff = self.layout.remove_window(window);
+        let new_focus = self.layout.focused();
+
+        if new_focus != prev_focus
+            && let Some(id) = new_focus
+        {
+            let target = id.0;
+            if !registry_win32::set_foreground_window(target) {
+                log::warn!(
+                    "remove_from_layout_and_refocus: SetForegroundWindow failed for hwnd {target}"
+                );
+            }
+            self.registry.set_focused(target);
+        }
+
+        self.animate_diff(&diff);
     }
 
     /// Handle a window restore (un-minimize) event.
