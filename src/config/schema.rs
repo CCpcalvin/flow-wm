@@ -139,6 +139,87 @@ mod tests {
         assert!(obj.contains_key("enabled"));
         assert!(obj.contains_key("duration_ms"));
         assert!(obj.contains_key("easing"));
+
+        // Verify the easing field is represented as an enum (not a bare
+        // "string" type).  schemars derives unit enums as `oneOf` where
+        // each variant is `type: "string"` with a single-element `enum`
+        // constraint.  The animation schema uses $ref to
+        // #/definitions/ConfigEasing, so we follow the reference.
+        let easing_schema = obj
+            .get("easing")
+            .expect("easing property exists")
+            .as_object()
+            .expect("easing property is an object");
+
+        // Follow the allOf/$ref if present (schemars puts enum types behind
+        // a reference to the definitions section).
+        let easing_def = if let Some(all_of) = easing_schema.get("allOf").and_then(|v| v.as_array())
+        {
+            let ref_str = all_of
+                .iter()
+                .find_map(|item| item.get("$ref").and_then(|v| v.as_str()))
+                .expect("easing allOf has $ref");
+            let ref_path = ref_str.trim_start_matches("#/");
+            parsed
+                .pointer(&format!("/{ref_path}"))
+                .expect(&format!("definition {ref_path} exists"))
+                .as_object()
+                .expect(&format!("definition {ref_path} is object"))
+        } else {
+            easing_schema
+        };
+
+        // schemars uses `oneOf` with each variant as a separate object
+        assert!(
+            easing_def.contains_key("oneOf"),
+            "easing schema should have 'oneOf' for enum variants; \
+             got keys: {:?}",
+            easing_def.keys().collect::<Vec<_>>()
+        );
+
+        let one_of = easing_def
+            .get("oneOf")
+            .expect("oneOf")
+            .as_array()
+            .expect("oneOf is array");
+
+        // Each oneOf entry should be type "string" with a single-value enum
+        let mut enum_strings: Vec<&str> = Vec::new();
+        for entry in one_of {
+            let entry_obj = entry.as_object().expect("oneOf entry is object");
+            assert_eq!(
+                entry_obj.get("type").and_then(|v| v.as_str()),
+                Some("string"),
+                "each oneOf entry should be type 'string'"
+            );
+            if let Some(enum_vals) = entry_obj.get("enum").and_then(|v| v.as_array()) {
+                for val in enum_vals {
+                    if let Some(s) = val.as_str() {
+                        enum_strings.push(s);
+                    }
+                }
+            }
+        }
+
+        // Spot-check known values
+        assert!(
+            enum_strings.contains(&"linear"),
+            "enum should contain 'linear'"
+        );
+        assert!(
+            enum_strings.contains(&"ease-out-expo"),
+            "enum should contain 'ease-out-expo'"
+        );
+        assert!(
+            enum_strings.contains(&"ease-in-out-bounce"),
+            "enum should contain 'ease-in-out-bounce'"
+        );
+        // All 31 non-CubicBezier ConfigEasing variants
+        assert_eq!(
+            enum_strings.len(),
+            31,
+            "enum should have exactly 31 variants, got: {enum_strings:?}"
+        );
     }
 
     // --- Rules schema tests ---

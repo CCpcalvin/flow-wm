@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use super::easing::EasingStyle;
+
 /// Full configuration for a [`crate::animation::WindowAnimator`].
 ///
 /// All fields provide sensible defaults via [`Default`].
@@ -59,6 +61,10 @@ impl Default for AnimatorConfig {
 /// because resize-heavy transitions look worse on Windows (the window
 /// content reflows). Reserve elastic/overshoot styles for translation-only
 /// moves.
+///
+/// The [`Custom`] variant allows any [`EasingStyle`] to be used, enabling
+/// user-configured easing curves from [`ConfigEasing`](crate::config::types::ConfigEasing)
+/// to flow through the animation pipeline.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum PositionAnimation {
     /// Constant-velocity linear interpolation.
@@ -80,6 +86,14 @@ pub enum PositionAnimation {
     ///
     /// Best for pure translations; avoid when windows are also resizing.
     EaseElastic,
+
+    /// User-configured easing curve from [`ConfigEasing`](crate::config::types::ConfigEasing).
+    ///
+    /// This variant bridges the config layer's easing enum to the animation
+    /// engine's [`EasingStyle`], allowing all 31 named curves to be used.
+    /// The daemon layer maps `ConfigEasing → Custom(EasingStyle)` in
+    /// `derive_animator_config`.
+    Custom(EasingStyle),
 }
 
 /// Easing curve for window size channels (w, h).

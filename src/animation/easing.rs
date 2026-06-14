@@ -152,6 +152,9 @@ pub fn ease_position(style: &crate::animation::config::PositionAnimation, t: f64
         crate::animation::config::PositionAnimation::EaseOutCubic => EasingStyle::EaseOutCubic,
         crate::animation::config::PositionAnimation::EaseOutExpo => EasingStyle::EaseOutExpo,
         crate::animation::config::PositionAnimation::EaseElastic => EasingStyle::EaseOutElastic,
+        crate::animation::config::PositionAnimation::Custom(custom) => {
+            return apply_ease(t, custom.clone());
+        }
     };
     apply_ease(t, curve)
 }
@@ -702,5 +705,64 @@ mod tests {
             0.6,
         );
         assert!((r - 0.6).abs() < EPSILON);
+    }
+
+    /// Positive: `PositionAnimation::Custom(EasingStyle::Linear)` returns the
+    /// identity (t) — same as the built-in `PositionAnimation::Linear`.
+    ///
+    /// This verifies the `Custom` variant bridge works end-to-end: the adapter
+    /// in `ease_position` correctly unwraps the inner `EasingStyle` and passes
+    /// it to `apply_ease`.
+    #[test]
+    fn ease_position_custom_linear_is_identity() {
+        let style = crate::animation::config::PositionAnimation::Custom(EasingStyle::Linear);
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let result = ease_position(&style, t);
+            assert!(
+                (result - t).abs() < EPSILON,
+                "Custom(Linear) should be identity at t={t}, got {result}"
+            );
+        }
+    }
+
+    /// Positive: `PositionAnimation::Custom(EasingStyle::EaseOutExpo)` produces
+    /// values consistent with the known `apply_ease` output.
+    ///
+    /// This tests that a non-trivial easing style flows correctly through the
+    /// `Custom` variant path.
+    #[test]
+    fn ease_position_custom_ease_out_expo_matches_apply_ease() {
+        let style = crate::animation::config::PositionAnimation::Custom(EasingStyle::EaseOutExpo);
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let result = ease_position(&style, t);
+            let expected = apply_ease(t, EasingStyle::EaseOutExpo);
+            assert!(
+                (result - expected).abs() < EPSILON,
+                "Custom(EaseOutExpo) mismatch at t={t}: got {result}, expected {expected}"
+            );
+        }
+    }
+
+    /// Negative: `PositionAnimation::Custom(EasingStyle::EaseOutBack)` can exceed
+    /// 1.0 near t=1 (overshoot is expected behaviour).
+    ///
+    /// This edge-case test documents the overshoot property of elastic/back
+    /// curves — the caller must handle values > 1.0.
+    #[test]
+    fn ease_position_custom_ease_out_back_can_exceed_one() {
+        let style = crate::animation::config::PositionAnimation::Custom(EasingStyle::EaseOutBack);
+        // At t=1.0, EaseOutBack should return exactly 1.0 (boundary)
+        let at_one = ease_position(&style, 1.0);
+        assert!(
+            (at_one - 1.0).abs() < EPSILON,
+            "EaseOutBack should return 1.0 at t=1"
+        );
+
+        // At t ≈ 0.8, EaseOutBack overshoots past 1.0
+        let at_08 = ease_position(&style, 0.8);
+        assert!(
+            at_08 > 1.0,
+            "EaseOutBack should overshoot at t=0.8, got {at_08}"
+        );
     }
 }

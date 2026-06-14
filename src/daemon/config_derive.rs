@@ -6,6 +6,9 @@
 use std::time::Duration;
 
 use crate::animation::AnimatorConfig;
+use crate::animation::config::PositionAnimation;
+use crate::animation::easing::EasingStyle;
+use crate::config::types::ConfigEasing;
 use crate::config::types::StmConfig;
 use crate::layout::types::{MonitorInfo, Padding as LayoutPadding};
 
@@ -68,6 +71,55 @@ pub(super) fn derive_layout_config(app_config: &StmConfig, monitor: &MonitorInfo
     }
 }
 
+/// Map a user-configured [`ConfigEasing`] to the animation engine's [`EasingStyle`].
+///
+/// This is the bridge between the config layer (which cannot import from the
+/// animation layer) and the animation engine. Every `ConfigEasing` variant has
+/// a 1:1 mapping to an `EasingStyle` variant.
+///
+/// # Design
+///
+/// The mapping lives in the `daemon/` layer rather than `config/` or
+/// `animation/` to respect the module dependency rule: `config/` must not
+/// import from `animation/`, and `animation/` should not depend on config
+/// types. The `daemon/` orchestrator sits above both and can safely import
+/// from either.
+fn config_easing_to_style(easing: &ConfigEasing) -> EasingStyle {
+    match easing {
+        ConfigEasing::Linear => EasingStyle::Linear,
+        ConfigEasing::EaseInSine => EasingStyle::EaseInSine,
+        ConfigEasing::EaseOutSine => EasingStyle::EaseOutSine,
+        ConfigEasing::EaseInOutSine => EasingStyle::EaseInOutSine,
+        ConfigEasing::EaseInQuad => EasingStyle::EaseInQuad,
+        ConfigEasing::EaseOutQuad => EasingStyle::EaseOutQuad,
+        ConfigEasing::EaseInOutQuad => EasingStyle::EaseInOutQuad,
+        ConfigEasing::EaseInCubic => EasingStyle::EaseInCubic,
+        ConfigEasing::EaseOutCubic => EasingStyle::EaseOutCubic,
+        ConfigEasing::EaseInOutCubic => EasingStyle::EaseInOutCubic,
+        ConfigEasing::EaseInQuart => EasingStyle::EaseInQuart,
+        ConfigEasing::EaseOutQuart => EasingStyle::EaseOutQuart,
+        ConfigEasing::EaseInOutQuart => EasingStyle::EaseInOutQuart,
+        ConfigEasing::EaseInQuint => EasingStyle::EaseInQuint,
+        ConfigEasing::EaseOutQuint => EasingStyle::EaseOutQuint,
+        ConfigEasing::EaseInOutQuint => EasingStyle::EaseInOutQuint,
+        ConfigEasing::EaseInExpo => EasingStyle::EaseInExpo,
+        ConfigEasing::EaseOutExpo => EasingStyle::EaseOutExpo,
+        ConfigEasing::EaseInOutExpo => EasingStyle::EaseInOutExpo,
+        ConfigEasing::EaseInCirc => EasingStyle::EaseInCirc,
+        ConfigEasing::EaseOutCirc => EasingStyle::EaseOutCirc,
+        ConfigEasing::EaseInOutCirc => EasingStyle::EaseInOutCirc,
+        ConfigEasing::EaseInBack => EasingStyle::EaseInBack,
+        ConfigEasing::EaseOutBack => EasingStyle::EaseOutBack,
+        ConfigEasing::EaseInOutBack => EasingStyle::EaseInOutBack,
+        ConfigEasing::EaseInElastic => EasingStyle::EaseInElastic,
+        ConfigEasing::EaseOutElastic => EasingStyle::EaseOutElastic,
+        ConfigEasing::EaseInOutElastic => EasingStyle::EaseInOutElastic,
+        ConfigEasing::EaseInBounce => EasingStyle::EaseInBounce,
+        ConfigEasing::EaseOutBounce => EasingStyle::EaseOutBounce,
+        ConfigEasing::EaseInOutBounce => EasingStyle::EaseInOutBounce,
+    }
+}
+
 /// Derive animator configuration from [`StmConfig`].
 ///
 /// The `override_duration` parameter allows the caller to force a specific
@@ -85,8 +137,12 @@ pub(super) fn derive_animator_config(
         Duration::ZERO
     };
 
+    let position_animation =
+        PositionAnimation::Custom(config_easing_to_style(&app_config.animation.easing));
+
     AnimatorConfig {
         duration,
+        position_animation,
         ..AnimatorConfig::default()
     }
 }
@@ -94,7 +150,10 @@ pub(super) fn derive_animator_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::config::PositionAnimation;
+    use crate::animation::easing::EasingStyle;
     use crate::config::types::AnimationConfig;
+    use crate::config::types::ConfigEasing;
 
     /// Build a default [`StmConfig`] with animation enabled and a given duration.
     fn make_enabled_config(duration_ms: u32) -> StmConfig {
@@ -167,5 +226,81 @@ mod tests {
             Duration::from_millis(100),
             "non-zero override should take precedence even when animation is disabled"
         );
+    }
+
+    /// Verify that `derive_animator_config` maps the config easing to the
+    /// correct `PositionAnimation::Custom` variant.
+    #[test]
+    fn derive_animator_config_maps_easing_to_custom() {
+        // Default config uses EaseOutExpo
+        let cfg = make_enabled_config(250);
+        let result = derive_animator_config(&cfg, Duration::ZERO);
+        match &result.position_animation {
+            PositionAnimation::Custom(style) => {
+                assert_eq!(*style, EasingStyle::EaseOutExpo);
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    /// Verify that a non-default easing value flows through correctly.
+    #[test]
+    fn derive_animator_config_maps_linear_easing() {
+        let mut cfg = make_enabled_config(250);
+        cfg.animation.easing = ConfigEasing::Linear;
+        let result = derive_animator_config(&cfg, Duration::ZERO);
+        match &result.position_animation {
+            PositionAnimation::Custom(style) => {
+                assert_eq!(*style, EasingStyle::Linear);
+            }
+            other => panic!("expected Custom(Linear), got {other:?}"),
+        }
+    }
+
+    /// Verify all 31 ConfigEasing variants map correctly.
+    #[test]
+    fn config_easing_to_style_all_variants() {
+        for (config_easing, expected_style) in [
+            (ConfigEasing::Linear, EasingStyle::Linear),
+            (ConfigEasing::EaseInSine, EasingStyle::EaseInSine),
+            (ConfigEasing::EaseOutSine, EasingStyle::EaseOutSine),
+            (ConfigEasing::EaseInOutSine, EasingStyle::EaseInOutSine),
+            (ConfigEasing::EaseInQuad, EasingStyle::EaseInQuad),
+            (ConfigEasing::EaseOutQuad, EasingStyle::EaseOutQuad),
+            (ConfigEasing::EaseInOutQuad, EasingStyle::EaseInOutQuad),
+            (ConfigEasing::EaseInCubic, EasingStyle::EaseInCubic),
+            (ConfigEasing::EaseOutCubic, EasingStyle::EaseOutCubic),
+            (ConfigEasing::EaseInOutCubic, EasingStyle::EaseInOutCubic),
+            (ConfigEasing::EaseInQuart, EasingStyle::EaseInQuart),
+            (ConfigEasing::EaseOutQuart, EasingStyle::EaseOutQuart),
+            (ConfigEasing::EaseInOutQuart, EasingStyle::EaseInOutQuart),
+            (ConfigEasing::EaseInQuint, EasingStyle::EaseInQuint),
+            (ConfigEasing::EaseOutQuint, EasingStyle::EaseOutQuint),
+            (ConfigEasing::EaseInOutQuint, EasingStyle::EaseInOutQuint),
+            (ConfigEasing::EaseInExpo, EasingStyle::EaseInExpo),
+            (ConfigEasing::EaseOutExpo, EasingStyle::EaseOutExpo),
+            (ConfigEasing::EaseInOutExpo, EasingStyle::EaseInOutExpo),
+            (ConfigEasing::EaseInCirc, EasingStyle::EaseInCirc),
+            (ConfigEasing::EaseOutCirc, EasingStyle::EaseOutCirc),
+            (ConfigEasing::EaseInOutCirc, EasingStyle::EaseInOutCirc),
+            (ConfigEasing::EaseInBack, EasingStyle::EaseInBack),
+            (ConfigEasing::EaseOutBack, EasingStyle::EaseOutBack),
+            (ConfigEasing::EaseInOutBack, EasingStyle::EaseInOutBack),
+            (ConfigEasing::EaseInElastic, EasingStyle::EaseInElastic),
+            (ConfigEasing::EaseOutElastic, EasingStyle::EaseOutElastic),
+            (
+                ConfigEasing::EaseInOutElastic,
+                EasingStyle::EaseInOutElastic,
+            ),
+            (ConfigEasing::EaseInBounce, EasingStyle::EaseInBounce),
+            (ConfigEasing::EaseOutBounce, EasingStyle::EaseOutBounce),
+            (ConfigEasing::EaseInOutBounce, EasingStyle::EaseInOutBounce),
+        ] {
+            assert_eq!(
+                config_easing_to_style(&config_easing),
+                expected_style,
+                "mismatch for {config_easing:?}"
+            );
+        }
     }
 }

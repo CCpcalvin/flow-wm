@@ -412,6 +412,99 @@ impl Default for WindowRulesConfig {
     }
 }
 
+/// Named easing curves available in user configuration.
+///
+/// Each variant corresponds to an easing function implemented in
+/// [`crate::animation::easing::EasingStyle`]. The variant names use
+/// CSS-like kebab-case when serialized to TOML (e.g. `EaseOutExpo` →
+/// `"ease-out-expo"`).
+///
+/// The full set mirrors the 31 named curves in the animation engine.
+/// `CubicBezier` is excluded because it requires four `f64` parameters
+/// that cannot be expressed as a simple serde enum variant.
+///
+/// # Design Decision
+///
+/// This enum lives in the `config/` layer (not `animation/`) to honour
+/// the module dependency hierarchy: `config/` may only import from
+/// `common/`, never from `animation/`. The conversion from
+/// `ConfigEasing` → `EasingStyle` is performed in the `daemon/` layer
+/// (see [`crate::daemon::config_derive`]).
+///
+/// # Example
+///
+/// ```toml
+/// [animation]
+/// easing = "ease-in-out-cubic"
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigEasing {
+    /// Constant-velocity linear interpolation.
+    Linear,
+    /// Accelerating sine curve.
+    EaseInSine,
+    /// Decelerating sine curve.
+    EaseOutSine,
+    /// Symmetric sine ease-in-out.
+    EaseInOutSine,
+    /// Accelerating quadratic curve.
+    EaseInQuad,
+    /// Decelerating quadratic curve.
+    EaseOutQuad,
+    /// Symmetric quadratic ease-in-out.
+    EaseInOutQuad,
+    /// Accelerating cubic curve.
+    EaseInCubic,
+    /// Decelerating cubic curve.
+    EaseOutCubic,
+    /// Symmetric cubic ease-in-out.
+    EaseInOutCubic,
+    /// Accelerating quartic curve.
+    EaseInQuart,
+    /// Decelerating quartic curve.
+    EaseOutQuart,
+    /// Symmetric quartic ease-in-out.
+    EaseInOutQuart,
+    /// Accelerating quintic curve.
+    EaseInQuint,
+    /// Decelerating quintic curve.
+    EaseOutQuint,
+    /// Symmetric quintic ease-in-out.
+    EaseInOutQuint,
+    /// Accelerating exponential curve.
+    EaseInExpo,
+    /// Decelerating exponential curve.
+    #[default]
+    EaseOutExpo,
+    /// Symmetric exponential ease-in-out.
+    EaseInOutExpo,
+    /// Accelerating circular curve.
+    EaseInCirc,
+    /// Decelerating circular curve.
+    EaseOutCirc,
+    /// Symmetric circular ease-in-out.
+    EaseInOutCirc,
+    /// Slight pull-back before departure.
+    EaseInBack,
+    /// Slight overshoot past the target.
+    EaseOutBack,
+    /// Symmetric back ease-in-out.
+    EaseInOutBack,
+    /// Elastic oscillation on departure.
+    EaseInElastic,
+    /// Elastic oscillation on arrival.
+    EaseOutElastic,
+    /// Symmetric elastic ease-in-out.
+    EaseInOutElastic,
+    /// Bounce on departure.
+    EaseInBounce,
+    /// Bounce on arrival.
+    EaseOutBounce,
+    /// Symmetric bounce ease-in-out.
+    EaseInOutBounce,
+}
+
 /// Animation configuration for layout transitions.
 ///
 /// When disabled, all window position changes are applied instantly
@@ -423,8 +516,11 @@ pub struct AnimationConfig {
     pub enabled: bool,
     /// Animation duration in milliseconds.
     pub duration_ms: u32,
-    /// Easing function name (e.g., `"ease-out-expo"`).
-    pub easing: String,
+    /// Easing curve applied to window position channels (x, y).
+    ///
+    /// See [`ConfigEasing`] for the full list of supported curves.
+    /// Defaults to [`ConfigEasing::EaseOutExpo`].
+    pub easing: ConfigEasing,
 }
 
 impl Default for AnimationConfig {
@@ -432,7 +528,7 @@ impl Default for AnimationConfig {
         Self {
             enabled: true,
             duration_ms: 240,
-            easing: "ease-out-expo".to_string(),
+            easing: ConfigEasing::EaseOutExpo,
         }
     }
 }
@@ -487,7 +583,7 @@ mod tests {
         assert_eq!(parsed.padding.up, 16);
         assert_eq!(parsed.padding.down, 16);
         assert_eq!(parsed.animation.duration_ms, 240);
-        assert_eq!(parsed.animation.easing, "ease-out-expo");
+        assert_eq!(parsed.animation.easing, ConfigEasing::EaseOutExpo);
     }
 
     #[test]
@@ -577,7 +673,8 @@ strategy = "original_slot"
             "animation.enabled should default to true"
         );
         assert_eq!(
-            config.animation.easing, "ease-out-expo",
+            config.animation.easing,
+            ConfigEasing::EaseOutExpo,
             "animation.easing should default to ease-out-expo"
         );
     }
@@ -618,7 +715,7 @@ strategy = "original_slot"
             animation: AnimationConfig {
                 enabled: false,
                 duration_ms: 250,
-                easing: "ease-in-out-cubic".into(),
+                easing: ConfigEasing::EaseInOutCubic,
             },
             minimize_restore: MinimizeRestore {
                 strategy: MinimizeRestoreStrategy::AppendRight,
@@ -636,7 +733,7 @@ strategy = "original_slot"
         assert_eq!(parsed.padding.down, 40);
         assert!(!parsed.animation.enabled);
         assert_eq!(parsed.animation.duration_ms, 250);
-        assert_eq!(parsed.animation.easing, "ease-in-out-cubic");
+        assert_eq!(parsed.animation.easing, ConfigEasing::EaseInOutCubic);
         assert_eq!(
             parsed.minimize_restore.strategy,
             MinimizeRestoreStrategy::AppendRight
@@ -890,6 +987,98 @@ default_action = "foobar"
 "#;
         let result = toml::from_str::<WindowRulesConfig>(toml_str);
         assert!(result.is_err(), "invalid enum value should reject");
+    }
+
+    // --- ConfigEasing-specific tests ---
+
+    /// Positive: all 31 ConfigEasing variants round-trip through TOML
+    /// serialize → deserialize.
+    ///
+    /// This validates that `#[serde(rename_all = "kebab-case")]` produces
+    /// the expected kebab-case strings and that serde can parse them back
+    /// to the correct variant.
+    ///
+    /// Standalone `toml::to_string(&enum_variant)` is unsupported by the
+    /// `toml` crate, so we embed each variant inside a `AnimationConfig`
+    /// wrapper and verify the serialized TOML contains the expected
+    /// kebab-case string.
+    #[test]
+    fn config_easing_roundtrips_all_variants() {
+        for (variant, expected_kebab) in [
+            (ConfigEasing::Linear, "linear"),
+            (ConfigEasing::EaseInSine, "ease-in-sine"),
+            (ConfigEasing::EaseOutSine, "ease-out-sine"),
+            (ConfigEasing::EaseInOutSine, "ease-in-out-sine"),
+            (ConfigEasing::EaseInQuad, "ease-in-quad"),
+            (ConfigEasing::EaseOutQuad, "ease-out-quad"),
+            (ConfigEasing::EaseInOutQuad, "ease-in-out-quad"),
+            (ConfigEasing::EaseInCubic, "ease-in-cubic"),
+            (ConfigEasing::EaseOutCubic, "ease-out-cubic"),
+            (ConfigEasing::EaseInOutCubic, "ease-in-out-cubic"),
+            (ConfigEasing::EaseInQuart, "ease-in-quart"),
+            (ConfigEasing::EaseOutQuart, "ease-out-quart"),
+            (ConfigEasing::EaseInOutQuart, "ease-in-out-quart"),
+            (ConfigEasing::EaseInQuint, "ease-in-quint"),
+            (ConfigEasing::EaseOutQuint, "ease-out-quint"),
+            (ConfigEasing::EaseInOutQuint, "ease-in-out-quint"),
+            (ConfigEasing::EaseInExpo, "ease-in-expo"),
+            (ConfigEasing::EaseOutExpo, "ease-out-expo"),
+            (ConfigEasing::EaseInOutExpo, "ease-in-out-expo"),
+            (ConfigEasing::EaseInCirc, "ease-in-circ"),
+            (ConfigEasing::EaseOutCirc, "ease-out-circ"),
+            (ConfigEasing::EaseInOutCirc, "ease-in-out-circ"),
+            (ConfigEasing::EaseInBack, "ease-in-back"),
+            (ConfigEasing::EaseOutBack, "ease-out-back"),
+            (ConfigEasing::EaseInOutBack, "ease-in-out-back"),
+            (ConfigEasing::EaseInElastic, "ease-in-elastic"),
+            (ConfigEasing::EaseOutElastic, "ease-out-elastic"),
+            (ConfigEasing::EaseInOutElastic, "ease-in-out-elastic"),
+            (ConfigEasing::EaseInBounce, "ease-in-bounce"),
+            (ConfigEasing::EaseOutBounce, "ease-out-bounce"),
+            (ConfigEasing::EaseInOutBounce, "ease-in-out-bounce"),
+        ] {
+            // Serialize inside an AnimationConfig wrapper
+            let wrapper = AnimationConfig {
+                easing: variant,
+                ..AnimationConfig::default()
+            };
+            let toml_str = toml::to_string(&wrapper).expect(&format!("serialize {expected_kebab}"));
+            assert!(
+                toml_str.contains(&format!("easing = \"{expected_kebab}\"")),
+                "serialization should contain 'easing = \"{expected_kebab}\"', got:\n{toml_str}"
+            );
+
+            // Verify deserialization produces the original variant
+            let parsed: AnimationConfig =
+                toml::from_str(&toml_str).expect(&format!("deserialize {expected_kebab}"));
+            assert_eq!(
+                parsed.easing, variant,
+                "round-trip mismatch for {expected_kebab}"
+            );
+        }
+    }
+
+    /// Negative: an unknown easing string is rejected by serde.
+    ///
+    /// This prevents silent misconfiguration — a typo like `"ease-out-exp"` should
+    /// fail fast at parse time, not silently fall back to the default.
+    #[test]
+    fn config_easing_invalid_string_is_rejected() {
+        let invalid_values = [
+            "ease-out-exp",  // typo: missing 'o'
+            "linear ",       // trailing whitespace
+            "Linear",        // PascalCase — kebab-case only
+            "EASE-OUT-EXPO", // uppercase
+            "ease_out_expo", // snake_case
+            "foobar",        // completely unknown
+        ];
+        for bad in &invalid_values {
+            let result = toml::from_str::<ConfigEasing>(bad);
+            assert!(
+                result.is_err(),
+                "expected rejection for invalid easing value: {bad:?}"
+            );
+        }
     }
 
     #[test]
