@@ -35,16 +35,20 @@ impl ScrollTilingManager {
             SocketMessage::FocusUp => self.dispatch_focus(Direction::Up),
             SocketMessage::FocusDown => self.dispatch_focus(Direction::Down),
 
-            // --- Swap (column-level) ---
-            SocketMessage::SwapLeft => self.dispatch_swap(Direction::Left),
-            SocketMessage::SwapRight => self.dispatch_swap(Direction::Right),
-            SocketMessage::SwapUp => self.dispatch_swap(Direction::Up),
-            SocketMessage::SwapDown => self.dispatch_swap(Direction::Down),
+            // --- Swap (per-window) ---
+            // Swap* operates on the focused window, exchanging it with its
+            // neighbour. Up/Down move within the same column; Left/Right
+            // exchange it with a window in the adjacent column.
+            SocketMessage::SwapLeft => self.dispatch_swap_window(Direction::Left),
+            SocketMessage::SwapRight => self.dispatch_swap_window(Direction::Right),
+            SocketMessage::SwapUp => self.dispatch_swap_window(Direction::Up),
+            SocketMessage::SwapDown => self.dispatch_swap_window(Direction::Down),
 
-            // --- Swap with offscreen ---
-            SocketMessage::SwapWithOffscreen { direction } => {
-                self.dispatch_swap_with_offscreen(*direction)
-            }
+            // --- Column swap ---
+            SocketMessage::SwapColumn { direction } => self.dispatch_swap_column(*direction),
+
+            // --- Semantic move ---
+            SocketMessage::MoveWindow { direction } => self.dispatch_move_window(*direction),
 
             // --- Scroll ---
             SocketMessage::ScrollLeft => self.dispatch_scroll_left(),
@@ -117,32 +121,64 @@ impl ScrollTilingManager {
         }
     }
 
-    /// Dispatch a column swap in the given direction.
+    /// Dispatch a **column** swap in the given direction.
     ///
-    /// Calls [`LayoutEngine::swap_column`] and animates the resulting
-    /// layout diff if the swap succeeded.
-    fn dispatch_swap(&mut self, dir: Direction) -> SocketResponse {
+    /// Calls [`LayoutEngine::swap_column`] and animates the resulting layout
+    /// diff if the swap succeeded. The layout engine handles off-screen
+    /// columns transparently — `swap_column` internally calls
+    /// `ensure_column_visible`, so the viewport scrolls as part of the same
+    /// diff and no separate "offscreen" message is needed.
+    fn dispatch_swap_column(&mut self, dir: Direction) -> SocketResponse {
         match self.layout.swap_column(dir) {
             Some(diff) => {
                 self.animate_diff(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
-                message: "cannot swap in that direction".into(),
+                message: "cannot swap column in that direction".into(),
             },
         }
     }
 
-    /// Dispatch a swap with an offscreen column.
+    /// Dispatch a **per-window** swap in the given direction.
     ///
-    /// This command swaps the focused column with the nearest offscreen
-    /// column in the given direction. Currently delegates to
-    /// [`dispatch_swap`] since the layout engine handles offscreen
-    /// swapping transparently via viewport scrolling.
-    fn dispatch_swap_with_offscreen(&mut self, direction: Direction) -> SocketResponse {
-        // The layout engine's swap_column already handles viewport scrolling
-        // when the target is offscreen. This is a thin wrapper for the IPC.
-        self.dispatch_swap(direction)
+    /// Calls [`LayoutEngine::swap_window`], which exchanges the focused
+    /// window with its neighbour: up/down moves it within the same column,
+    /// left/right exchanges it with a window in the adjacent column.
+    fn dispatch_swap_window(&mut self, dir: Direction) -> SocketResponse {
+        match self.layout.swap_window(dir) {
+            Some(diff) => {
+                self.animate_diff(&diff);
+                SocketResponse::Ok
+            }
+            None => SocketResponse::Error {
+                message: "cannot swap window in that direction".into(),
+            },
+        }
+    }
+
+    /// Dispatch a semantic "move window" command.
+    ///
+    /// This is the daemon-side translation of the high-level
+    /// [`SocketMessage::MoveWindow`] intent. The concrete action depends on
+    /// the focused window's state and the direction:
+    ///
+    /// - **Tiled, left/right** → a column swap (delegates to
+    ///   [`dispatch_swap_column`](Self::dispatch_swap_column)), since moving
+    ///   a tiled window horizontally *is* swapping its column.
+    /// - **Tiled, up/down** → a within-column window swap *(deferred)*.
+    /// - **Floating, any direction** → a pixel nudge by a configurable shift
+    ///   *(deferred)*.
+    ///
+    /// For now only the tiled left/right path is wired, so `movewindow`
+    /// behaves identically to `swapcolumn`. The branching structure is kept
+    /// as a single delegation point so that floating and up/down support can
+    /// be added later without changing the IPC protocol or keybindings.
+    fn dispatch_move_window(&mut self, dir: Direction) -> SocketResponse {
+        // TODO(floating): inspect the focused window's state and branch:
+        //   - floating → nudge by config move_shift
+        //   - tiled up/down → dispatch_swap_window(dir)
+        self.dispatch_swap_column(dir)
     }
 
     /// Dispatch a scroll-left command.

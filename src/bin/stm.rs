@@ -14,6 +14,9 @@
 //! stm config check              Validate configuration files
 //! stm query all                 List all tracked windows (full debug dump)
 //! stm dispatch focus <dir>      Focus a window in the given direction
+//! stm dispatch swapcolumn <dir> Swap the focused column left/right
+//! stm dispatch movewindow <dir> Move the focused window (semantic; the daemon
+//!                                resolves the concrete action by window state)
 //! ```
 //!
 //! # Configuration
@@ -34,6 +37,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+use scrolling_tiling_manager::common::Direction;
 use scrolling_tiling_manager::config;
 use scrolling_tiling_manager::ipc::message::SocketMessage;
 use scrolling_tiling_manager::ipc::message::SocketResponse;
@@ -74,7 +78,7 @@ enum Commands {
     /// Dispatch a command to the daemon (focus, swap, scroll, etc.).
     ///
     /// Use `stm dispatch help` to see available subcommands. New action
-    /// categories (e.g. `swapcolumn`, `swapwindow`) will be added here.
+    /// categories will be added here as needed.
     Dispatch {
         #[command(subcommand)]
         command: DispatchCommands,
@@ -109,13 +113,29 @@ enum QueryCommands {
 /// Dispatch subcommands — one per action category.
 ///
 /// Each variant wraps a further subcommand tree so the CLI stays organized as
-/// more actions are added (swapcolumn, swapwindow, etc.).
+/// more actions are added.
 #[derive(Debug, Subcommand)]
 enum DispatchCommands {
     /// Focus a window in the given direction.
     Focus {
         #[command(subcommand)]
         direction: FocusDirection,
+    },
+    /// Swap the focused column with its left/right neighbour.
+    #[command(name = "swapcolumn")]
+    SwapColumn {
+        #[command(subcommand)]
+        direction: HorizontalDirection,
+    },
+    /// Move the focused window in the given direction.
+    ///
+    /// This is a semantic command — the daemon decides what "move" means
+    /// based on window state (tiled left/right = column swap; floating =
+    /// pixel nudge once supported).
+    #[command(name = "movewindow")]
+    MoveWindow {
+        #[command(subcommand)]
+        direction: HorizontalDirection,
     },
 }
 
@@ -130,6 +150,20 @@ enum FocusDirection {
     Up,
     /// Focus the window below.
     Down,
+}
+
+/// Horizontal direction for `stm dispatch swapcolumn|movewindow <dir>`.
+///
+/// Only left/right is offered: column swaps are inherently horizontal, and
+/// the current `movewindow` implementation resolves to a column swap for
+/// tiled windows. When `movewindow` gains vertical (within-column) support,
+/// it will switch to a four-way direction enum of its own.
+#[derive(Debug, Subcommand)]
+enum HorizontalDirection {
+    /// Left.
+    Left,
+    /// Right.
+    Right,
 }
 
 fn main() {
@@ -335,6 +369,8 @@ fn cmd_query_all() -> Result<(), String> {
 fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
     match command {
         DispatchCommands::Focus { direction } => cmd_dispatch_focus(direction),
+        DispatchCommands::SwapColumn { direction } => cmd_dispatch_swapcolumn(direction),
+        DispatchCommands::MoveWindow { direction } => cmd_dispatch_movewindow(direction),
     }
 }
 
@@ -347,6 +383,37 @@ fn cmd_dispatch_focus(direction: FocusDirection) -> Result<(), String> {
         FocusDirection::Down => SocketMessage::FocusDown,
     };
     send_command(msg, "focus changed")
+}
+
+/// Send a column-swap command to the daemon.
+///
+/// Maps `stm dispatch swapcolumn left|right` to [`SocketMessage::SwapColumn`].
+fn cmd_dispatch_swapcolumn(direction: HorizontalDirection) -> Result<(), String> {
+    let msg = match direction {
+        HorizontalDirection::Left => SocketMessage::SwapColumn {
+            direction: Direction::Left,
+        },
+        HorizontalDirection::Right => SocketMessage::SwapColumn {
+            direction: Direction::Right,
+        },
+    };
+    send_command(msg, "column swapped")
+}
+
+/// Send a semantic move-window command to the daemon.
+///
+/// Maps `stm dispatch movewindow left|right` to [`SocketMessage::MoveWindow`].
+/// The daemon translates this into a concrete action based on window state.
+fn cmd_dispatch_movewindow(direction: HorizontalDirection) -> Result<(), String> {
+    let msg = match direction {
+        HorizontalDirection::Left => SocketMessage::MoveWindow {
+            direction: Direction::Left,
+        },
+        HorizontalDirection::Right => SocketMessage::MoveWindow {
+            direction: Direction::Right,
+        },
+    };
+    send_command(msg, "window moved")
 }
 
 /// Send a command to the daemon and print a success message on Ok.
@@ -631,6 +698,107 @@ mod tests {
             } => {}
             other => panic!("expected Dispatch::Focus::Down, got: {other:?}"),
         }
+    }
+
+    // --- swapcolumn parsing ---
+
+    #[test]
+    fn parse_dispatch_swapcolumn_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "swapcolumn", "left"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::SwapColumn {
+                        direction: HorizontalDirection::Left,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::SwapColumn::Left, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_swapcolumn_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "swapcolumn", "right"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::SwapColumn {
+                        direction: HorizontalDirection::Right,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::SwapColumn::Right, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_swapcolumn_without_direction_fails() {
+        // Negative: swapcolumn needs a direction subcommand.
+        let result = Cli::try_parse_from(["stm", "dispatch", "swapcolumn"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch swapcolumn' without a direction should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_swapcolumn_vertical_fails() {
+        // Negative: swapcolumn only accepts left/right (HorizontalDirection).
+        let result = Cli::try_parse_from(["stm", "dispatch", "swapcolumn", "up"]);
+        assert!(
+            result.is_err(),
+            "'swapcolumn up' should fail (only left/right)"
+        );
+    }
+
+    // --- movewindow parsing ---
+
+    #[test]
+    fn parse_dispatch_movewindow_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "movewindow", "left"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::MoveWindow {
+                        direction: HorizontalDirection::Left,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::MoveWindow::Left, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_movewindow_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "movewindow", "right"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::MoveWindow {
+                        direction: HorizontalDirection::Right,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::MoveWindow::Right, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_movewindow_without_direction_fails() {
+        // Negative: movewindow needs a direction subcommand.
+        let result = Cli::try_parse_from(["stm", "dispatch", "movewindow"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch movewindow' without a direction should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_movewindow_vertical_fails() {
+        // Negative: movewindow currently only accepts left/right (vertical is
+        // deferred — when added it will use its own four-way enum).
+        let result = Cli::try_parse_from(["stm", "dispatch", "movewindow", "up"]);
+        assert!(
+            result.is_err(),
+            "'movewindow up' should fail (vertical not yet supported)"
+        );
     }
 
     #[test]

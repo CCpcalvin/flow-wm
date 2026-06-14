@@ -39,7 +39,8 @@ pub enum SocketMessage {
 
     FocusLeft, FocusRight, FocusUp, FocusDown,
     SwapLeft, SwapRight, SwapUp, SwapDown,
-    SwapWithOffscreen { direction: Direction },
+    SwapColumn { direction: Direction },
+    MoveWindow { direction: Direction },
     ScrollLeft, ScrollRight,
     ExpandColumn, ShrinkColumn,
     SetColumnWidth { eighths: u8 },

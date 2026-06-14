@@ -55,18 +55,47 @@ pub enum SocketMessage {
     /// Move focus down (within column).
     FocusDown,
 
-    // --- Swap ---
-    /// Swap focused window left.
+    // --- Swap (per-window) ---
+    /// Swap the focused window with its left neighbour.
     SwapLeft,
-    /// Swap focused window right.
+    /// Swap the focused window with its right neighbour.
     SwapRight,
-    /// Swap focused window up (within column).
+    /// Swap the focused window with the one above it (same column).
     SwapUp,
-    /// Swap focused window down (within column).
+    /// Swap the focused window with the one below it (same column).
     SwapDown,
-    /// Swap focused window off-screen in the given direction.
-    SwapWithOffscreen {
-        /// Direction to swap.
+
+    // --- Column swap ---
+    /// Swap the focused column with its neighbour in the given direction.
+    ///
+    /// Unlike the per-window `Swap*` messages above, this operates on the
+    /// *entire column* containing the focused window. The layout engine's
+    /// `swap_column` handles the viewport scroll automatically (via
+    /// `ensure_column_visible`), so off-screen columns are brought into view
+    /// as part of the same diff — no separate "offscreen" message is needed.
+    SwapColumn {
+        /// Direction to swap the column (left or right).
+        direction: Direction,
+    },
+
+    // --- Semantic move ---
+    /// Move the focused window in the given direction.
+    ///
+    /// This is a high-level, *semantic* command: the daemon translates the
+    /// intended movement based on the window's current state and the layout.
+    ///
+    /// - Tiled window, left/right → swap the entire column (delegates to
+    ///   [`SocketMessage::SwapColumn`]).
+    /// - Tiled window, up/down → swap with the adjacent window in the same
+    ///   column. *[deferred — not yet wired]*
+    /// - Floating window, any direction → nudge by a configurable shift.
+    ///   *[deferred — not yet wired]*
+    ///
+    /// Keeping `movewindow` separate from the concrete `SwapColumn`/`Swap*`
+    /// messages lets the daemon own the "what does *move* mean here?"
+    /// decision, so keybindings stay stable as floating support lands.
+    MoveWindow {
+        /// Direction to move the focused window.
         direction: Direction,
     },
 
@@ -194,19 +223,37 @@ mod tests {
         assert_eq!(parsed, SocketMessage::SetColumnWidth { eighths: 4 });
     }
 
-    // Positive: round-trip SwapWithOffscreen
+    // Positive: round-trip SwapColumn
     #[test]
-    fn roundtrip_swap_with_offscreen() {
-        let msg = SocketMessage::SwapWithOffscreen {
-            direction: Direction::Left,
+    fn roundtrip_swap_column() {
+        let msg = SocketMessage::SwapColumn {
+            direction: Direction::Right,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"type":"swap_with_offscreen","direction":"Left"}"#);
+        assert_eq!(json, r#"{"type":"swap_column","direction":"Right"}"#);
 
         let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(
             parsed,
-            SocketMessage::SwapWithOffscreen {
+            SocketMessage::SwapColumn {
+                direction: Direction::Right,
+            }
+        );
+    }
+
+    // Positive: round-trip MoveWindow
+    #[test]
+    fn roundtrip_move_window() {
+        let msg = SocketMessage::MoveWindow {
+            direction: Direction::Left,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"move_window","direction":"Left"}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            SocketMessage::MoveWindow {
                 direction: Direction::Left,
             }
         );
@@ -406,8 +453,11 @@ mod tests {
             SocketMessage::SwapRight,
             SocketMessage::SwapUp,
             SocketMessage::SwapDown,
-            SocketMessage::SwapWithOffscreen {
+            SocketMessage::SwapColumn {
                 direction: Direction::Right,
+            },
+            SocketMessage::MoveWindow {
+                direction: Direction::Left,
             },
             SocketMessage::ScrollLeft,
             SocketMessage::ScrollRight,
