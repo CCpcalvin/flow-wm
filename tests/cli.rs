@@ -22,3 +22,6 @@ mod registry;
 #[cfg(debug_assertions)]
 #[path = "cli/test_desktop.rs"]
 mod test_desktop;
+#[cfg(debug_assertions)]
+#[path = "cli/window_creation.rs"]
+mod window_creation;

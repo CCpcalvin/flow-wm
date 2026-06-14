@@ -365,6 +365,58 @@ impl LayoutEngine {
         self.apply_mutation(new_layout)
     }
 
+    /// Insert a new window as a column immediately after the focused window.
+    ///
+    /// This is the **window-creation placement strategy**: when a new tiling
+    /// window is detected, it is placed right next to the currently focused
+    /// window rather than at the far right end of the layout. All columns to
+    /// the right of the focused column shift rightward by one `column_shift`
+    /// on the canvas. Focus then moves to the new window, and the viewport
+    /// adjusts ([`mutations::ensure_column_visible`]) to keep it on screen.
+    ///
+    /// This runs the standard mutation pipeline (mutate → project → diff),
+    /// so the returned [`LayoutDiff`] is ready to pass straight to the
+    /// animation system.
+    ///
+    /// # Edge cases
+    ///
+    /// - **No focused window** (first window in an empty layout): behaves like
+    ///   [`add_window`](Self::add_window) — the new window becomes the sole
+    ///   column.
+    /// - **Stale focus**: if the focused window ID is no longer in the layout,
+    ///   the new column is appended at the end.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use scrolling_tiling_manager::layout::{
+    /// #     LayoutEngine,
+    /// #     types::{MonitorInfo, Padding},
+    /// # };
+    /// # use scrolling_tiling_manager::common::WindowId;
+    /// # let monitor = MonitorInfo {
+    /// #     work_area: scrolling_tiling_manager::common::Rect { x: 0, y: 0, width: 1920, height: 1080 },
+    /// # };
+    /// # let mut engine = LayoutEngine::new(monitor, 960, 4, 320, Padding { window_gap: 4, up: 0, down: 0 }, 4);
+    /// engine.add_window(WindowId(1)); // col 0, focused
+    /// engine.add_window(WindowId(2)); // col 1, focused
+    /// engine.set_focus(WindowId(1));  // focus back to col 0
+    ///
+    /// engine.insert_window(WindowId(3)); // inserted at col 1, between 1 and 2
+    /// assert_eq!(engine.focused(), Some(WindowId(3)));
+    /// ```
+    pub fn insert_window(&mut self, window: WindowId) -> LayoutDiff {
+        let focused = self.focused;
+        let new_layout = mutations::insert_window_after_focused(
+            &self.virtual_layout,
+            focused,
+            window,
+            &self.config,
+        );
+        self.focused = Some(window);
+        self.apply_mutation(new_layout)
+    }
+
     /// Add a window as a new row in the focused column.
     pub fn add_window_to_focused_column(&mut self, window: WindowId) -> Option<LayoutDiff> {
         let focused = self.focused?;
@@ -676,6 +728,101 @@ mod tests {
         // Negative: no focus → can't add to focused column
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
         assert!(engine.add_window_to_focused_column(WindowId(1)).is_none());
+    }
+
+    // --- Engine insert_window tests ---
+
+    #[test]
+    fn engine_insert_window_into_empty_layout() {
+        // Positive: first window in empty layout → sole column, focused.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let diff = engine.insert_window(WindowId(1));
+        assert_eq!(engine.virtual_layout().columns.len(), 1);
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert!(!diff.moves.is_empty(), "first window should produce moves");
+    }
+
+    #[test]
+    fn engine_insert_window_after_focused_shifts_right() {
+        // Positive: insert between focused col 0 and col 1.
+        // Layout: [W1][W2][W3], focus W1. insert W4 → [W1][W4][W2][W3].
+        let mut engine = engine_with_three_columns();
+        // engine_with_three_columns sets focus to W1 (col 0)
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+
+        let diff = engine.insert_window(WindowId(4));
+        assert_eq!(engine.virtual_layout().columns.len(), 4);
+        assert_eq!(engine.virtual_layout().columns[0].rows[0], WindowId(1));
+        assert_eq!(engine.virtual_layout().columns[1].rows[0], WindowId(4)); // new
+        assert_eq!(engine.virtual_layout().columns[2].rows[0], WindowId(2)); // shifted
+        assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(3)); // shifted
+        assert_eq!(engine.focused(), Some(WindowId(4))); // focus moved to new
+        assert!(
+            !diff.moves.is_empty(),
+            "insertion should produce animation moves"
+        );
+    }
+
+    #[test]
+    fn engine_insert_window_after_last_column() {
+        // Positive: focused on last column → insert at end.
+        let mut engine = engine_with_three_columns();
+        engine.set_focus(WindowId(3)); // last column
+
+        let _ = engine.insert_window(WindowId(4));
+        assert_eq!(engine.virtual_layout().columns.len(), 4);
+        assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(4));
+        assert_eq!(engine.focused(), Some(WindowId(4)));
+    }
+
+    #[test]
+    fn engine_insert_window_after_middle_column() {
+        // Positive: focused on col 1 (middle) → insert at index 2.
+        let mut engine = engine_with_three_columns();
+        engine.set_focus(WindowId(2));
+
+        let _ = engine.insert_window(WindowId(4));
+        assert_eq!(engine.virtual_layout().columns.len(), 4);
+        assert_eq!(engine.virtual_layout().columns[0].rows[0], WindowId(1)); // unchanged
+        assert_eq!(engine.virtual_layout().columns[1].rows[0], WindowId(2)); // unchanged
+        assert_eq!(engine.virtual_layout().columns[2].rows[0], WindowId(4)); // new
+        assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(3)); // shifted
+    }
+
+    #[test]
+    fn engine_insert_window_scrolls_when_new_column_offscreen() {
+        // Positive: many columns, insert creates a column off-screen right →
+        // viewport scrolls to reveal it.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(1)); // focus leftmost (col 0)
+
+        let diff = engine.insert_window(WindowId(4));
+        // New column at index 1. With 4 columns × 960px > 1920px viewport,
+        // ensure_column_visible keeps the new column visible.
+        assert_eq!(engine.focused(), Some(WindowId(4)));
+        assert!(
+            !diff.moves.is_empty(),
+            "off-screen insertion must produce animation moves"
+        );
+    }
+
+    #[test]
+    fn engine_insert_window_after_remove_falls_back() {
+        // Negative/edge: after removing the focused window, focus falls back
+        // to the first column. Inserting then uses that focus as the anchor.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        // Remove focused (W2) → focus falls back to W1 (first column).
+        let _ = engine.remove_window(WindowId(2));
+        // Insert W3 after focused (W1) → W3 at col 1.
+        let diff = engine.insert_window(WindowId(3));
+        assert_eq!(engine.virtual_layout().columns.len(), 2);
+        assert_eq!(engine.focused(), Some(WindowId(3)));
+        assert!(!diff.moves.is_empty());
     }
 
     #[test]

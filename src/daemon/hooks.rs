@@ -18,12 +18,24 @@ impl ScrollTilingManager {
     /// Pipeline:
     /// 1. `registry.handle_created(hwnd)` — classifies and registers the window.
     /// 2. If the window was classified as tiling (`Some(WindowId)`):
-    ///    - `layout.add_window(id)` — adds it as a new column.
+    ///    - `layout.insert_window(id)` — places the new column immediately
+    ///      after the focused window, shifts right-side columns rightward by
+    ///      one `column_shift`, moves focus to the new window, and ensures it
+    ///      is visible.
     ///    - `animate_diff(diff)` — animates the resulting layout change.
     /// 3. If the window was floating, ignored, or skipped: no action needed.
+    ///
+    /// # Placement strategy
+    ///
+    /// Unlike [`on_window_restored`](Self::on_window_restored) which re-adds a
+    /// previously-minimized window at the far right via `add_window`, new
+    /// windows are inserted next to the focused window so they appear where
+    /// the user is actively working. See
+    /// [`LayoutEngine::insert_window`](crate::layout::LayoutEngine::insert_window)
+    /// for the full algorithm.
     pub(super) fn on_window_created(&mut self, hwnd: isize) {
         if let Some(window_id) = self.registry.handle_created(hwnd) {
-            let diff = self.layout.add_window(window_id);
+            let diff = self.layout.insert_window(window_id);
             self.animate_diff(&diff);
         }
     }

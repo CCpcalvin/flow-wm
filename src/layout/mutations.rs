@@ -869,6 +869,65 @@ pub fn add_window(
     new_layout
 }
 
+/// Insert a new window as a column immediately **after** the focused window's
+/// column.
+///
+/// This is the window-creation placement strategy: rather than appending the
+/// new window to the far right end of the layout (which [`add_window`] does),
+/// this inserts it right next to the focused window so the user sees their
+/// newly opened window adjacent to where they were working.
+///
+/// # How "make space" works
+///
+/// In the virtual layout, columns are stored in a `Vec` and their canvas
+/// positions are derived from that order. Inserting a new column at index
+/// `focused_col + 1` pushes every column to the right of the insertion point
+/// rightward by exactly one `column_shift` (= `column_width + window_gap`) on
+/// the canvas — no manual coordinate math is needed. This is the "make space"
+/// step the placement algorithm describes.
+///
+/// # Edge cases
+///
+/// - **No focused window** (empty layout, first window): the new column is
+///   appended at the end, which for an empty layout means it becomes the sole
+///   column.
+/// - **Focused window is the last column**: insertion at `col + 1` is
+///   equivalent to appending at the end.
+/// - **Focused window not found** (stale focus): falls back to appending at
+///   the end.
+///
+/// # Viewport
+///
+/// After insertion, [`ensure_column_visible`] is called on the new column's
+/// index to bring it into the viewport. If the new column is already visible
+/// (e.g. there is room on screen), the viewport is unchanged. If it is
+/// off-screen right, the camera scrolls right by a quantized `column_shift`.
+///
+/// The caller is responsible for setting focus to the new window — this
+/// function only computes the layout.
+#[must_use]
+pub fn insert_window_after_focused(
+    layout: &VirtualLayout,
+    focused: Option<WindowId>,
+    window: WindowId,
+    config: &MutationConfig,
+) -> VirtualLayout {
+    let mut new_layout = layout.clone();
+    let new_column = Column::new(config.default_column_width_eighths, window);
+
+    // Determine the insertion index: immediately after the focused column.
+    // Falls back to the end when there is no focus or the focused window is
+    // no longer present (stale focus / empty layout).
+    let insert_idx = focused
+        .and_then(|f| layout.find_window(f))
+        .map(|(col, _)| col + 1)
+        .unwrap_or_else(|| new_layout.columns.len());
+
+    new_layout.columns.insert(insert_idx, new_column);
+
+    ensure_column_visible(&new_layout, insert_idx, config)
+}
+
 /// Add a window to an existing column as a new row (vertical container append).
 #[must_use]
 pub fn add_window_to_column(
@@ -1871,6 +1930,93 @@ mod tests {
         assert_eq!(result.columns.len(), 4);
         assert_eq!(result.columns[3].rows[0], WindowId(10));
         assert_eq!(result.columns[3].width_eighths, 4);
+    }
+
+    // --- insert_window_after_focused ---
+
+    #[test]
+    fn insert_after_focused_inserts_between_columns() {
+        // Positive: focused on col 0 → new column inserted at index 1,
+        // shifting the old col 1 and col 2 rightward.
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(1)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[0].rows[0], WindowId(1)); // unchanged
+        assert_eq!(result.columns[1].rows[0], WindowId(10)); // new window
+        assert_eq!(result.columns[2].rows[0], WindowId(2)); // shifted right
+        assert_eq!(result.columns[3].rows[0], WindowId(3)); // shifted right
+    }
+
+    #[test]
+    fn insert_after_focused_middle_column() {
+        // Positive: focused on col 1 (middle) → insert at index 2.
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(2)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[0].rows[0], WindowId(1)); // unchanged
+        assert_eq!(result.columns[1].rows[0], WindowId(2)); // unchanged
+        assert_eq!(result.columns[2].rows[0], WindowId(10)); // new
+        assert_eq!(result.columns[3].rows[0], WindowId(3)); // shifted right
+    }
+
+    #[test]
+    fn insert_after_focused_last_column_appends() {
+        // Positive: focused on last column → insert at end (same as append).
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(3)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[3].rows[0], WindowId(10));
+    }
+
+    #[test]
+    fn insert_after_focused_no_focus_appends_to_empty() {
+        // Positive: no focus + empty layout → single column.
+        let layout = VirtualLayout::new();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, None, WindowId(1), &config);
+        assert_eq!(result.columns.len(), 1);
+        assert_eq!(result.columns[0].rows[0], WindowId(1));
+    }
+
+    #[test]
+    fn insert_after_focused_stale_focus_appends() {
+        // Negative: focused window not in layout (stale) → append at end.
+        let layout = three_column_layout();
+        let config = test_config();
+        let result =
+            insert_window_after_focused(&layout, Some(WindowId(99)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[3].rows[0], WindowId(10));
+    }
+
+    #[test]
+    fn insert_after_focused_brings_new_column_into_view() {
+        // Positive: when the new column is off-screen right, the viewport
+        // scrolls to make it visible.
+        // 4 columns at 960px each, monitor 1920 → only 2 visible. Focus col 1.
+        // Insert after col 1 → new col at index 2, which is off-screen right.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+                Column::new(4, WindowId(4)),
+            ],
+            0,
+        );
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(2)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 5);
+        assert_eq!(result.columns[2].rows[0], WindowId(10));
+        // Viewport should have scrolled right to reveal the new column.
+        assert!(
+            result.viewport_offset > 0,
+            "viewport should scroll to reveal newly inserted column, got offset {}",
+            result.viewport_offset
+        );
     }
 
     #[test]
