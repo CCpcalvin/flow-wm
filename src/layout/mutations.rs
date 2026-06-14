@@ -663,9 +663,24 @@ pub fn toggle_monocle(
 /// offset exists (canvas barely exceeds monitor), we fall back to offset `0`.
 ///
 /// **Scroll needed** (`N > columns_per_screen`):
-/// Only the focus column must be visible. The valid offset range is
-/// `[(f+1)*slot - monitor_width, f*slot + gap]`. Among slot-aligned offsets
-/// in this range, we pick the one closest to centering the focus column.
+/// Exactly `C = columns_per_screen` columns are shown — the screen is always
+/// **completely filled with real columns, no blanks on either side**.
+///
+/// The leftmost visible column is `start`. It is chosen from the valid range
+/// `[max(0, f−C+1), min(f, N−C)]` which guarantees: (a) no columns before
+/// column 0, (b) no columns past the last column, and (c) the focus column
+/// is visible. Among valid `start` values, the one closest to centering the
+/// focus is selected: `ideal_start = f − C/2` (integer division, placing the
+/// focus slightly right of center for even C). The offset is
+/// `start * slot` — slot-aligned by construction.
+///
+/// # Example (N = 7, C = 4)
+///
+/// | Focus | `start` | Visible columns |
+/// |-------|---------|-----------------|
+/// | a (0) | 0       | `[a, b, c, d]`  |
+/// | d (3) | 1       | `[b, c, d, e]`  |
+/// | g (6) | 3       | `[d, e, f, g]`  |
 ///
 /// # Why `columns_per_screen`, not pixel geometry
 ///
@@ -673,8 +688,9 @@ pub fn toggle_monocle(
 /// visible at once. When N ≤ `columns_per_screen`, we treat all columns as
 /// "fitting" even if the explicit `column_width` makes the total slightly
 /// exceed the monitor — the edge-case fallback (offset 0) handles the tiny
-/// overflow gracefully. When N > `columns_per_screen`, we scroll to the focus
-/// column because the user's own setting says not all columns should be visible.
+/// overflow gracefully. When N > `columns_per_screen`, we show exactly C
+/// columns filled edge-to-edge because the user's own setting says not all
+/// columns should be visible.
 ///
 /// # Slot model
 ///
@@ -685,10 +701,14 @@ pub fn toggle_monocle(
 ///
 /// # Tie-breaking
 ///
-/// When two slot-aligned offsets equally center the focus column, the larger
-/// offset (less negative / closer to zero) is preferred. This minimizes camera
-/// movement from the initial `viewport_offset = 0` and keeps the view
-/// left-aligned.
+/// **All-fit case**: when two slot-aligned offsets equally center the focus
+/// column, the larger offset (less negative / closer to zero) is preferred.
+/// This minimizes camera movement from the initial `viewport_offset = 0` and
+/// keeps the view left-aligned.
+///
+/// **Scroll case**: when the ideal `start` is a half-integer (even C),
+/// integer division truncates toward zero, preferring the smaller `start`
+/// (less scrolling, focus slightly right of center).
 ///
 /// # Arguments
 ///
@@ -718,25 +738,54 @@ pub fn compute_initial_viewport(
     let n = num_columns as i32;
     let f = focus_col as i32;
 
-    // ── Determine the valid offset range ──────────────────────────────
+    // ── Determine whether all columns fit on screen ───────────────────
     //
-    // The range [min_offset, max_offset] ensures the target columns are
-    // visible: viewport_left ≤ leftmost_target_left AND
-    //           viewport_right ≥ rightmost_target_right.
-    //
-    // Decision: if N ≤ columns_per_screen, show ALL columns. Otherwise,
-    // only the focus column needs to be visible (scroll case).
+    // The scroll case (N > columns_per_screen) is handled by an early
+    // return below. The range [min_offset, max_offset] that follows applies
+    // only to the all-fit case, ensuring every column is visible.
     let all_fit = num_columns as u32 <= config.columns_per_screen;
 
-    let (min_offset, max_offset) = if all_fit {
-        // All columns must be visible.
-        // First col left = gap; last col right = n * slot.
-        (n * slot - monitor_width, gap)
-    } else {
-        // Only the focus column must be visible (scroll case).
-        // Focus col left = f * slot + gap; right = (f + 1) * slot.
-        ((f + 1) * slot - monitor_width, f * slot + gap)
-    };
+    if !all_fit {
+        // ── Scroll case: N > columns_per_screen ──────────────────────
+        //
+        // We show exactly C = columns_per_screen columns, all filled —
+        // no blank/parked columns on either side of the screen.
+        //
+        // The leftmost visible column is `start`. Three constraints
+        // guarantee no blanks and focus visibility:
+        //
+        //   1. No blanks on left:   start ≥ 0
+        //   2. No blanks on right:  start + C ≤ N   →   start ≤ N − C
+        //   3. Focus column seen:   start ≤ f ≤ start + C − 1
+        //                           →   f − C + 1 ≤ start ≤ f
+        //
+        // Combined valid range:
+        //   start ∈ [max(0, f − C + 1), min(f, N − C)]
+        //
+        // Among valid `start` values we pick the one closest to centering
+        // the focus column. The ideal position for the focus is at slot
+        // `C/2` — slightly right of center for even C — so:
+        //
+        //   ideal_start = f − C/2   (integer division)
+        //
+        // This places the focus at position C/2 within the visible window,
+        // meaning for C = 4 the focus lands on the 3rd visible column.
+        //
+        // The resulting viewport_offset = start * slot, which is
+        // slot-aligned (a multiple of column_shift = col_px + gap).
+        let c = config.columns_per_screen as i32;
+        let start_min = 0.max(f - c + 1);
+        let start_max = f.min(n - c);
+        let ideal_start = f - c / 2;
+        let best_start = ideal_start.clamp(start_min, start_max);
+        return best_start * slot;
+    }
+
+    // ── All-fit case: all columns must be visible ─────────────────────
+    //
+    // First col left = gap; last col right = n * slot.
+    let min_offset = n * slot - monitor_width;
+    let max_offset = gap;
 
     // ── Find valid slot-aligned offsets ───────────────────────────────
     //
@@ -756,14 +805,9 @@ pub fn compute_initial_viewport(
 
     if k_min > k_max {
         // Edge case: no slot-aligned offset satisfies the constraint.
-        // For the all-fit case: show from the start (offset 0), accepting
-        // a tiny right-edge cutoff on the last column.
-        // For the scroll case: use the raw minimum offset so the focus
-        // column is visible even without slot alignment.
-        if all_fit {
-            return 0;
-        }
-        return min_offset.max(0);
+        // Show from the start (offset 0), accepting a tiny right-edge
+        // cutoff on the last column.
+        return 0;
     }
 
     // ── Pick the slot-aligned offset that best centers the focus col ──
@@ -795,7 +839,8 @@ pub fn compute_initial_viewport(
 ///
 /// When `focus_col_idx` is `Some(idx)`, the viewport is computed by
 /// [`compute_initial_viewport`] to show all columns when they fit on one
-/// screen, or scroll to the focus column when they don't. The offset is
+/// screen, or fill the screen with exactly `columns_per_screen` columns
+/// (no blanks) centered on the focus column when they don't. The offset is
 /// slot-aligned (`k * (col_width + gap)`) for clean scroll alignment.
 ///
 /// When `focus_col_idx` is `None`, the viewport starts at offset `0`
@@ -2159,26 +2204,30 @@ mod tests {
     #[test]
     fn compute_initial_viewport_scroll_when_exceeds_columns_per_screen() {
         // 4 cols, columns_per_screen=2 → scroll case.
-        // slot=964, focus=2: min_offset=972, max_offset=1932.
-        // k_min=2, k_max=2 → only k=2 → offset=1928.
+        // slot=964, focus=2 (f=2), C=2, N=4.
+        // start_min = max(0, 2-2+1) = 1, start_max = min(2, 4-2) = 2.
+        // ideal_start = 2 - 2/2 = 1. Clamp(1, 1, 2) = 1.
+        // offset = 1 * 964 = 964. Shows columns [1,2], focus at position 1.
         let config = viewport_config(1920, 960, 4, 2);
         let offset = compute_initial_viewport(4, 2, &config);
         assert_eq!(
-            offset, 1928,
-            "4 cols > columns_per_screen=2, scroll to focus=2"
+            offset, 964,
+            "4 cols > columns_per_screen=2, focus=2 → start=1, offset 964"
         );
     }
 
     #[test]
     fn compute_initial_viewport_scroll_with_multiple_valid_offsets() {
-        // 4 cols, columns_per_screen=2, wider monitor → scroll case with k∈{-1,0,1}.
-        // slot=964, focus=1: min_offset=-1072, max_offset=968.
-        // k_min=-1, k_max=1. Focus col 1 center=1448, ideal_offset=-52, ideal_k=0.
+        // 4 cols, columns_per_screen=2, wider monitor → still scroll case.
+        // slot=964, focus=1 (f=1), C=2, N=4.
+        // start_min = max(0, 1-2+1) = 0, start_max = min(1, 4-2) = 1.
+        // ideal_start = 1 - 2/2 = 0. Clamp(0, 0, 1) = 0.
+        // offset = 0 * 964 = 0. Shows columns [0,1], focus at position 1.
         let config = viewport_config(3000, 960, 4, 2);
         let offset = compute_initial_viewport(4, 1, &config);
         assert_eq!(
             offset, 0,
-            "scroll case with room, focus=1 centered at offset 0"
+            "scroll case, focus=1 → start=0, offset 0 (focus right of center)"
         );
     }
 
@@ -2255,15 +2304,16 @@ mod tests {
     #[test]
     fn compute_initial_viewport_scroll_focus_last_column() {
         // Positive: 4 cols, columns_per_screen=2 → scroll case.
-        // Focus=3: focus col left=2896, right=3860.
-        // min_offset=3860-1920=1940, max_offset=2896+4=2900.
-        // k_min=ceil(1940/964)=3, k_max=floor(2900/964)=3.
-        // Only k=3 → offset=2892.
+        // Focus=3 (f=3), C=2, N=4, slot=964.
+        // start_min = max(0, 3-2+1) = 2, start_max = min(3, 4-2) = 2.
+        // ideal_start = 3 - 2/2 = 2. Clamp(2, 2, 2) = 2.
+        // offset = 2 * 964 = 1928. Shows columns [2,3], focus at position 1.
+        // No blanks: column 3 is the last, column 2 fills the left slot.
         let config = viewport_config(1920, 960, 4, 2);
         let offset = compute_initial_viewport(4, 3, &config);
         assert_eq!(
-            offset, 2892,
-            "scroll case with focus on last column → offset 2892"
+            offset, 1928,
+            "scroll case with focus on last column → start=2, offset 1928"
         );
     }
 
@@ -2284,18 +2334,21 @@ mod tests {
 
     #[test]
     fn compute_initial_viewport_scroll_edge_no_valid_k() {
-        // Negative/edge: scroll case where k_min > k_max.
-        // Tight monitor: 4 cols, columns_per_screen=2, monitor=960.
-        // col_px = 4*960/4 = 960. slot=964.
-        // Focus=2: focus col left=4+2*964=1932, right=1932+960=2892.
-        // min_offset=2892-960=1932, max_offset=2*964+4=1932.
-        // k_min=ceil(1932/964)=3, k_max=floor(1932/964)=2.
-        // k_min > k_max → scroll edge → return min_offset.max(0) = 1932.
+        // Edge: scroll case with tight monitor (monitor narrower than C slots).
+        // 4 cols, columns_per_screen=2, monitor=960.
+        // col_px = 4*960/4 = 960. slot = 964.
+        // Focus=2 (f=2), C=2, N=4.
+        // start_min = max(0, 2-2+1) = 1, start_max = min(2, 4-2) = 2.
+        // ideal_start = 2 - 2/2 = 1. Clamp(1, 1, 2) = 1.
+        // offset = 1 * 964 = 964. Shows columns [1,2], no blanks.
+        // (This degenerate config has columns wider than half the monitor,
+        // but the column-index logic still picks the best slot-aligned
+        // offset without creating blank columns.)
         let config = viewport_config(960, 960, 4, 2);
         let offset = compute_initial_viewport(4, 2, &config);
         assert_eq!(
-            offset, 1932,
-            "scroll case with no valid k → fallback to min_offset.max(0)"
+            offset, 964,
+            "scroll case tight monitor → start=1, offset 964 (no blanks)"
         );
     }
 
@@ -2319,15 +2372,15 @@ mod tests {
     fn compute_initial_viewport_scroll_with_large_gap() {
         // Positive: large gap changes the slot alignment.
         // 3 cols, columns_per_screen=2, monitor=1920, gap=100.
-        // col_px=960, slot=1060. Focus=2 (3rd col).
-        // min_offset=3*1060-1920=1260, max_offset=2*1060+100=2220.
-        // k_min=ceil(1260/1060)=2, k_max=floor(2220/1060)=2.
-        // Only k=2 → offset=2120.
+        // col_px=960, slot=1060. Focus=2 (f=2), C=2, N=3.
+        // start_min = max(0, 2-2+1) = 1, start_max = min(2, 3-2) = 1.
+        // ideal_start = 2 - 2/2 = 1. Clamp(1, 1, 1) = 1.
+        // offset = 1 * 1060 = 1060. Shows columns [1,2], no blanks.
         let config = viewport_config(1920, 960, 100, 2);
         let offset = compute_initial_viewport(3, 2, &config);
         assert_eq!(
-            offset, 2120,
-            "scroll case with large gap → offset = 2 * 1060 = 2120"
+            offset, 1060,
+            "scroll case with large gap → start=1, offset = 1 * 1060 = 1060"
         );
     }
 
@@ -2362,6 +2415,136 @@ mod tests {
         assert_eq!(
             layout.viewport_offset, 0,
             "scroll case with focus=0 → offset 0 (first col visible from start)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // No-blank-columns regression: when N > columns_per_screen, the initial
+    // viewport must fill every on-screen slot with a real column — no blank
+    // space on either side — while centering the focus as much as possible.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scroll_no_blanks_focus_first_shows_from_start() {
+        // 7 cols, columns_per_screen=4, focus=0.
+        // start_min = max(0, -3) = 0, start_max = min(0, 3) = 0.
+        // ideal = 0 - 2 = -2 → clamp to 0. Shows [a,b,c,d].
+        let config = viewport_config(1920, 960, 4, 4);
+        let offset = compute_initial_viewport(7, 0, &config);
+        assert_eq!(offset, 0, "focus on first col → start=0, no left blanks");
+    }
+
+    #[test]
+    fn scroll_no_blanks_focus_last_shows_to_end() {
+        // 7 cols, columns_per_screen=4, focus=6.
+        // start_min = max(0, 3) = 3, start_max = min(6, 3) = 3.
+        // ideal = 6 - 2 = 4 → clamp to 3. Shows [d,e,f,g].
+        let config = viewport_config(1920, 960, 4, 4);
+        let offset = compute_initial_viewport(7, 6, &config);
+        // start=3 → offset = 3 * slot = 3 * 964 = 2892.
+        assert_eq!(offset, 2892, "focus on last col → start=3, no right blanks");
+    }
+
+    #[test]
+    fn scroll_no_blanks_focus_center_shows_centered() {
+        // 7 cols, columns_per_screen=4, focus=3 (d).
+        // start_min = max(0, 0) = 0, start_max = min(3, 3) = 3.
+        // ideal = 3 - 2 = 1. Clamp(1, 0, 3) = 1. Shows [b,c,d,e].
+        let config = viewport_config(1920, 960, 4, 4);
+        let offset = compute_initial_viewport(7, 3, &config);
+        // start=1 → offset = 1 * slot = 1 * 964 = 964.
+        assert_eq!(offset, 964, "focus=3 → start=1, shows [b,c,d,e]");
+    }
+
+    #[test]
+    fn scroll_no_blanks_focus_never_creates_negative_offset() {
+        // For every focus position in a scroll layout, the offset must be
+        // non-negative (no blank columns on the left).
+        let config = viewport_config(1920, 960, 4, 4);
+        for f in 0..7 {
+            let offset = compute_initial_viewport(7, f, &config);
+            assert!(
+                offset >= 0,
+                "focus={f}: offset {offset} must be ≥ 0 (no left blanks)"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_no_blanks_focus_never_exceeds_max_scroll() {
+        // The rightmost visible column must not exceed N-1.
+        // max_offset for N columns = (N - C) * slot.
+        // For N=7, C=4: max = 3 * 964 = 2892.
+        let config = viewport_config(1920, 960, 4, 4);
+        let max_offset = (7 - 4) * (960 + 4);
+        for f in 0..7 {
+            let offset = compute_initial_viewport(7, f, &config);
+            assert!(
+                offset <= max_offset,
+                "focus={f}: offset {offset} must be ≤ {max_offset} (no right blanks)"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_no_blanks_offset_always_slot_aligned() {
+        // Every offset must be a multiple of slot (column_shift).
+        let config = viewport_config(1920, 960, 4, 4);
+        let slot = 960 + 4;
+        for f in 0..7 {
+            let offset = compute_initial_viewport(7, f, &config);
+            assert_eq!(
+                offset % slot,
+                0,
+                "focus={f}: offset {offset} must be a multiple of slot {slot}"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_no_blanks_user_monitor_5120_scenario() {
+        // User's actual hardware: 5120×1440 monitor, columns_per_screen=4.
+        // column_width=1280, gap=4 → col_px=1280, slot=1284.
+        // 7 windows, focus on a (0): start=0, offset=0. Shows [a,b,c,d].
+        // 7 windows, focus on g (6): start=3, offset=3*1284=3852. Shows [d,e,f,g].
+        // 7 windows, focus on d (3): start=1, offset=1*1284=1284. Shows [b,c,d,e].
+        let config = viewport_config(5120, 1280, 4, 4);
+        let slot = 1280 + 4;
+
+        let off_a = compute_initial_viewport(7, 0, &config);
+        assert_eq!(off_a, 0, "focus a → offset 0");
+
+        let off_g = compute_initial_viewport(7, 6, &config);
+        assert_eq!(off_g, 3 * slot, "focus g → offset {}", 3 * slot);
+
+        let off_d = compute_initial_viewport(7, 3, &config);
+        assert_eq!(off_d, 1 * slot, "focus d → offset {}", 1 * slot);
+    }
+
+    #[test]
+    fn scroll_no_blanks_five_windows_four_per_screen() {
+        // 5 cols, columns_per_screen=4.
+        // focus=0: start=0, shows [a,b,c,d]. offset=0.
+        // focus=4: start=1 (max(0,1) to min(4,1)=1), shows [b,c,d,e]. offset=slot.
+        let config = viewport_config(1920, 960, 4, 4);
+        let slot = 960 + 4;
+
+        assert_eq!(compute_initial_viewport(5, 0, &config), 0);
+        assert_eq!(compute_initial_viewport(5, 4, &config), slot);
+    }
+
+    #[test]
+    fn scroll_no_blanks_odd_columns_per_screen_centers_exactly() {
+        // columns_per_screen=3 (odd), 6 cols.
+        // focus=2: ideal_start = 2 - 3/2 = 2 - 1 = 1.
+        // start_min = max(0, 0) = 0, start_max = min(2, 3) = 2.
+        // Clamp(1, 0, 2) = 1. Focus at position 1 (exact center of 0,1,2).
+        let config = viewport_config(1920, 960, 4, 3);
+        let slot = 960 + 4;
+        assert_eq!(
+            compute_initial_viewport(6, 2, &config),
+            1 * slot,
+            "odd C=3: focus=2 → start=1, exact center"
         );
     }
 
