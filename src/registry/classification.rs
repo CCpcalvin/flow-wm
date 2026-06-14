@@ -497,8 +497,9 @@ impl ClassificationPipeline {
     ///
     /// # Arguments
     ///
-    /// * `user_rules` - Rules from the user's `stm-rules.yml`.
-    /// * `default_rules` - Bundled default rules from `default-stm-rules.yml`.
+    /// * `user_rules` - Rules from the user's `stm-rules.toml`.
+    /// * `default_rules` - Bundled default rules (embedded at compile time from
+    ///   `default-stm-rules.toml`).
     #[must_use]
     pub fn new(user_rules: WindowRulesConfig, default_rules: WindowRulesConfig) -> Self {
         let default_action = user_rules.default_action;
@@ -1299,6 +1300,87 @@ mod tests {
         let pipeline = ClassificationPipeline::new(user_rules, default_rules);
         let c = candidate("unknown.exe", "Some Title", "SomeClass", "");
         assert_eq!(pipeline.classify(&c), WindowAction::Ignore);
+    }
+
+    // --- Pipeline with real embedded default rules (phase 3 integration) ---
+
+    /// End-to-end: the classification pipeline uses the real embedded default
+    /// rules (from [`crate::config::lifecycle::load_default_rules`]) when user
+    /// rules don't match.
+    ///
+    /// This is the critical regression test for the bug fix that embedded
+    /// `default-stm-rules.toml` at compile time. Before the fix, the default
+    /// rules layer was empty during development (file not found next to exe),
+    /// so phase 3 of the pipeline matched nothing. This test:
+    ///
+    /// 1. Builds a pipeline with **empty user rules** and the **real embedded
+    ///    defaults** from `load_default_rules()`.
+    /// 2. Classifies a `Shell_TrayWnd` window (the Windows taskbar).
+    /// 3. Verifies the pipeline reaches phase 3 (default rules) and returns
+    ///    `Ignore` — proving the embedded defaults are actually consulted.
+    ///
+    /// Also verifies user rules still take priority: a user rule for
+    /// `Shell_TrayWnd` with action `Tile` should override the default
+    /// `Ignore`.
+    #[test]
+    fn pipeline_embedded_default_rules_classify_taskbar_as_ignore() {
+        use crate::config::lifecycle::load_default_rules;
+
+        // Arrange: pipeline with empty user rules + real embedded defaults.
+        let user_rules = WindowRulesConfig {
+            default_action: WindowAction::Tile,
+            rules: vec![],
+        };
+        let default_rules = load_default_rules();
+
+        let pipeline = ClassificationPipeline::new(user_rules, default_rules);
+
+        // Act: classify a Shell_TrayWnd window (Windows taskbar).
+        let taskbar = candidate("explorer.exe", "", "Shell_TrayWnd", "");
+
+        // Assert: phase 3 default rules should match → Ignore.
+        assert_eq!(
+            pipeline.classify(&taskbar),
+            WindowAction::Ignore,
+            "embedded default rules should classify Shell_TrayWnd as Ignore"
+        );
+    }
+
+    /// End-to-end: user rules take priority over the real embedded default
+    /// rules for the same window.
+    ///
+    /// This proves that phase 3 (default rules) is correctly bypassed when
+    /// a user rule matches first. Uses the real embedded defaults loaded by
+    /// [`crate::config::lifecycle::load_default_rules`].
+    #[test]
+    fn pipeline_user_rule_overrides_embedded_default_for_taskbar() {
+        use crate::config::lifecycle::load_default_rules;
+
+        // Arrange: user rule overrides the default Shell_TrayWnd → Ignore
+        // classification with Tile (contrived but proves priority).
+        let user_rules = WindowRulesConfig {
+            default_action: WindowAction::Tile,
+            rules: vec![rule(
+                MatchRule {
+                    class: Some("Shell_TrayWnd".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+        };
+        let default_rules = load_default_rules();
+
+        let pipeline = ClassificationPipeline::new(user_rules, default_rules);
+
+        // Act: classify a Shell_TrayWnd window.
+        let taskbar = candidate("explorer.exe", "", "Shell_TrayWnd", "");
+
+        // Assert: user rule (Tile) should win over default rule (Ignore).
+        assert_eq!(
+            pipeline.classify(&taskbar),
+            WindowAction::Tile,
+            "user rule should override embedded default for Shell_TrayWnd"
+        );
     }
 
     // --- Pipeline regex rule tests (pre-compiled via ClassificationPipeline) ---

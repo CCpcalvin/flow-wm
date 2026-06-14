@@ -2,9 +2,11 @@
 
 # Default window classification rules for ScrollingTilingManager.
 #
-# This file ships alongside stmd.exe and provides sensible defaults for common
-# Windows system windows that should NOT be tiled. Users can override any of
-# these rules by adding their own rules in stm-rules.toml (which is checked first).
+# This file is embedded into stmd.exe at compile time (via `include_str!`) and
+# provides sensible defaults for common Windows system windows that should NOT
+# be tiled. It does NOT ship as a separate runtime file. Users can override
+# any of these rules by adding their own rules in stm-rules.toml (which is
+# checked first).
 #
 # Format: first match wins. Each rule has a "match" clause (AND logic) and
 # an "action" (tile, float, or ignore).
@@ -90,4 +92,14 @@ action = "float"
 
 [[rules]]
 match = { exe = "Addictive Keys.exe" }
+action = "float"
+
+[[rules]]
+match = { exe = "steamwebhelper.exe", title = "Friends List" }
+action = "float"
+
+# ── Powertoys ───────────────────────────────────────────────────
+
+[[rules]]
+match = { exe = "Microsoft.CmdPal.UI.exe" }
 action = "float"

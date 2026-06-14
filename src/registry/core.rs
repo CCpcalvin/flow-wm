@@ -165,8 +165,9 @@ impl WindowRegistry {
     ///
     /// # Arguments
     ///
-    /// * `user_rules` - User-defined window rules from `stm-rules.yml`.
-    /// * `default_rules` - Bundled default rules from `default-stm-rules.yml`.
+    /// * `user_rules` - User-defined window rules from `stm-rules.toml`.
+    /// * `default_rules` - Bundled default rules (embedded at compile time from
+    ///   `default-stm-rules.toml`).
     #[must_use]
     pub fn new(user_rules: &WindowRulesConfig, default_rules: &WindowRulesConfig) -> Self {
         Self {
