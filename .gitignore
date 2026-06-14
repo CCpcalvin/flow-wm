@@ -4,9 +4,13 @@
 # My Stuff
 ref/
 .vscode
+.worktree
+.tmp/sessions
+.tmp/tasks
 
 # OS Stuff
 .DS_Store
 **:Zone.Identifier
 
-.tmp/sessions
+graphify-out/cost.json
+graphify-out/cache
