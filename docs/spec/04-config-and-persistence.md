@@ -69,9 +69,14 @@ The default `stm.toml` file is written with a `#:schema` comment header that act
 ```
 %USERPROFILE%\.config\stm\stm.toml          # User app config (overlay)
 %USERPROFILE%\.config\stm\stm-rules.toml    # User window rules
-<stmd.exe dir>\default-config.toml           # Shipped app defaults
-<stmd.exe dir>\default-stm-rules.toml        # Shipped default rules
 ```
+
+App config defaults live in each struct's `Default` impl (applied by serde
+`#[serde(default)]`), **not** in a shipped TOML. The bundled default window
+rules are embedded into the binary at compile time via `include_str!`
+(`default-stm-rules.toml` in the repo root) — there is no runtime file lookup,
+so the defaults are always present and cannot be accidentally corrupted. Users
+override them via their own `stm-rules.toml`.
 
 Override with `--config <path>` flag on `stmd` or `stm`, or `STM_CONFIG_DIR` env var.
 

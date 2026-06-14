@@ -1,8 +1,12 @@
 {
     "$schema": "https://opencode.ai/config.json",
+    "plugin": [
+        ".opencode/plugins/graphify.js"
+    ],
     "permission": {
         "bash": {
-            ".\\target\\debug\\stm.exe*": "allow",
+            ".\\target\\debug\\stm.exe*": "allow", 
+            "komorebi stop": "allow",
         }
     }
 }

@@ -31,6 +31,11 @@
 //! default source. It is copied to users by [`init_config_dir`] and kept in
 //! sync with the compiled defaults by a test.
 //!
+//! Default *rules* — the classification list — are a different case: they come
+//! from [`DEFAULT_RULES_TOML`], which embeds `default-stm-rules.toml` into the
+//! binary via `include_str!`. [`WindowRulesConfig::default`] (empty rules)
+//! remains only as the parse-failure fallback.
+//!
 //! # Resilient Loading Design
 //!
 //! All load functions are resilient — they never panic or propagate errors to the
@@ -57,6 +62,19 @@ use super::types::{StmConfig, WindowRulesConfig};
 /// `stm config init`. A test in [`types`](super::types) guarantees it stays in
 /// sync with the compiled [`StmConfig::default`](super::types::StmConfig::default).
 pub const DEFAULT_CONFIG_EXAMPLE: &str = include_str!("../../default-config.toml");
+
+/// The bundled default window classification rules, embedded at compile time.
+///
+/// This is the content of `default-stm-rules.toml` from the project root,
+/// baked into the binary via [`include_str!`]. It is parsed in-memory by
+/// [`load_default_rules`] — there is **no runtime file lookup**, so the
+/// defaults are always present and cannot be accidentally deleted or corrupted
+/// by an end user. Users override these defaults via their own
+/// `stm-rules.toml`, which the classification pipeline checks first.
+///
+/// A test (`default_stm_rules_toml_parses_correctly`) guarantees the embedded
+/// content parses cleanly as [`WindowRulesConfig`].
+pub const DEFAULT_RULES_TOML: &str = include_str!("../../default-stm-rules.toml");
 
 /// Schema header for `stm-rules.toml` files (taplo LSP autocomplete).
 ///
@@ -162,37 +180,47 @@ pub fn load_rules_config(path: &Path) -> WindowRulesConfig {
     }
 }
 
-/// Load default rules from `default-stm-rules.toml` bundled next to the executable.
+/// Load the bundled default window rules.
 ///
-/// Looks for the file in the same directory as the running executable. If the
-/// file doesn't exist, returns empty rules. This is **not an error** — the
-/// binary may not ship with a default rules file.
+/// The rules are embedded into the binary at compile time via
+/// [`DEFAULT_RULES_TOML`] (sourced from `default-stm-rules.toml` in the project
+/// root) and parsed in-memory. There is **no runtime file lookup** — the
+/// defaults are always present and cannot be accidentally deleted or corrupted
+/// by the user. (Users override defaults via their own `stm-rules.toml`, which
+/// the classification pipeline checks at an earlier layer.)
+///
+/// Because the content is fixed at compile time, a parse failure here indicates
+/// a bug in the shipped `default-stm-rules.toml` — caught in CI by the
+/// [`default_stm_rules_toml_parses_correctly`] test. As a last line of defense,
+/// an empty [`WindowRulesConfig`] is returned and the error is logged.
+///
+/// # Design rationale
+///
+/// A previous design read `default-stm-rules.toml` from the executable's
+/// directory at runtime. This silently fell back to empty rules during
+/// development (the build never copied the file next to `stmd.exe`) and would
+/// have shipped a separate plaintext file that users could accidentally break.
+/// Embedding eliminates both failure modes.
 ///
 /// # Returns
 ///
-/// A [`WindowRulesConfig`] with whatever default rules were found, or an empty
-/// config if the file doesn't exist.
+/// A [`WindowRulesConfig`] parsed from the embedded defaults. On the
+/// (should-be-impossible) parse failure, returns [`WindowRulesConfig::default`].
 #[must_use]
 pub fn load_default_rules() -> WindowRulesConfig {
-    let exe_dir = match std::env::current_exe() {
-        Ok(exe) => exe.parent().map(|p| p.to_path_buf()),
-        Err(e) => {
-            log::debug!("cannot determine exe directory: {e}");
-            None
+    match toml::from_str::<WindowRulesConfig>(DEFAULT_RULES_TOML) {
+        Ok(config) => {
+            log::info!(
+                "loaded bundled default window rules ({} rules)",
+                config.rules.len()
+            );
+            config
         }
-    };
-
-    let Some(dir) = exe_dir else {
-        return WindowRulesConfig::default();
-    };
-
-    let path = dir.join("default-stm-rules.toml");
-    if !path.exists() {
-        log::debug!("no default rules file at {:?}", path);
-        return WindowRulesConfig::default();
+        Err(e) => {
+            log::error!("failed to parse bundled default rules: {e}; using empty defaults");
+            WindowRulesConfig::default()
+        }
     }
-
-    load_rules_config(&path)
 }
 
 // ── Init function ──────────────────────────────────────────────────────
@@ -844,17 +872,159 @@ initial_width_eighths = 4
 
     // ── load_default_rules tests ───────────────────────────────────────
 
-    /// Negative: `load_default_rules()` does not panic regardless of whether
-    /// `default-stm-rules.toml` exists next to the test binary.
+    /// `load_default_rules()` returns the embedded (compile-time) defaults.
     ///
-    /// The exe directory in test environments (`target\debug\deps\`) will not
-    /// have the bundled rules file, so this exercises the "file not found →
-    /// default" path. We do not assert content because CI environments with
-    /// the file deployed alongside the binary would see different values.
+    /// Because defaults are embedded via [`include_str!`](std::include_str), this
+    /// always returns the same non-empty ruleset regardless of the test
+    /// environment (no file next to the binary is required). We verify the
+    /// rule count and spot-check the well-known taskbar rule.
     #[test]
-    fn load_default_rules_no_file_returns_default() {
-        // Only verify it does not panic; content depends on test environment.
-        let _config = load_default_rules();
+    fn load_default_rules_returns_embedded_rules() {
+        let config = load_default_rules();
+        assert_eq!(config.default_action, WindowAction::Tile);
+        assert!(
+            !config.rules.is_empty(),
+            "embedded default rules should not be empty"
+        );
+
+        // Spot-check: the Windows taskbar should be classified as ignored.
+        let taskbar = config
+            .rules
+            .iter()
+            .find(|r| r.match_.class.as_deref() == Some("Shell_TrayWnd"));
+        assert!(
+            taskbar.is_some(),
+            "embedded defaults should include a Shell_TrayWnd rule"
+        );
+        assert_eq!(taskbar.unwrap().action, WindowAction::Ignore);
+    }
+
+    /// `load_default_rules()` spot-checks multiple well-known rules beyond the
+    /// taskbar.
+    ///
+    /// The `default-stm-rules.toml` file contains rules for system dialogs
+    /// (`#32770`), Task Manager (`Taskmgr.exe`), the On-Screen Keyboard
+    /// (`OSKMainClass`), and the Search UI (`SearchUI.exe`). This test
+    /// verifies that all of these well-known rules are present and have the
+    /// expected actions after being parsed from the embedded constant.
+    ///
+    /// This is complementary to `load_default_rules_returns_embedded_rules`
+    /// (which only checks `Shell_TrayWnd`). Together they provide broad
+    /// confidence that the embedded content is complete and correct.
+    #[test]
+    fn load_default_rules_spot_checks_multiple_known_rules() {
+        let config = load_default_rules();
+
+        // #32770 — common Win32 dialog boxes should be floated.
+        let dialog = config
+            .rules
+            .iter()
+            .find(|r| r.match_.class.as_deref() == Some("#32770"));
+        assert!(
+            dialog.is_some(),
+            "embedded defaults should include a #32770 rule"
+        );
+        assert_eq!(dialog.unwrap().action, WindowAction::Float);
+
+        // Taskmgr.exe — Task Manager should be floated.
+        let taskmgr = config
+            .rules
+            .iter()
+            .find(|r| r.match_.exe.as_deref() == Some("Taskmgr.exe"));
+        assert!(
+            taskmgr.is_some(),
+            "embedded defaults should include a Taskmgr.exe rule"
+        );
+        assert_eq!(taskmgr.unwrap().action, WindowAction::Float);
+
+        // OSKMainClass — On-Screen Keyboard should be ignored.
+        let osk = config
+            .rules
+            .iter()
+            .find(|r| r.match_.class.as_deref() == Some("OSKMainClass"));
+        assert!(
+            osk.is_some(),
+            "embedded defaults should include an OSKMainClass rule"
+        );
+        assert_eq!(osk.unwrap().action, WindowAction::Ignore);
+
+        // SearchUI.exe — Windows Search should be ignored.
+        let search = config
+            .rules
+            .iter()
+            .find(|r| r.match_.exe.as_deref() == Some("SearchUI.exe"));
+        assert!(
+            search.is_some(),
+            "embedded defaults should include a SearchUI.exe rule"
+        );
+        assert_eq!(search.unwrap().action, WindowAction::Ignore);
+    }
+
+    /// The `DEFAULT_RULES_TOML` constant (embedded via `include_str!`) must
+    /// contain the same content as the on-disk `default-stm-rules.toml` file.
+    /// (Both sides include the `#:schema` header line, which is harmless to
+    /// `toml::from_str` since it parses it as a TOML comment.)
+    ///
+    /// This guards against a scenario where someone edits the on-disk file
+    /// but the `include_str!` path is stale (or vice-versa). Both
+    /// `load_default_rules_returns_embedded_rules` and
+    /// `default_stm_rules_toml_parses_correctly` parse their respective
+    /// sources, but only this test confirms they are **identical**.
+    #[test]
+    fn embedded_rules_toml_matches_disk_file() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR should be set during tests");
+        let disk_path = std::path::PathBuf::from(manifest_dir).join("default-stm-rules.toml");
+
+        if !disk_path.exists() {
+            eprintln!("skipping: default-stm-rules.toml not found at {disk_path:?}");
+            return;
+        }
+
+        let disk_content = std::fs::read_to_string(&disk_path)
+            .unwrap_or_else(|e| panic!("failed to read {disk_path:?}: {e}"));
+
+        assert_eq!(
+            DEFAULT_RULES_TOML, disk_content,
+            "DEFAULT_RULES_TOML (include_str!) has drifted from the on-disk file; \
+             update one to match the other"
+        );
+    }
+
+    /// Verifies the resilient fallback behavior of the parse logic used by
+    /// `load_default_rules()`.
+    ///
+    /// The actual `load_default_rules()` function parses the compile-time
+    /// `DEFAULT_RULES_TOML` constant, which is always valid TOML (the
+    /// `default_stm_rules_toml_parses_correctly` test guarantees this).
+    /// The `Err` branch — returning `WindowRulesConfig::default()` — is
+    /// therefore **not directly exercisable** through the public API.
+    ///
+    /// This test documents the fallback path by feeding deliberately
+    /// malformed TOML to `toml::from_str::<WindowRulesConfig>()` and
+    /// verifying that (a) the error variant is reachable and (b)
+    /// `WindowRulesConfig::default()` is a valid fallback (non-panicking,
+    /// empty rules, `default_action: tile`).
+    ///
+    /// The identical `match Ok/Err` pattern in `load_default_rules` is
+    /// validated structurally by `load_rules_config_malformed_toml_returns_default`
+    /// and `load_app_config_malformed_toml_returns_default`, which exercise
+    /// the same resilient-loading pattern through file-backed functions.
+    #[test]
+    fn load_default_rules_resilient_fallback_on_bad_input() {
+        // Arrange: malformed TOML that would trigger the Err branch.
+        let bad_toml = "this is = not = valid = toml = [[[[[";
+
+        // Act: attempt to parse as WindowRulesConfig.
+        let result = toml::from_str::<WindowRulesConfig>(bad_toml);
+
+        // Assert: parse must fail (the Err branch is reachable).
+        assert!(result.is_err(), "malformed TOML should fail to parse");
+
+        // Assert: the fallback default is a valid, usable config.
+        let fallback = WindowRulesConfig::default();
+        assert_eq!(fallback.default_action, WindowAction::Tile);
+        assert!(fallback.rules.is_empty(), "fallback should have no rules");
     }
 
     // ── default-stm-rules.toml parse test ────────────────────────────────
