@@ -256,14 +256,30 @@ pub fn focus(
     }
 }
 
+/// Round `value` **down** to the largest multiple of `unit` that is `≤ value`.
+///
+/// Both `value` and `unit` must be non-negative, and `unit` must be nonzero.
+fn floor_to_multiple(value: i32, unit: i32) -> i32 {
+    (value / unit) * unit
+}
+
+/// Round `value` **up** to the smallest multiple of `unit` that is `≥ value`.
+///
+/// Both `value` and `unit` must be non-negative, and `unit` must be nonzero.
+fn ceil_to_multiple(value: i32, unit: i32) -> i32 {
+    ((value + unit - 1) / unit) * unit
+}
+
 /// Shift the camera so the given column becomes visible.
 ///
 /// This is the core "camera shift" operation. It checks whether the target
 /// column's virtual canvas range overlaps the current viewport:
-/// - If the column is off-screen **left**, the camera scrolls left to align
-///   the viewport with the column's left edge.
+/// - If the column is off-screen **left**, the camera scrolls left so the
+///   column appears with a `window_gap` between its left edge and the
+///   screen's left edge.
 /// - If the column is off-screen **right**, the camera scrolls right so the
-///   column's right edge aligns with the viewport's right edge.
+///   column appears with a `window_gap` between its right edge and the
+///   screen's right edge.
 /// - If already visible, no change.
 ///
 /// This is used by focus, swap, resize, and other operations that need
@@ -274,12 +290,36 @@ pub fn focus(
 /// Columns are laid out in slots: `slot_width = col_width + window_gap`.
 /// The canvas starts at `window_gap` (left-edge gap). Each column `i`
 /// is at canvas position `window_gap + i * slot_width`.
+///
+/// # Quantized Camera Shifts
+///
+/// The `viewport_offset` is always quantized to a multiple of
+/// `column_shift = column_width + window_gap` (the standard slot width).
+/// This guarantees that after any scroll, columns appear at the *same*
+/// screen position they would occupy at the initial viewport — giving a
+/// consistent, "stepped" visual appearance rather than arbitrary offsets.
+///
+/// For uniform-width columns this means every column's left edge lands at
+/// exactly `window_gap` pixels from the screen's left edge, regardless of
+/// which scroll direction revealed it.
+///
+/// ## Direction-specific rounding
+///
+/// - **Left scroll**: we need `viewport_offset ≤ col_left − gap` (so the
+///   gap is visible). We floor to the largest multiple of `column_shift`
+///   satisfying that constraint, ensuring we never *undershoot*.
+/// - **Right scroll**: we need `viewport_offset ≥ col_right + gap −
+///   monitor_width` (so the gap is visible). We ceil to the smallest
+///   multiple of `column_shift` satisfying that constraint, ensuring we
+///   never *overshoot*.
+#[must_use]
 pub(crate) fn ensure_column_visible(
     layout: &VirtualLayout,
     col_idx: usize,
     config: &MutationConfig,
 ) -> VirtualLayout {
     let gap = config.padding.window_gap;
+    let column_shift = config.column_width as i32 + gap;
     let mut canvas_x: i32 = gap;
     for (i, col) in layout.columns.iter().enumerate() {
         let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
@@ -290,16 +330,24 @@ pub(crate) fn ensure_column_visible(
             let vp_right = vp_left + config.monitor_width;
 
             if col_left < vp_left {
-                // Column is off-screen left — scroll left
+                // Column is off-screen left — scroll left.
+                // We want a `gap` between the screen's left edge and the
+                // column's left edge, then snap to the column-shift grid.
+                let ideal_vp = col_left - gap;
+                let quantized = floor_to_multiple(ideal_vp, column_shift).max(0);
                 return VirtualLayout {
-                    viewport_offset: col_left,
+                    viewport_offset: quantized,
                     ..layout.clone()
                 };
             }
             if col_right > vp_right {
-                // Column is off-screen right — scroll right
+                // Column is off-screen right — scroll right.
+                // We want a `gap` between the screen's right edge and the
+                // column's right edge, then snap to the column-shift grid.
+                let ideal_vp = col_right + gap - config.monitor_width;
+                let quantized = ceil_to_multiple(ideal_vp, column_shift).max(0);
                 return VirtualLayout {
-                    viewport_offset: col_right - config.monitor_width,
+                    viewport_offset: quantized,
                     ..layout.clone()
                 };
             }
@@ -973,6 +1021,208 @@ mod tests {
         let scrolled = scroll_right(&layout, &config).expect("scroll right");
         let back = scroll_left(&scrolled, &config).expect("scroll left");
         assert_eq!(back.viewport_offset, 0);
+    }
+
+    // --- ensure_column_visible: quantized shifts ---
+
+    #[test]
+    fn floor_to_multiple_basic() {
+        assert_eq!(floor_to_multiple(0, 964), 0);
+        assert_eq!(floor_to_multiple(1, 964), 0);
+        assert_eq!(floor_to_multiple(963, 964), 0);
+        assert_eq!(floor_to_multiple(964, 964), 964);
+        assert_eq!(floor_to_multiple(1927, 964), 964);
+        assert_eq!(floor_to_multiple(1928, 964), 1928);
+    }
+
+    #[test]
+    fn ceil_to_multiple_basic() {
+        assert_eq!(ceil_to_multiple(0, 964), 0);
+        assert_eq!(ceil_to_multiple(1, 964), 964);
+        assert_eq!(ceil_to_multiple(963, 964), 964);
+        assert_eq!(ceil_to_multiple(964, 964), 964);
+        assert_eq!(ceil_to_multiple(965, 964), 1928);
+    }
+
+    #[test]
+    fn ensure_column_visible_left_scroll_quantizes() {
+        // 3 uniform columns (960px each, gap=4).
+        // column_shift = 960 + 4 = 964.
+        // Column 0: left=4. Viewport far to the right.
+        let config = test_config();
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            2000, // viewport well past column 0
+        );
+        let result = ensure_column_visible(&layout, 0, &config);
+        // ideal_vp = col_left - gap = 4 - 4 = 0; floor_to_multiple(0, 964) = 0
+        assert_eq!(result.viewport_offset, 0);
+        assert_eq!(
+            result.viewport_offset % (config.column_width as i32 + config.padding.window_gap),
+            0,
+            "viewport_offset must be a multiple of column_shift"
+        );
+    }
+
+    #[test]
+    fn ensure_column_visible_right_scroll_quantizes() {
+        // 3 uniform columns (960px each, gap=4, monitor=1920).
+        // column_shift = 964.
+        // Column 2: left=1932, right=2892. Viewport at 0 → off-screen right.
+        let config = test_config();
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            0,
+        );
+        let result = ensure_column_visible(&layout, 2, &config);
+        // ideal_vp = 2892 + 4 - 1920 = 976; ceil_to_multiple(976, 964) = 1928
+        assert_eq!(result.viewport_offset, 1928);
+        assert_eq!(
+            result.viewport_offset % (config.column_width as i32 + config.padding.window_gap),
+            0,
+            "viewport_offset must be a multiple of column_shift"
+        );
+    }
+
+    #[test]
+    fn ensure_column_visible_left_scroll_has_gap_at_edge() {
+        // After scrolling left, the column's left edge should be at least
+        // `window_gap` from the screen's left edge.
+        let config = test_config();
+        let gap = config.padding.window_gap;
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            2000,
+        );
+        let result = ensure_column_visible(&layout, 0, &config);
+        // Column 0's canvas left = gap (4). Screen left = viewport_offset (0).
+        // Gap = col_left - vp_left = 4 - 0 = 4 = window_gap.
+        let col_left = gap; // column 0 is always at canvas position `gap`
+        assert!(
+            col_left - result.viewport_offset >= gap,
+            "left-edge gap must be >= window_gap"
+        );
+    }
+
+    #[test]
+    fn ensure_column_visible_right_scroll_has_gap_at_edge() {
+        // After scrolling right, the column's right edge should be at least
+        // `window_gap` from the screen's right edge.
+        let config = test_config();
+        let gap = config.padding.window_gap;
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            0,
+        );
+        let result = ensure_column_visible(&layout, 2, &config);
+        // Column 2: canvas_x starts at gap, col 0 = 960px, col 1 = 960px.
+        // col 2 left = gap + 2 * (960 + gap) = 4 + 2*964 = 1932
+        // col 2 right = 1932 + 960 = 2892
+        let col_right = gap + 2 * (960 + gap) + 960;
+        let vp_right = result.viewport_offset + config.monitor_width;
+        assert!(
+            vp_right - col_right >= gap,
+            "right-edge gap ({}) must be >= window_gap ({})",
+            vp_right - col_right,
+            gap
+        );
+    }
+
+    #[test]
+    fn ensure_column_visible_already_visible_no_change() {
+        // With zero gap, two 960px columns fit exactly in 1920px viewport.
+        // Column 1 [960, 1920] is fully inside [0, 1920] — no scroll needed.
+        let config = MutationConfig {
+            monitor_width: 1920,
+            column_width: 960,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 8,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        let result = ensure_column_visible(&layout, 1, &config);
+        assert_eq!(
+            result.viewport_offset, 0,
+            "no shift when column is already visible"
+        );
+    }
+
+    #[test]
+    fn ensure_column_visible_zero_gap_preserves_alignment() {
+        // With gap=0, column_shift = column_width. Quantization should
+        // produce exact column-aligned offsets with no fractional remainder.
+        let config = MutationConfig {
+            monitor_width: 1920,
+            column_width: 960,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 8,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+            ],
+            0,
+        );
+        // Scroll right to column 2.
+        // col_right = 0 + 2*960 + 960 = 2880. ideal_vp = 2880 + 0 - 1920 = 960.
+        // ceil_to_multiple(960, 960) = 960.
+        let result = ensure_column_visible(&layout, 2, &config);
+        assert_eq!(result.viewport_offset, 960);
+    }
+
+    #[test]
+    fn ensure_column_visible_non_uniform_widths_quantizes() {
+        // Mixed column widths: col 0 = 2 eighths (480px), col 1 = 4 eighths (960px).
+        // column_shift = 960 + 4 = 964 (based on base column_width, not actual).
+        // Col 0: canvas_x = 4, right = 4 + 480 = 484
+        // Col 1: canvas_x = 4 + 480 + 4 = 488, right = 488 + 960 = 1448
+        // Viewport at 2000 → both columns off-screen left.
+        let config = test_config();
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            2000,
+        );
+        let result = ensure_column_visible(&layout, 1, &config);
+        // ideal_vp = col_left - gap = 488 - 4 = 484
+        // floor_to_multiple(484, 964) = 0
+        assert_eq!(result.viewport_offset, 0);
+        // Column 1 is now visible: canvas [488, 1448] ⊂ viewport [0, 1920]
+        let column_shift = config.column_width as i32 + config.padding.window_gap;
+        assert_eq!(result.viewport_offset % column_shift, 0);
     }
 
     // --- Focus ---
