@@ -17,6 +17,9 @@ mod daemon_init;
 #[path = "cli/daemon_lifecycle.rs"]
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]
+#[path = "cli/dispatch_swap.rs"]
+mod dispatch_swap;
+#[cfg(debug_assertions)]
 #[path = "cli/registry.rs"]
 mod registry;
 #[cfg(debug_assertions)]

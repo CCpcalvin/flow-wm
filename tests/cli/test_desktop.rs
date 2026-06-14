@@ -316,6 +316,35 @@ pub fn query_windows(pipe: &str) -> Result<serde_json::Value, String> {
     }
 }
 
+/// Send `QueryLayoutVirtual` and return the JSON response.
+///
+/// Returns the virtual layout structure — `viewport_offset`, `column_count`,
+/// `window_count`, and a `columns` array where each entry has `index`,
+/// `width_eighths`, and `rows` (the window IDs in column order). This is the
+/// most direct way to verify that a column swap changed the layout.
+pub fn query_layout_virtual(pipe: &str) -> Result<serde_json::Value, String> {
+    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
+    use scrolling_tiling_manager::ipc::transport;
+
+    let response = transport::send_message_to(pipe, &SocketMessage::QueryLayoutVirtual)
+        .map_err(|e| format!("query_layout_virtual failed: {e}"))?;
+
+    match response {
+        SocketResponse::Data { payload } => Ok(payload),
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Ok => Err("unexpected Ok response".into()),
+    }
+}
+
+/// Send an IPC message and discard the response.
+///
+/// Useful for fire-and-forget commands during test setup where the command may
+/// legitimately fail (e.g. focusing left when already at the leftmost column).
+pub fn send_ipc_ignore(pipe: &str, msg: &scrolling_tiling_manager::ipc::message::SocketMessage) {
+    use scrolling_tiling_manager::ipc::transport;
+    let _ = transport::send_message_to(pipe, msg);
+}
+
 /// Stop the test daemon by sending the Stop IPC command.
 ///
 /// Uses [`transport::send_message_to`] with the pipe name directly — no

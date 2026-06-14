@@ -68,35 +68,34 @@ All mutations take the current `VirtualLayout`, compute a new one, re-project to
 |---|---|
 | `ScrollLeft` / `ScrollRight` | Shift `viewport_offset` by one column width. Windows animate on/off screen. |
 | `FocusLeft` / `FocusRight` / `FocusUp` / `FocusDown` | Move focus. If focus would leave viewport, implicitly scroll. |
-| `SwapLeft` / `SwapRight` | Swap focused window's column with adjacent column. Both columns animate. |
-| `SwapUp` / `SwapDown` | Swap focused window with sibling row in same column. |
-| `SwapWithOffscreen <direction>` | Focused window swaps with first window in the next off-screen column. Viewport shifts so that column comes into view; the displaced window moves to the vacated off-screen slot. |
+| `SwapLeft` / `SwapRight` | Swap focused window with its neighbour in the adjacent column. |
+| `SwapUp` / `SwapDown` | Swap focused window with the sibling row in the same column. |
+| `SwapColumn <direction>` | Swap the focused **column** with its neighbour. The viewport scrolls automatically via `ensure_column_visible` so the focused window stays visible — no separate "offscreen" command is needed. |
+| `MoveWindow <direction>` | Semantic "move" — the daemon translates the intent by window state (tiled left/right = column swap; floating = pixel nudge once supported). |
 | `ExpandColumn` / `ShrinkColumn` | Increase/decrease focused column's `width_eighths` by 1. Adjacent column adjusts to compensate. |
 | `SetColumnWidth <eighths>` | Set focused column width explicitly. |
 | `ResizeSnap <new_rect>` | Called after a mouse resize gesture. Snaps to nearest eighths width, adjusts neighbor. |
 | `MoveSnap <new_rect>` | Called after a mouse move gesture. Determines target slot (insert into column), updates virtual layout. |
 | `Promote <hwnd>` | Move a window from above-layout (overlay) layer back into tiling. |
 
-### Cross-viewport swap detail
+### Column swap & viewport scrolling
 
-`SwapWithOffscreen` is the most complex mutation:
+`SwapColumn <direction>` swaps the focused column with its immediate neighbour.
+After the swap, `ensure_column_visible` shifts `viewport_offset` if the focused
+window's new column would be off-screen, so the swap and the camera scroll
+produce a single `LayoutDiff`:
 
 ```
-Before:
-  [viewport]
-  Col 0 | Col 1* | Col 2          Col 3 (off-screen right)
-         focused
-
-After ScrollRight one step + swap:
-  [viewport]
-  Col 1* | Col 2  | Col 3         Col 0 (off-screen left)
+Before:                       After swap-column right:
+  [viewport]                    [viewport]
+  Col 0 | Col 1* | Col 2        Col 0 | Col 2 | Col 1*
+         focused                          focused
 ```
 
-The actual implementation:
-1. Determine the target off-screen column (first column outside viewport in the given direction)
-2. Shift `viewport_offset` so target column enters the viewport
-3. Swap the two columns in `columns` vec
-4. Re-project → the swapped windows animate in from off-screen, the displaced windows animate out
+The implementation:
+1. Swap the two columns in the `columns` vec
+2. Call `ensure_column_visible` to scroll the viewport if needed
+3. Re-project → the swapped windows animate to their new positions
 
 ---
 
