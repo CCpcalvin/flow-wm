@@ -414,8 +414,8 @@ impl Default for WindowRulesConfig {
 
 /// Animation configuration for layout transitions.
 ///
-/// When disabled, all [`WindowMove`](crate::layout::WindowMove)s are applied
-/// instantly (hint set to [`Restore`](crate::layout::AnimationHint::Restore)).
+/// When disabled, all window position changes are applied instantly
+/// without animation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AnimationConfig {

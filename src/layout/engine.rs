@@ -183,10 +183,9 @@ impl LayoutEngine {
     /// 2. [`projection::project`] → camera shift + parking → new [`ActualLayout`].
     /// 3. Update internal state and return the new layout.
     ///
-    /// Unlike the previous design, this method no longer computes a logical
-    /// diff (`Vec<WindowMove>`). Instead, it returns the full `ActualLayout`
-    /// and lets the animation layer decide which windows to animate by
-    /// comparing each target rect against the window's real on-screen position.
+    /// This method returns the full [`ActualLayout`] and lets the animation
+    /// layer decide which windows to animate by comparing each target rect
+    /// against the window's real on-screen position.
     fn apply_mutation(&mut self, new_layout: VirtualLayout) -> AppliedLayout {
         let new_actual = projection::project(
             &new_layout,

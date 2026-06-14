@@ -202,50 +202,6 @@ impl Default for ActualLayout {
     }
 }
 
-/// A single window move instruction produced by a layout diff.
-///
-/// Each move carries the window's previous and next [`Rect`], plus an
-/// [`AnimationHint`] that controls the easing/interpolation behavior
-/// when the compositor applies the move.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WindowMove {
-    /// The window being moved.
-    pub window_id: WindowId,
-    /// Previous position rectangle.
-    pub from: Rect,
-    /// Target position rectangle.
-    pub to: Rect,
-    /// Animation hint controlling easing behavior.
-    pub hint: AnimationHint,
-}
-
-/// Animation hint for a window move, controlling easing behavior.
-///
-/// Hints are classified by the [`diff`](crate::layout::diff) module based on
-/// horizontal move distance. This allows the compositor to apply different animation
-/// curves depending on *why* a window is moving:
-///
-/// | Hint | When | Curve |
-/// |------|------|-------|
-/// | `Snap` | Small in-viewport move (≤500px) | Fast, springy |
-/// | `Displaced` | Neighbor pushed aside (unused currently) | Smooth, slower |
-/// | `ScrollEnter` | Entering viewport from parked position | Scroll ease-in |
-/// | `ScrollExit` | Leaving viewport to parked position | Scroll ease-out |
-/// | `Restore` | Crash/minimize recovery | Instant (no animation) |
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AnimationHint {
-    /// Small in-viewport move — fast, springy easing.
-    Snap,
-    /// Neighbor pushed out of the way — smooth, slightly slower easing.
-    Displaced,
-    /// Window entering viewport from off-screen (moving from parked → visible).
-    ScrollEnter,
-    /// Window leaving viewport (moving from visible → parked).
-    ScrollExit,
-    /// Crash/minimize restore — no animation, instant placement.
-    Restore,
-}
-
 /// Monitor geometry used for layout projection.
 ///
 /// Contains the work area [`Rect`] (excluding taskbar). The layout engine uses
@@ -313,12 +269,12 @@ pub struct Padding {
 ///
 /// ## Design decision: why no `moves` field
 ///
-/// Previously this struct carried a `Vec<WindowMove>` computed by diffing
-/// the previous and new actual layouts. That diff only included windows
-/// whose *target* changed, which meant windows that were still physically
-/// animating toward their old target were absent from the diff. On a rapid
-/// second mutation, those windows were dropped from the animator's batch
-/// and stranded mid-screen.
+/// Previously this struct carried a list of window-move instructions
+/// computed by diffing the previous and new actual layouts. That diff
+/// only included windows whose *target* changed, which meant windows
+/// that were still physically animating toward their old target were
+/// absent from the diff. On a rapid second mutation, those windows
+/// were dropped from the animator's batch and stranded mid-screen.
 ///
 /// By returning the full `ActualLayout` instead, the animation layer
 /// always sees every window and can make its own no-op filtering decision

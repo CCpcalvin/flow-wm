@@ -76,11 +76,9 @@
 //! |--------|---------------|
 //! | [`types`] | Core data types — [`Column`], [`VirtualLayout`], [`ActualLayout`] |
 //! | [`projection`] | Virtual → actual projection with camera shift and parking |
-//! | [`diff`] | Layout diff and [`AnimationHint`] classification |
 //! | [`mutations`] | All pure mutation functions (scroll, focus, swap, resize, etc.) |
 //! | [`engine`] | [`LayoutEngine`] orchestrator that wires mutations → projection → [`AppliedLayout`] |
 
-pub mod diff;
 pub mod engine;
 pub mod mutations;
 pub mod projection;
@@ -88,6 +86,4 @@ pub mod types;
 
 pub use engine::LayoutEngine;
 pub use mutations::NeighborLocation;
-pub use types::{
-    ActualEntry, ActualLayout, AnimationHint, AppliedLayout, Column, VirtualLayout, WindowMove,
-};
+pub use types::{ActualEntry, ActualLayout, AppliedLayout, Column, VirtualLayout};

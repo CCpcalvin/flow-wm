@@ -127,8 +127,9 @@ enum QueryCommands {
 ///    along the virtual canvas — no explicit per-window shift is needed.
 /// 2. **Project** the virtual layout into actual screen coordinates, adjusting
 ///    the viewport so the focused column stays visible (`ensure_column_visible`).
-/// 3. **Diff** the old and new actual layouts to produce `WindowMove`
-///    instructions, then **animate** them smoothly.
+/// 3. **Animate** the new actual layout — the animation layer compares each
+///    window's target rect against its real on-screen position and tweens
+///    only the windows that differ.
 ///
 /// The CLI's only job is to send the right [`SocketMessage`]; the daemon
 /// owns the entire pipeline above.
