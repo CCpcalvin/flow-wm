@@ -1,11 +1,11 @@
 //! Layout engine type definitions.
 //!
-//! Core data types for the 3-layer layout pipeline. The key types are:
+//! Core data types for the 2-layer layout pipeline. The key types are:
 //!
 //! - [`Column`] — a vertical container of windows with proportional width
 //! - [`VirtualLayout`] — the infinite horizontal canvas (logical, no pixels)
 //! - [`ActualLayout`] — projected screen coordinates (pixel rects)
-//! - [`LayoutDiff`] — the result of a mutation (new layouts + animation moves)
+//! - [`AppliedLayout`] — the result of a mutation (new virtual + actual layouts)
 
 use crate::common::{Rect, WindowId};
 
@@ -297,24 +297,40 @@ pub struct Padding {
     pub down: i32,
 }
 
-/// Result of a layout mutation — everything needed to animate the transition.
+/// Result of a layout mutation — the new layout state after applying a change.
 ///
 /// Produced by [`LayoutEngine`](crate::layout::engine::LayoutEngine) for each
-/// mutation. Contains:
-/// - The new [`VirtualLayout`] (infinite canvas state after mutation).
-/// - The new [`ActualLayout`] (pixel-accurate on-screen positions).
-/// - A list of [`WindowMove`]s describing what changed (for animation).
+/// mutation. Contains the new [`VirtualLayout`] (infinite canvas state) and
+/// the new [`ActualLayout`] (pixel-accurate on-screen positions).
 ///
-/// Windows that did not move between the old and new actual layout are omitted
-/// from `moves` — only windows that need animation are included.
+/// The animation layer compares each window's target rect (from
+/// `actual_layout`) against its real on-screen position and animates only
+/// the windows that differ. This means every window is represented — even
+/// ones whose target didn't change — so a rapid second mutation during an
+/// in-flight animation will correctly retarget windows that are still
+/// mid-flight (the animator samples their real current position, sees it
+/// differs from the target, and builds a tween).
+///
+/// ## Design decision: why no `moves` field
+///
+/// Previously this struct carried a `Vec<WindowMove>` computed by diffing
+/// the previous and new actual layouts. That diff only included windows
+/// whose *target* changed, which meant windows that were still physically
+/// animating toward their old target were absent from the diff. On a rapid
+/// second mutation, those windows were dropped from the animator's batch
+/// and stranded mid-screen.
+///
+/// By returning the full `ActualLayout` instead, the animation layer
+/// always sees every window and can make its own no-op filtering decision
+/// based on real current positions (see `build_tweens` in the animation
+/// module).
 #[derive(Debug, Clone, PartialEq)]
-pub struct LayoutDiff {
+pub struct AppliedLayout {
     /// The new virtual layout after the mutation.
     pub virtual_layout: VirtualLayout,
-    /// The new actual layout after projection.
+    /// The new actual layout after projection — the authoritative target
+    /// for every window's final position.
     pub actual_layout: ActualLayout,
-    /// Window moves to animate — only windows whose position changed.
-    pub moves: Vec<WindowMove>,
 }
 
 #[cfg(test)]

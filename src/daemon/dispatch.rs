@@ -87,14 +87,14 @@ impl ScrollTilingManager {
     ///
     /// 1. **Layout focus** — [`LayoutEngine::focus`] resolves the neighbor
     ///    [`WindowId`] and optionally shifts the viewport (producing a
-    ///    [`LayoutDiff`] when the camera scrolls).
+    ///    [`AppliedLayout`] when the camera scrolls).
     /// 2. **OS foreground** — [`registry_win32::set_foreground_window`] moves
     ///    the actual Win32 focus to the target window using the
     ///    `AttachThreadInput` trick to bypass foreground-lock restrictions.
     /// 3. **Registry sync** — [`WindowRegistry::set_focused`] updates the
     ///    registry's focus tracking so queries report the correct focused
     ///    window (fixes the `"focused": null` bug).
-    /// 4. **Animation** — if the viewport scrolled, [`animate_diff`](Self::animate_diff)
+    /// 4. **Animation** — if the viewport scrolled, [`animate_layout`](Self::animate_layout)
     ///    animates the camera shift so the focused window becomes visible.
     fn dispatch_focus(&mut self, dir: Direction) -> SocketResponse {
         match self.layout.focus(dir) {
@@ -110,7 +110,7 @@ impl ScrollTilingManager {
 
                 // 4. Animate the camera shift if the viewport moved.
                 if let Some(diff) = diff_opt {
-                    self.animate_diff(&diff);
+                    self.animate_layout(&diff);
                 }
 
                 SocketResponse::Ok
@@ -131,7 +131,7 @@ impl ScrollTilingManager {
     fn dispatch_swap_column(&mut self, dir: Direction) -> SocketResponse {
         match self.layout.swap_column(dir) {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -148,7 +148,7 @@ impl ScrollTilingManager {
     fn dispatch_swap_window(&mut self, dir: Direction) -> SocketResponse {
         match self.layout.swap_window(dir) {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -185,7 +185,7 @@ impl ScrollTilingManager {
     fn dispatch_scroll_left(&mut self) -> SocketResponse {
         match self.layout.scroll_left() {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -198,7 +198,7 @@ impl ScrollTilingManager {
     fn dispatch_scroll_right(&mut self) -> SocketResponse {
         match self.layout.scroll_right() {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -211,7 +211,7 @@ impl ScrollTilingManager {
     fn dispatch_expand(&mut self) -> SocketResponse {
         match self.layout.expand_column() {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -224,7 +224,7 @@ impl ScrollTilingManager {
     fn dispatch_shrink(&mut self) -> SocketResponse {
         match self.layout.shrink_column() {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -246,7 +246,7 @@ impl ScrollTilingManager {
         let target_px = self.resolved_column_width as i32 * eighths as i32 / 4;
         match self.layout.set_column_width(target_px) {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -259,7 +259,7 @@ impl ScrollTilingManager {
     fn dispatch_toggle_monocle(&mut self) -> SocketResponse {
         match self.layout.toggle_monocle() {
             Some(diff) => {
-                self.animate_diff(&diff);
+                self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {

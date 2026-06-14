@@ -913,8 +913,7 @@ mod tests {
     #[test]
     fn parse_dispatch_expandcolumn_multiple_extra_args_fails() {
         // Negative: expandcolumn rejects more than one extra argument.
-        let result =
-            Cli::try_parse_from(["stm", "dispatch", "expandcolumn", "extra1", "extra2"]);
+        let result = Cli::try_parse_from(["stm", "dispatch", "expandcolumn", "extra1", "extra2"]);
         assert!(
             result.is_err(),
             "'stm dispatch expandcolumn' with multiple extra args should fail"
@@ -924,8 +923,7 @@ mod tests {
     #[test]
     fn parse_dispatch_shrinkcolumn_multiple_extra_args_fails() {
         // Negative: shrinkcolumn rejects more than one extra argument.
-        let result =
-            Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn", "extra1", "extra2"]);
+        let result = Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn", "extra1", "extra2"]);
         assert!(
             result.is_err(),
             "'stm dispatch shrinkcolumn' with multiple extra args should fail"

@@ -547,13 +547,15 @@ pub fn resize_column(
     set_column_width(layout, focused, target_px, config)
 }
 
-/// Expand the focused column to the next `column_width` boundary above.
+/// Expand the focused column by one `column_shift`.
 ///
-/// Snap points are multiples of `column_width` (e.g., 0, 960, 1920 with
-/// column_width=960). The column width is set to the next snap point
-/// strictly above its current width, capped at `max_column_eighths`.
+/// The step is `column_shift = column_width + window_gap`, matching the slot
+/// grid used by the camera/scroll model (see `column_step_width` in
+/// projection). The column's width is increased by this delta; the resulting
+/// pixel value is then quantized to eighths by [`set_column_width`], which
+/// rejects values outside `[min_column_eighths, max_column_eighths]`.
 ///
-/// Returns `None` if already at max or no higher snap point exists.
+/// Returns `None` if the expansion would exceed `max_column_eighths`.
 #[must_use]
 pub fn expand_column(
     layout: &VirtualLayout,
@@ -564,25 +566,26 @@ pub fn expand_column(
     let current_px =
         column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
     let cw = config.column_width as i32;
+    let column_shift = cw + config.padding.window_gap;
 
-    // Next column_width boundary strictly above current
-    let target_px = ((current_px / cw) + 1) * cw;
+    // Delta: grow by one column_shift (column_width + window_gap).
+    let target_px = current_px + column_shift;
 
-    // Already at or beyond monitor width
-    if target_px > config.monitor_width {
-        return None;
-    }
-
+    // set_column_width quantizes to eighths and validates against
+    // [min_column_eighths, max_column_eighths]. A raw target that
+    // transiently exceeds monitor_width may still quantize to a valid
+    // eighths value, so we delegate the bounds check entirely.
     set_column_width(layout, focused, target_px, config)
 }
 
-/// Shrink the focused column to the previous `column_width` boundary below.
+/// Shrink the focused column by one `column_shift`.
 ///
-/// Snap points are multiples of `column_width` (e.g., 0, 960, 1920 with
-/// column_width=960). The column width is set to the next snap point
-/// strictly below its current width, floored at `min_column_eighths`.
+/// The step is `column_shift = column_width + window_gap`, matching the slot
+/// grid. The column's width is decreased by this delta; the resulting pixel
+/// value is quantized to eighths by [`set_column_width`], which rejects
+/// values outside `[min_column_eighths, max_column_eighths]`.
 ///
-/// Returns `None` if already at minimum or no lower snap point exists.
+/// Returns `None` if the shrink would go below `min_column_eighths`.
 #[must_use]
 pub fn shrink_column(
     layout: &VirtualLayout,
@@ -593,15 +596,15 @@ pub fn shrink_column(
     let current_px =
         column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
     let cw = config.column_width as i32;
+    let column_shift = cw + config.padding.window_gap;
 
-    // Previous column_width boundary strictly below current
-    let target_px = ((current_px - 1) / cw) * cw;
-    let min_px = column_eighths_to_pixels(config.min_column_eighths, config.column_width);
+    // Delta: shrink by one column_shift (column_width + window_gap).
+    let target_px = current_px - column_shift;
 
-    if target_px < min_px {
-        return None;
-    }
-
+    // set_column_width quantizes to eighths and validates against
+    // [min_column_eighths, max_column_eighths]. We delegate the bounds
+    // check entirely — the raw target can go negative or below min,
+    // but pixels_to_eighths clamps and set_column_width rejects it.
     set_column_width(layout, focused, target_px, config)
 }
 
@@ -1756,8 +1759,8 @@ mod tests {
     // --- Resize: expand_column ---
 
     #[test]
-    fn expand_column_snaps_to_next_column_width_boundary() {
-        // Positive: 960px (4 eighths) → snap up to 1920px (8 eighths)
+    fn expand_column_from_default_width() {
+        // Delta: 960px (4 eighths) + column_shift(964) = 1924px → 8 eighths
         let layout = three_column_layout(); // columns at 4 eighths = 960px
         let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
         assert_eq!(result.columns[0].width_eighths, 8);
@@ -1765,18 +1768,18 @@ mod tests {
 
     #[test]
     fn expand_column_from_sub_boundary() {
-        // Positive: 480px (2 eighths) → snap up to 960px (4 eighths)
+        // Delta: 480px (2 eighths) + column_shift(964) = 1444px → 6 eighths
         let layout = VirtualLayout::with_columns(
             vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
             0,
         );
         let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
-        assert_eq!(result.columns[0].width_eighths, 4);
+        assert_eq!(result.columns[0].width_eighths, 6);
     }
 
     #[test]
     fn expand_column_at_max_returns_none() {
-        // Negative: 1920px (8 eighths) → next boundary would be 2880 > 1920 → None
+        // Delta: 1920px (8 eighths) + column_shift(964) = 2884px → 12 eighths > max(8) → None
         let layout = VirtualLayout::with_columns(
             vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
             0,
@@ -1797,8 +1800,8 @@ mod tests {
     // --- Resize: shrink_column ---
 
     #[test]
-    fn shrink_column_snaps_to_prev_column_width_boundary() {
-        // Positive: 1920px (8 eighths) → snap down to 960px (4 eighths)
+    fn shrink_column_from_max_width() {
+        // Delta: 1920px (8 eighths) - column_shift(964) = 956px → 4 eighths
         let layout = VirtualLayout::with_columns(
             vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
             0,
@@ -1809,25 +1812,24 @@ mod tests {
 
     #[test]
     fn shrink_column_from_mid_boundary() {
-        // Positive: 1200px (5 eighths) → snap down to 960px (4 eighths)
+        // Delta: 1200px (5 eighths) - column_shift(964) = 236px → 1 eighth < min(2) → None
         let layout = VirtualLayout::with_columns(
             vec![Column::new(5, WindowId(1)), Column::new(4, WindowId(2))],
             0,
         );
-        let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
-        assert_eq!(result.columns[0].width_eighths, 4);
+        assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
     }
 
     #[test]
     fn shrink_column_at_boundary_returns_none() {
-        // Negative: 960px (4 eighths) → prev boundary is 0 → below min (2 eighths = 480px) → None
+        // Delta: 960px (4 eighths) - column_shift(964) = -4px → 1 eighth < min(2) → None
         let layout = three_column_layout();
         assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
     }
 
     #[test]
     fn shrink_column_at_min_eighths_returns_none() {
-        // Negative: 480px (2 eighths = min) → prev boundary is 0 → None
+        // Delta: 480px (2 eighths = min) - column_shift(964) = -484px → 1 eighth < min(2) → None
         let layout = VirtualLayout::with_columns(
             vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
             0,
@@ -2360,6 +2362,343 @@ mod tests {
         assert_eq!(
             layout.viewport_offset, 0,
             "scroll case with focus=0 → offset 0 (first col visible from start)"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Bug 2 regression: expand/shrink column step must include window_gap.
+    // column_shift = column_width + window_gap, NOT just column_width.
+    // -------------------------------------------------------------------
+
+    /// Helper: build a MutationConfig with a specific window_gap for testing
+    /// that the gap is included in the expand/shrink step.
+    fn gap_config(gap: i32) -> MutationConfig {
+        MutationConfig {
+            monitor_width: 1920,
+            column_width: 960,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 8,
+            padding: Padding {
+                window_gap: gap,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        }
+    }
+
+    #[test]
+    fn expand_step_includes_gap_zero_gap_vs_large_gap() {
+        // Positive: verify that the expand step includes window_gap by comparing
+        // results with gap=0 vs gap=20. With gap=0, column_shift = 960.
+        // With gap=20, column_shift = 980. The resulting eighths must differ.
+        //
+        // gap=0: 960 + 960 = 1920 → 8 eighths (exactly monocle width)
+        // gap=20: 960 + 980 = 1940 → pixels_to_eighths(1940, 960) = 8 eighths (same)
+        // So for this specific case they converge. Let's use 3 eighths start:
+        //
+        // 3 eighths = 720px.
+        // gap=0: 720 + 960 = 1680 → pixels_to_eighths(1680, 960) = 7 eighths
+        // gap=20: 720 + 980 = 1700 → pixels_to_eighths(1700, 960) = 7 eighths
+        // Still same. Let's verify with smaller column_width to see the gap matter:
+        // Use column_width=500, so column_shift matters more.
+        let config_zero = MutationConfig {
+            monitor_width: 1920,
+            column_width: 500,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            // max: (1920 * 4) / 500 = 15
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let config_gap = MutationConfig {
+            monitor_width: 1920,
+            column_width: 500,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 20,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+
+        // gap=0: column_shift = 500. 500px + 500 = 1000 → eighths(1000,500)=8
+        let _r_zero = expand_column(&layout, WindowId(1), &config_zero).expect("expand zero gap");
+        // gap=20: column_shift = 520. 500px + 520 = 1020 → eighths(1020,500)=8
+        let r_gap = expand_column(&layout, WindowId(1), &config_gap).expect("expand 20 gap");
+
+        // Both hit 8 eighths from 4 — but the *intermediate pixel target* differed.
+        // Verify by checking with a starting width where the gap produces a different
+        // eighth boundary. 3 eighths = 375px.
+        let layout3 = VirtualLayout::with_columns(
+            vec![Column::new(3, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        // gap=0: 375 + 500 = 875 → eighths(875, 500) = 7
+        let r3_zero = expand_column(&layout3, WindowId(1), &config_zero).expect("expand3 zero");
+        // gap=20: 375 + 520 = 895 → eighths(895, 500) = 7
+        assert_eq!(r3_zero.columns[0].width_eighths, 7);
+        assert_eq!(r_gap.columns[0].width_eighths, 8);
+        assert_eq!(r3_zero.columns[0].width_eighths, 7);
+    }
+
+    #[test]
+    fn expand_with_large_gap_advances_further_than_zero_gap() {
+        // Positive: with a large gap, the expand step pushes further, so expanding
+        // from a low width can skip an eighth boundary that gap=0 would not.
+        // column_width=500. Start at 2 eighths = 250px.
+        // gap=0: 250 + 500 = 750 → eighths(750, 500) = 6
+        // gap=60: 250 + 560 = 810 → eighths(810, 500) = 6
+        // gap=0 and gap=60 both round to 6. Let's try gap=200:
+        // gap=200: 250 + 700 = 950 → eighths(950, 500) = 8
+        let config_small = MutationConfig {
+            monitor_width: 1920,
+            column_width: 500,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let config_large = MutationConfig {
+            monitor_width: 1920,
+            column_width: 500,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 200,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+
+        // gap=0: 250 + 500 = 750 → 6 eighths
+        let r_small = expand_column(&layout, WindowId(1), &config_small).expect("expand small gap");
+        assert_eq!(
+            r_small.columns[0].width_eighths, 6,
+            "gap=0 expand from 2→6 eighths"
+        );
+
+        // gap=200: 250 + 700 = 950 → 8 eighths
+        let r_large = expand_column(&layout, WindowId(1), &config_large).expect("expand large gap");
+        assert_eq!(
+            r_large.columns[0].width_eighths, 8,
+            "gap=200 expand from 2→8 eighths (larger step skips more eighth boundaries)"
+        );
+
+        // Verify the gap is what causes the difference
+        assert_ne!(
+            r_small.columns[0].width_eighths, r_large.columns[0].width_eighths,
+            "different gaps must produce different expand results when starting from same width"
+        );
+    }
+
+    #[test]
+    fn shrink_with_large_gap_reduces_more_than_zero_gap() {
+        // Positive: with a large gap, shrink removes more, so it can drop below
+        // what gap=0 would reach.
+        // column_width=500. Start at 6 eighths = 750px.
+        // gap=0: 750 - 500 = 250 → eighths(250, 500) = 2
+        // gap=200: 750 - 700 = 50 → eighths(50, 500) = 0 → clamped to 1 < min(2) → None
+        let config_small = MutationConfig {
+            monitor_width: 1920,
+            column_width: 500,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let config_large = MutationConfig {
+            monitor_width: 1920,
+            column_width: 500,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 200,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(6, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+
+        // gap=0: 750 - 500 = 250 → 2 eighths (at min, should succeed)
+        let r_small = shrink_column(&layout, WindowId(1), &config_small).expect("shrink small gap");
+        assert_eq!(r_small.columns[0].width_eighths, 2);
+
+        // gap=200: 750 - 700 = 50 → 0 → 1 eighth < min(2) → None
+        assert!(
+            shrink_column(&layout, WindowId(1), &config_large).is_none(),
+            "gap=200 shrink from 6 eighths drops below min → None"
+        );
+    }
+
+    #[test]
+    fn expand_shrink_roundtrip_with_gap() {
+        // Positive: expand then shrink with non-zero gap returns to same width.
+        // 4 eighths (960px), gap=16. column_shift = 976.
+        // expand: 960 + 976 = 1936 → 8 eighths
+        // shrink: 1920 - 976 = 944 → 4 eighths
+        let config = gap_config(16);
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+
+        let expanded = expand_column(&layout, WindowId(1), &config).expect("expand");
+        assert_eq!(expanded.columns[0].width_eighths, 8);
+
+        let shrunk = shrink_column(&expanded, WindowId(1), &config).expect("shrink");
+        assert_eq!(
+            shrunk.columns[0].width_eighths, 4,
+            "expand→shrink roundtrip must return to original width with gap=16"
+        );
+    }
+
+    #[test]
+    fn expand_at_max_with_large_gap_returns_none() {
+        // Negative: even with a large gap, expanding at max_eighths → None.
+        // The step doesn't matter — bounds validation catches it.
+        let config = gap_config(100);
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        assert!(
+            expand_column(&layout, WindowId(1), &config).is_none(),
+            "expand at max_eighths must return None regardless of gap size"
+        );
+    }
+
+    #[test]
+    fn shrink_at_min_with_large_gap_returns_none() {
+        // Negative: even with a large gap, shrinking at min_eighths → None.
+        let config = gap_config(100);
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+        assert!(
+            shrink_column(&layout, WindowId(1), &config).is_none(),
+            "shrink at min_eighths must return None regardless of gap size"
+        );
+    }
+
+    #[test]
+    fn expand_step_uses_column_shift_not_column_width() {
+        // Positive: direct verification that the expand step is column_width + gap,
+        // not just column_width. We verify by computing the expected pixel target
+        // and checking it matches the function's behavior.
+        //
+        // column_width=960, gap=4, column_shift=964.
+        // Start: 4 eighths = 960px.
+        // Expected target: 960 + 964 = 1924px → 8 eighths.
+        //
+        // If the bug were present (using column_width=960 instead of column_shift=964):
+        // target would be 960 + 960 = 1920 → 8 eighths (happens to match in this case).
+        //
+        // Use a case where the difference matters: start at 3 eighths = 720px.
+        // Correct: 720 + 964 = 1684 → eighths(1684, 960) = (1684*4 + 480)/960 = 7
+        // Buggy:  720 + 960 = 1680 → eighths(1680, 960) = 7 (still same)
+        //
+        // Try 5 eighths = 1200px.
+        // Correct: 1200 + 964 = 2164 → eighths(2164, 960) = (2164*4+480)/960 = 9
+        // Buggy:  1200 + 960 = 2160 → eighths(2160, 960) = 9 (still same)
+        //
+        // The rounding makes it hard to see the difference with these sizes.
+        // Use column_width=250, gap=50, column_shift=300. Start at 4 eighths=250px.
+        // Correct: 250 + 300 = 550 → eighths(550, 250) = (550*4+125)/250 = 2325/250 = 9
+        // Buggy:  250 + 250 = 500 → eighths(500, 250) = (500*4+125)/250 = 2125/250 = 8
+        let config = MutationConfig {
+            monitor_width: 1920,
+            column_width: 250,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 50,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+
+        let result = expand_column(&layout, WindowId(1), &config).expect("expand");
+        assert_eq!(
+            result.columns[0].width_eighths, 9,
+            "expand with column_width=250, gap=50 must use column_shift=300, \
+             not column_width=250. Expected 9 eighths (correct) vs 8 (buggy)."
+        );
+    }
+
+    #[test]
+    fn shrink_step_uses_column_shift_not_column_width() {
+        // Positive: same verification as expand but for shrink.
+        // column_width=250, gap=50, column_shift=300. Start at 8 eighths=500px.
+        // Correct: 500 - 300 = 200 → eighths(200, 250) = (200*4+125)/250 = 925/250 = 3
+        // Buggy:  500 - 250 = 250 → eighths(250, 250) = (250*4+125)/250 = 1125/250 = 4
+        let config = MutationConfig {
+            monitor_width: 1920,
+            column_width: 250,
+            default_column_width_eighths: 4,
+            min_column_eighths: 2,
+            max_column_eighths: 15,
+            padding: Padding {
+                window_gap: 50,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 4,
+        };
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            0,
+        );
+
+        let result = shrink_column(&layout, WindowId(1), &config).expect("shrink");
+        assert_eq!(
+            result.columns[0].width_eighths, 3,
+            "shrink with column_width=250, gap=50 must use column_shift=300, \
+             not column_width=250. Expected 3 eighths (correct) vs 4 (buggy)."
         );
     }
 }

@@ -2,11 +2,11 @@
 //!
 //! [`LayoutEngine`] is the main entry point for layout operations. It owns
 //! the current [`VirtualLayout`], tracks focus and monocle state, and
-//! produces [`LayoutDiff`] results for each mutation.
+//! produces [`AppliedLayout`] results for each mutation.
 //!
 //! # The Mutation Pipeline
 //!
-//! Every public method follows the same 3-step pipeline internally:
+//! Every public method follows the same 2-step pipeline internally:
 //!
 //! ```text
 //! User command (e.g., swap Right)
@@ -18,11 +18,13 @@
 //! projection::project() → new ActualLayout
 //!     │
 //!     ▼
-//! diff::diff(prev_actual, new_actual) → Vec<WindowMove>
-//!     │
-//!     ▼
-//! LayoutDiff { virtual_layout, actual_layout, moves }
+//! AppliedLayout { virtual_layout, actual_layout }
 //! ```
+//!
+//! The animation layer receives the full `ActualLayout` and compares each
+//! window's target rect against its real on-screen position to decide which
+//! windows actually need animating. This is more robust than computing a
+//! logical diff inside the engine — see [`AppliedLayout`] for details.
 //!
 //! # What LayoutEngine Does NOT Own
 //!
@@ -35,16 +37,15 @@
 //! It only owns the layout math: columns, widths, focus, viewport offset.
 
 use crate::common::{Direction, WindowId};
-use crate::layout::diff;
 use crate::layout::mutations::{self, MutationConfig};
 use crate::layout::projection;
-use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, VirtualLayout};
+use crate::layout::types::{ActualLayout, AppliedLayout, MonitorInfo, Padding, VirtualLayout};
 
 /// The layout engine — owns virtual layout state, tracks focus, and produces diffs.
 ///
 /// This is the single entry point for all layout operations. Each public method
 /// applies a mutation (scroll, focus, swap, resize, etc.), runs the full
-/// mutation pipeline, and returns a [`LayoutDiff`] describing what changed.
+/// mutation pipeline, and returns a [`AppliedLayout`] describing what changed.
 ///
 /// # Focus tracking
 ///
@@ -56,7 +57,7 @@ use crate::layout::types::{ActualLayout, LayoutDiff, MonitorInfo, Padding, Virtu
 ///
 /// This is the single entry point for all layout mutations. Call its public
 /// methods to scroll, focus, swap, resize, toggle monocle, or
-/// add/remove windows. Each call returns a [`LayoutDiff`] containing the
+/// add/remove windows. Each call returns a [`AppliedLayout`] containing the
 /// new layouts and animation instructions.
 ///
 /// # Example
@@ -87,8 +88,8 @@ pub struct LayoutEngine {
     virtual_layout: VirtualLayout,
     /// Currently focused window.
     focused: Option<WindowId>,
-    /// Previous actual layout (used for diff computation).
-    prev_actual: ActualLayout,
+    /// Last projected actual layout (cached for the `actual_layout()` accessor).
+    actual: ActualLayout,
     /// The monitor being managed.
     monitor: MonitorInfo,
     /// Configuration derived from `StmConfig`.
@@ -119,7 +120,7 @@ impl LayoutEngine {
             padding,
             columns_per_screen,
         };
-        let prev_actual = projection::project(
+        let actual = projection::project(
             &virtual_layout,
             &monitor,
             config.column_width,
@@ -129,7 +130,7 @@ impl LayoutEngine {
         Self {
             virtual_layout,
             focused: None,
-            prev_actual,
+            actual,
             monitor,
             config,
             monocle_saved_width: None,
@@ -154,13 +155,13 @@ impl LayoutEngine {
         &self.virtual_layout
     }
 
-    /// Get a reference to the previous actual layout (projected screen coords).
+    /// Get a reference to the current actual layout (projected screen coords).
     ///
     /// This is the last layout produced by [`apply_mutation`](Self::apply_mutation).
     /// It contains the current pixel-accurate rectangles for every window.
     #[must_use]
     pub fn actual_layout(&self) -> &ActualLayout {
-        &self.prev_actual
+        &self.actual
     }
 
     /// Get the currently focused window.
@@ -175,30 +176,32 @@ impl LayoutEngine {
         &self.monitor
     }
 
-    /// Apply a mutation and compute the resulting [`LayoutDiff`].
+    /// Apply a mutation and compute the resulting [`AppliedLayout`].
     ///
     /// This is the core pipeline that every mutation flows through:
     /// 1. Receive new [`VirtualLayout`] from the mutation function.
     /// 2. [`projection::project`] → camera shift + parking → new [`ActualLayout`].
-    /// 3. [`diff::diff`] old vs new actual → `Vec<WindowMove>` (animation instructions).
-    /// 4. Update internal state and return the diff.
-    fn apply_mutation(&mut self, new_layout: VirtualLayout) -> LayoutDiff {
+    /// 3. Update internal state and return the new layout.
+    ///
+    /// Unlike the previous design, this method no longer computes a logical
+    /// diff (`Vec<WindowMove>`). Instead, it returns the full `ActualLayout`
+    /// and lets the animation layer decide which windows to animate by
+    /// comparing each target rect against the window's real on-screen position.
+    fn apply_mutation(&mut self, new_layout: VirtualLayout) -> AppliedLayout {
         let new_actual = projection::project(
             &new_layout,
             &self.monitor,
             self.config.column_width,
             &self.config.padding,
         );
-        let moves = diff::diff(&self.prev_actual, &new_actual);
 
-        let result = LayoutDiff {
-            virtual_layout: new_layout,
+        let result = AppliedLayout {
             actual_layout: new_actual.clone(),
-            moves,
+            virtual_layout: new_layout,
         };
 
         self.virtual_layout = result.virtual_layout.clone();
-        self.prev_actual = new_actual;
+        self.actual = new_actual;
         result
     }
 
@@ -207,13 +210,13 @@ impl LayoutEngine {
     // -----------------------------------------------------------------------
 
     /// Scroll the viewport left by one column step.
-    pub fn scroll_left(&mut self) -> Option<LayoutDiff> {
+    pub fn scroll_left(&mut self) -> Option<AppliedLayout> {
         let new_layout = mutations::scroll_left(&self.virtual_layout, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
     /// Scroll the viewport right by one column step.
-    pub fn scroll_right(&mut self) -> Option<LayoutDiff> {
+    pub fn scroll_right(&mut self) -> Option<AppliedLayout> {
         let new_layout = mutations::scroll_right(&self.virtual_layout, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
@@ -233,13 +236,13 @@ impl LayoutEngine {
     ///
     /// A tuple of `(focused_window_id, optional_layout_diff)`:
     /// - `focused_window_id` — the newly focused window.
-    /// - `Option<LayoutDiff>` — `Some` if the viewport scrolled (animation needed),
+    /// - `Option<AppliedLayout>` — `Some` if the viewport scrolled (animation needed),
     ///   `None` if the target was already visible (no position changes).
     ///
-    /// The caller **must** pass the `LayoutDiff` to the animation system when present.
-    /// Failure to do so causes `prev_actual` to desync from the actual window positions,
+    /// The caller **must** pass the `AppliedLayout` to the animation system when present.
+    /// Failure to do so causes window positions to desync from the layout state,
     /// producing incorrect diffs on subsequent mutations.
-    pub fn focus(&mut self, direction: Direction) -> Option<(WindowId, Option<LayoutDiff>)> {
+    pub fn focus(&mut self, direction: Direction) -> Option<(WindowId, Option<AppliedLayout>)> {
         let focused = self.focused?;
         let result = mutations::focus(&self.virtual_layout, focused, direction, &self.config)?;
         self.focused = Some(result.focused);
@@ -256,7 +259,7 @@ impl LayoutEngine {
     /// Set the focused window explicitly by [`WindowId`].
     ///
     /// No validation is performed — the caller should ensure the window exists
-    /// in the layout. This does not produce a [`LayoutDiff`]; it only updates
+    /// in the layout. This does not produce a [`AppliedLayout`]; it only updates
     /// internal focus state.
     pub fn set_focus(&mut self, window: WindowId) {
         self.focused = Some(window);
@@ -273,7 +276,7 @@ impl LayoutEngine {
     /// for per-window swaps in all four directions.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn swap_column(&mut self, direction: Direction) -> Option<LayoutDiff> {
+    pub fn swap_column(&mut self, direction: Direction) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let new_layout =
             mutations::swap_column(&self.virtual_layout, focused, direction, &self.config)?;
@@ -289,7 +292,7 @@ impl LayoutEngine {
     /// a row swap within the same column.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn swap_window(&mut self, direction: Direction) -> Option<LayoutDiff> {
+    pub fn swap_window(&mut self, direction: Direction) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let new_layout =
             mutations::swap_window(&self.virtual_layout, focused, direction, &self.config)?;
@@ -300,26 +303,26 @@ impl LayoutEngine {
     // Resize operations
     // -----------------------------------------------------------------------
 
-    /// Expand the focused column to the next `column_width` boundary.
+    /// Expand the focused column by one `column_shift` (= `column_width + window_gap`).
     ///
     /// No direction is needed — the resize is independent (no neighbor compensation).
-    pub fn expand_column(&mut self) -> Option<LayoutDiff> {
+    pub fn expand_column(&mut self) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let new_layout = mutations::expand_column(&self.virtual_layout, focused, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Shrink the focused column to the previous `column_width` boundary.
+    /// Shrink the focused column by one `column_shift` (= `column_width + window_gap`).
     ///
     /// No direction is needed — the resize is independent (no neighbor compensation).
-    pub fn shrink_column(&mut self) -> Option<LayoutDiff> {
+    pub fn shrink_column(&mut self) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let new_layout = mutations::shrink_column(&self.virtual_layout, focused, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
     /// Set the focused column width to an explicit pixel value.
-    pub fn set_column_width(&mut self, target_px: i32) -> Option<LayoutDiff> {
+    pub fn set_column_width(&mut self, target_px: i32) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let new_layout =
             mutations::set_column_width(&self.virtual_layout, focused, target_px, &self.config)?;
@@ -331,7 +334,7 @@ impl LayoutEngine {
     // -----------------------------------------------------------------------
 
     /// Toggle monocle mode for the focused window.
-    pub fn toggle_monocle(&mut self) -> Option<LayoutDiff> {
+    pub fn toggle_monocle(&mut self) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let saved = self.monocle_saved_width.and_then(|(col, w)| {
             // Only use saved width if it's for the same column
@@ -359,14 +362,14 @@ impl LayoutEngine {
     // -----------------------------------------------------------------------
 
     /// Add a window as a new column appended to the right.
-    pub fn add_window(&mut self, window: WindowId) -> LayoutDiff {
+    pub fn add_window(&mut self, window: WindowId) -> AppliedLayout {
         let new_layout = mutations::add_window(&self.virtual_layout, window, &self.config);
         self.focused = Some(window);
         self.apply_mutation(new_layout)
     }
 
     /// Add a window as a new row in the focused column.
-    pub fn add_window_to_focused_column(&mut self, window: WindowId) -> Option<LayoutDiff> {
+    pub fn add_window_to_focused_column(&mut self, window: WindowId) -> Option<AppliedLayout> {
         let focused = self.focused?;
         let (col, _) = self.virtual_layout.find_window(focused)?;
         let new_layout = mutations::add_window_to_column(&self.virtual_layout, col, window);
@@ -375,7 +378,7 @@ impl LayoutEngine {
     }
 
     /// Remove a window from the layout.
-    pub fn remove_window(&mut self, window: WindowId) -> LayoutDiff {
+    pub fn remove_window(&mut self, window: WindowId) -> AppliedLayout {
         let new_layout = mutations::remove_window(&self.virtual_layout, window, &self.config);
 
         // Update focus
@@ -393,7 +396,7 @@ impl LayoutEngine {
     /// Initialize the layout with multiple windows in one operation.
     ///
     /// Creates one column per window, assigns default widths, and computes
-    /// a single [`LayoutDiff`] covering all windows. More efficient than
+    /// a single [`AppliedLayout`] covering all windows. More efficient than
     /// calling [`add_window`](Self::add_window) N times because it avoids
     /// intermediate projection + diff steps.
     ///
@@ -410,12 +413,12 @@ impl LayoutEngine {
     ///
     /// # Returns
     ///
-    /// A [`LayoutDiff`] describing the new layout and all window positions.
+    /// A [`AppliedLayout`] describing the new layout and all window positions.
     pub fn initialize_windows(
         &mut self,
         ids: Vec<WindowId>,
         focus_col_idx: Option<usize>,
-    ) -> LayoutDiff {
+    ) -> AppliedLayout {
         let new_layout = mutations::initialize_windows(&ids, &self.config, focus_col_idx);
         // Focus the window at the focus column (the user's foreground window),
         // falling back to the last window when no focus column was specified.
@@ -481,14 +484,14 @@ mod tests {
         let diff = engine.swap_column(Direction::Right).expect("swap");
         assert_eq!(diff.virtual_layout.columns[0].rows[0], WindowId(2));
         assert_eq!(diff.virtual_layout.columns[1].rows[0], WindowId(1));
-        assert!(!diff.moves.is_empty());
+        assert!(!diff.actual_layout.entries.is_empty());
     }
 
     #[test]
     fn engine_expand_column() {
         let mut engine = engine_with_three_columns();
         let diff = engine.expand_column().expect("expand");
-        // 960px (4 eighths) → snap to 1920px (8 eighths), no compensation
+        // 960px (4 eighths) + column_shift(964) = 1924px → 8 eighths
         assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
         assert_eq!(diff.virtual_layout.columns[1].width_eighths, 4); // unchanged
     }
@@ -549,7 +552,6 @@ mod tests {
         let d1 = engine.add_window(WindowId(1));
         assert_eq!(engine.focused(), Some(WindowId(1)));
         assert_eq!(d1.actual_layout.entries.len(), 1);
-        assert_eq!(d1.moves.len(), 1); // 1 new window from parked
 
         let d2 = engine.add_window(WindowId(2));
         assert_eq!(engine.focused(), Some(WindowId(2)));
@@ -557,19 +559,19 @@ mod tests {
 
         let d3 = engine.add_window(WindowId(3));
         assert_eq!(engine.virtual_layout().columns.len(), 3);
-        assert_eq!(d3.moves.len(), 1); // only the new window moved
+        assert_eq!(d3.actual_layout.entries.len(), 3);
 
         // Step 2: Mutate — swap columns 0 and 1
         engine.set_focus(WindowId(1));
         let d_swap = engine.swap_column(Direction::Right).expect("swap");
         assert_eq!(d_swap.virtual_layout.columns[0].rows[0], WindowId(2));
         assert_eq!(d_swap.virtual_layout.columns[1].rows[0], WindowId(1));
-        assert!(!d_swap.moves.is_empty());
+        assert!(!d_swap.actual_layout.entries.is_empty());
 
         // Step 3: Mutate — expand column (independent, no compensation)
         engine.set_focus(WindowId(1));
         let d_expand = engine.expand_column().expect("expand");
-        // 960px → 1920px (8 eighths), other columns unchanged
+        // 960px + column_shift(964) → 8 eighths, other columns unchanged
         assert_eq!(d_expand.virtual_layout.columns[1].width_eighths, 8);
         assert_eq!(d_expand.virtual_layout.columns[0].width_eighths, 4);
 
@@ -626,11 +628,10 @@ mod tests {
         assert!(engine.swap_column(Direction::Down).is_none());
 
         // Expand/shrink — single column at 4 eighths (960px)
-        // Expand: snap to 1920px (8 eighths) — works (independent, no neighbor needed)
+        // Expand: 960 + column_shift(964) = 1924 → 8 eighths
         let diff = engine.expand_column().expect("expand single");
         assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
-        // Shrink: 1920px → prev boundary 960px (same as current at snap level) → no
-        // Actually: 8 eighths = 1920px, prev boundary = 960px, so shrink works
+        // Shrink: 1920 - column_shift(964) = 956 → 4 eighths
         let diff2 = engine.shrink_column().expect("shrink single");
         assert_eq!(diff2.virtual_layout.columns[0].width_eighths, 4);
 
@@ -668,7 +669,7 @@ mod tests {
         assert_eq!(engine.virtual_layout().columns.len(), 1); // still one column
         assert_eq!(engine.virtual_layout().columns[0].rows.len(), 2);
         // Both windows' positions changed (existing window shrunk, new window appeared)
-        assert_eq!(diff.moves.len(), 2);
+        assert_eq!(diff.actual_layout.entries.len(), 2);
     }
 
     #[test]
@@ -704,11 +705,14 @@ mod tests {
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
 
-        // Focus WindowId(1) in column 0, expand (independent, snaps to 1920px)
+        // Focus WindowId(1) in column 0, expand (960 + column_shift(964) → 8 eighths)
         engine.set_focus(WindowId(1));
         let diff = engine.expand_column().expect("expand");
-        // The diff must contain moves (pixel positions changed)
-        assert!(!diff.moves.is_empty(), "expand should produce window moves");
+        // The layout must have entries (windows with new pixel positions)
+        assert!(
+            !diff.actual_layout.entries.is_empty(),
+            "expand should produce layout entries"
+        );
         assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
         assert_eq!(diff.virtual_layout.columns[1].width_eighths, 4); // unchanged
     }
@@ -734,7 +738,7 @@ mod tests {
         engine.set_focus(WindowId(2));
         let prev_offset = engine.virtual_layout().viewport_offset;
         let diff = engine.swap_column(Direction::Left).expect("swap left");
-        assert!(!diff.moves.is_empty());
+        assert!(!diff.actual_layout.entries.is_empty());
         // Camera should shift to make the swapped column visible
         assert!(
             diff.virtual_layout.viewport_offset < prev_offset,
@@ -784,7 +788,7 @@ mod tests {
     #[test]
     fn engine_focus_returns_none_diff_when_no_scroll() {
         // Positive: focus within fully visible columns → diff is None (no viewport change).
-        // The (WindowId, Option<LayoutDiff>) tuple must have None in the diff slot.
+        // The (WindowId, Option<AppliedLayout>) tuple must have None in the diff slot.
         // Use a wider monitor (3840px) so all 3 columns fit in the viewport without scroll.
         let monitor = MonitorInfo {
             work_area: Rect {
@@ -805,14 +809,14 @@ mod tests {
         // Column 2 is visible within the 3840px viewport → no scroll needed → diff is None
         assert!(
             result.1.is_none(),
-            "focus within visible area should not produce a LayoutDiff, got Some"
+            "focus within visible area should not produce a AppliedLayout, got Some"
         );
     }
 
     #[test]
     fn engine_focus_returns_some_diff_when_viewport_scrolls() {
         // Positive: focus into off-screen column → diff is Some with non-empty moves.
-        // This is the core Fix 1 behavior: the caller receives the LayoutDiff to animate.
+        // This is the core Fix 1 behavior: the caller receives the AppliedLayout to animate.
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
@@ -828,13 +832,13 @@ mod tests {
         // Viewport scrolled → diff must be Some
         assert!(
             result.1.is_some(),
-            "focus into off-screen column must produce Some(LayoutDiff)"
+            "focus into off-screen column must produce Some(AppliedLayout)"
         );
         let diff = result.1.unwrap();
         // The diff must contain moves because windows shifted on screen
         assert!(
-            !diff.moves.is_empty(),
-            "LayoutDiff from viewport scroll must contain animation moves"
+            !diff.actual_layout.entries.is_empty(),
+            "AppliedLayout from viewport scroll must contain animation moves"
         );
     }
 
@@ -851,7 +855,7 @@ mod tests {
         assert_eq!(result.0, WindowId(2));
         assert!(
             result.1.is_none(),
-            "vertical focus should never produce a LayoutDiff"
+            "vertical focus should never produce a AppliedLayout"
         );
     }
 
@@ -890,7 +894,7 @@ mod tests {
             vec![WindowId(2), WindowId(5)]
         );
         assert_eq!(diff.virtual_layout.columns[1].rows, vec![WindowId(1)]);
-        assert!(!diff.moves.is_empty());
+        assert!(!diff.actual_layout.entries.is_empty());
     }
 
     #[test]
@@ -906,7 +910,7 @@ mod tests {
             diff.virtual_layout.columns[0].rows,
             vec![WindowId(2), WindowId(1)]
         );
-        assert!(!diff.moves.is_empty());
+        assert!(!diff.actual_layout.entries.is_empty());
     }
 
     #[test]
@@ -954,7 +958,7 @@ mod tests {
         assert_eq!(diff.virtual_layout.columns.len(), 1);
         assert_eq!(engine.focused(), Some(WindowId(1)));
         // Should produce moves (new window appeared)
-        assert!(!diff.moves.is_empty());
+        assert!(!diff.actual_layout.entries.is_empty());
     }
 
     #[test]
@@ -1029,6 +1033,165 @@ mod tests {
         assert_ne!(
             diff.virtual_layout.viewport_offset, 0,
             "4 cols > columns_per_screen=2 → viewport should scroll to focus col"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Bug 1 regression: AppliedLayout.actual_layout.entries must contain
+    // ALL windows (not just "moved" ones). This is the core invariant
+    // that prevents the swapcolumn animation stranding bug.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn applied_layout_entries_match_window_count_after_swap() {
+        // Positive: after a swap_column mutation, actual_layout.entries must
+        // contain every window — not just the two columns that swapped.
+        // Regression test for: rapid swapcolumn during in-flight animation
+        // stranded mid-flight windows because the old diff only included
+        // windows whose target changed.
+        let mut engine = engine_with_three_columns();
+        let total_windows = engine.virtual_layout().window_count(); // 3
+
+        let result = engine.swap_column(Direction::Right).expect("swap");
+        assert_eq!(
+            result.actual_layout.entries.len(),
+            total_windows,
+            "AppliedLayout must contain ALL windows after swap_column, not just the swapped ones"
+        );
+
+        // Verify each specific window is present
+        for wid in [WindowId(1), WindowId(2), WindowId(3)] {
+            assert!(
+                result
+                    .actual_layout
+                    .entries
+                    .iter()
+                    .any(|e| e.window_id == wid),
+                "AppliedLayout must contain window after swap_column (id={:?})",
+                wid
+            );
+        }
+    }
+
+    #[test]
+    fn applied_layout_entries_match_window_count_after_expand() {
+        // Positive: after expand_column, entries must still contain ALL windows
+        let mut engine = engine_with_three_columns();
+        let total_windows = engine.virtual_layout().window_count();
+
+        let result = engine.expand_column().expect("expand");
+        assert_eq!(
+            result.actual_layout.entries.len(),
+            total_windows,
+            "AppliedLayout must contain ALL windows after expand_column"
+        );
+    }
+
+    #[test]
+    fn rapid_consecutive_mutations_both_return_full_layouts() {
+        // Positive: simulate rapid mutations (A then B) without animation settling.
+        // Both AppliedLayouts must contain all windows. This is the exact scenario
+        // that caused Bug 1: a second swap while the first swap's animation was
+        // still in-flight dropped mid-flight windows from the diff.
+        let mut engine = engine_with_three_columns();
+        let total_windows = engine.virtual_layout().window_count(); // 3
+
+        // Mutation A: swap columns 0 ↔ 1
+        let result_a = engine.swap_column(Direction::Right).expect("swap A");
+        assert_eq!(
+            result_a.actual_layout.entries.len(),
+            total_windows,
+            "First mutation (swap A) must contain ALL windows"
+        );
+
+        // Mutation B: immediately swap again (same direction, different result
+        // because focus is still on WindowId(1) which is now in column 1).
+        // [W2, W1, W3] → swap W1 right → [W2, W3, W1]
+        let result_b = engine.swap_column(Direction::Right).expect("swap B");
+        assert_eq!(
+            result_b.actual_layout.entries.len(),
+            total_windows,
+            "Second mutation (swap B) must contain ALL windows — \
+             this was Bug 1: mid-flight windows were stranded because the old \
+             diff only included windows whose target changed"
+        );
+
+        // Verify the second swap actually moved W1 further right
+        assert_eq!(result_b.virtual_layout.columns[0].rows[0], WindowId(2));
+        assert_eq!(result_b.virtual_layout.columns[1].rows[0], WindowId(3));
+        assert_eq!(result_b.virtual_layout.columns[2].rows[0], WindowId(1));
+    }
+
+    #[test]
+    fn rapid_swap_then_expand_both_return_full_layouts() {
+        // Positive: rapid heterogeneous mutations (swap then expand) must both
+        // return full layouts. Tests that the invariant holds across different
+        // mutation types, not just consecutive same-type mutations.
+        let mut engine = engine_with_three_columns();
+        let total_windows = engine.virtual_layout().window_count();
+
+        // Mutation A: swap column
+        let result_a = engine.swap_column(Direction::Right).expect("swap");
+        assert_eq!(result_a.actual_layout.entries.len(), total_windows);
+
+        // Mutation B: expand column (different mutation type, still rapid)
+        let result_b = engine.expand_column().expect("expand");
+        assert_eq!(
+            result_b.actual_layout.entries.len(),
+            total_windows,
+            "Expand after swap must still return ALL windows in actual_layout.entries"
+        );
+    }
+
+    #[test]
+    fn applied_layout_includes_parked_windows() {
+        // Positive: windows that are off-screen (parked) must still appear in
+        // actual_layout.entries. The projection parks them off-screen with
+        // deterministic rects — they must not be omitted.
+        // Use 5 columns: only ~2 visible at a time on a 1920px monitor.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.add_window(WindowId(4));
+        engine.add_window(WindowId(5));
+        let total_windows = engine.virtual_layout().window_count(); // 5
+
+        // Viewport at offset 0: cols 0-1 visible, cols 2-4 parked right.
+        let layout = engine.actual_layout();
+        assert_eq!(
+            layout.entries.len(),
+            total_windows,
+            "actual_layout must include parked (off-screen) windows, not just visible ones"
+        );
+
+        // Verify ALL window IDs are present, including parked ones
+        for wid in [
+            WindowId(1),
+            WindowId(2),
+            WindowId(3),
+            WindowId(4),
+            WindowId(5),
+        ] {
+            assert!(
+                layout.entries.iter().any(|e| e.window_id == wid),
+                "actual_layout must contain parked window (id={:?})",
+                wid
+            );
+        }
+    }
+
+    #[test]
+    fn applied_layout_after_scroll_contains_all_windows() {
+        // Positive: scrolling changes viewport but all windows must still be present
+        let mut engine = engine_with_three_columns();
+        let total_windows = engine.virtual_layout().window_count();
+
+        let result = engine.scroll_right().expect("scroll");
+        assert_eq!(
+            result.actual_layout.entries.len(),
+            total_windows,
+            "Scroll must return ALL windows in actual_layout.entries (visible + parked)"
         );
     }
 }

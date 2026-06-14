@@ -84,7 +84,7 @@ impl ScrollTilingManager {
     /// Each event follows a pipeline:
     ///
     /// ```text
-    /// HookEvent → registry mutation → layout engine update → animate_diff
+    /// HookEvent → registry mutation → layout engine update → animate_layout
     /// ```
     ///
     /// This method is called before each IPC message read in the main loop,

@@ -38,7 +38,7 @@
 //!      left                  right
 //! ```
 //!
-//! # The 3-Layer Pipeline
+//! # The 2-Layer Pipeline
 //!
 //! Layout computation follows a functional, declarative approach — there is no
 //! mutable "update Column position → propagate to Windows" loop. Instead:
@@ -61,12 +61,10 @@
 //! │  │ Parked-L: WinId(3) @ Rect { x:-964, y:4, ... }        │  │
 //! │  └───────────────────────────────────────────────────────┘  │
 //! │         │                                                   │
-//! │         │  diff::diff()  (classify animation hints)         │
+//! │         │  AppliedLayout { virtual_layout, actual_layout }  │
 //! │         ▼                                                   │
-//! │  Layer 3: LayoutDiff (animation instructions)               │
-//! │  ┌───────────────────────────────────────────────────────┐  │
-//! │  │ WindowMove { WinId(1), from: old_rect, to: new_rect } │  │
-//! │  └───────────────────────────────────────────────────────┘  │
+//! │  Animation layer: compare target rects vs real positions   │
+//! │  (build_tweens filters no-ops; retargets mid-flight wins)  │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -80,7 +78,7 @@
 //! | [`projection`] | Virtual → actual projection with camera shift and parking |
 //! | [`diff`] | Layout diff and [`AnimationHint`] classification |
 //! | [`mutations`] | All pure mutation functions (scroll, focus, swap, resize, etc.) |
-//! | [`engine`] | [`LayoutEngine`] orchestrator that wires mutations → projection → diff |
+//! | [`engine`] | [`LayoutEngine`] orchestrator that wires mutations → projection → [`AppliedLayout`] |
 
 pub mod diff;
 pub mod engine;
@@ -90,4 +88,6 @@ pub mod types;
 
 pub use engine::LayoutEngine;
 pub use mutations::NeighborLocation;
-pub use types::{ActualEntry, ActualLayout, AnimationHint, Column, VirtualLayout, WindowMove};
+pub use types::{
+    ActualEntry, ActualLayout, AnimationHint, AppliedLayout, Column, VirtualLayout, WindowMove,
+};

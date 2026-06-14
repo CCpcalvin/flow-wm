@@ -54,14 +54,14 @@
 //!
 //! ```text
 //! Win32 hook → HookEvent → process_hook_events() → on_window_created/destroyed/...
-//!     → registry.handle_created() → layout.add_window() → animate_diff()
+//!     → registry.handle_created() → layout.add_window() → animate_layout()
 //! ```
 //!
 //! ## IPC Commands
 //!
 //! ```text
 //! stm CLI → SocketMessage → PipeServer → dispatch() → layout.swap_column()
-//!     → animate_diff() → SocketResponse
+//!     → animate_layout() → SocketResponse
 //! ```
 //!
 //! # Module Structure
@@ -74,7 +74,7 @@
 //! - [`hooks`] — Win32 hook event handlers
 //! - [`dispatch`] — IPC command dispatch router and action handlers
 //! - [`query`] — Query handlers (extracted from dispatch)
-//! - [`animation`] — Animation bridge ([`ScrollTilingManager::animate_diff`])
+//! - [`animation`] — Animation bridge ([`ScrollTilingManager::animate_layout`])
 //! - [`config_derive`] — Configuration derivation helpers and tests
 
 mod animation;

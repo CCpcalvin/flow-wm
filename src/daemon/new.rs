@@ -12,7 +12,7 @@
 ///    on the focused column).
 /// 7. Creates [`WindowAnimator`] with Win32 backend and the user's
 ///    configured animation duration (instant if animation is disabled).
-/// 8. Animates the initial layout diff (windows animate to tiling positions).
+/// 8. Animates the initial layout (windows animate to tiling positions).
 /// 9. Starts the WinEvent hook thread.
 /// 10. Creates the IPC named pipe server.
 ///
@@ -33,7 +33,7 @@ use crate::layout::engine::LayoutEngine;
 use crate::layout::types::MonitorInfo;
 use crate::registry::{WindowRegistry, hooks, win32 as registry_win32};
 
-use super::animation::animate_diff_raw;
+use super::animation::animate_layout_raw;
 use super::config_derive;
 use super::types::ScrollTilingManager;
 
@@ -115,18 +115,14 @@ impl ScrollTilingManager {
             });
             log::debug!("init: focus_col = {focus_col:?} (foreground window lookup)");
             let diff = layout.initialize_windows(tiling_ids, focus_col);
-            for m in &diff.moves {
+            for entry in &diff.actual_layout.entries {
                 log::trace!(
-                    "init move: {:?} from ({},{},{},{}) to ({},{},{},{})",
-                    m.window_id,
-                    m.from.x,
-                    m.from.y,
-                    m.from.width,
-                    m.from.height,
-                    m.to.x,
-                    m.to.y,
-                    m.to.width,
-                    m.to.height,
+                    "init target: {:?} rect ({},{},{},{})",
+                    entry.window_id,
+                    entry.rect.x,
+                    entry.rect.y,
+                    entry.rect.width,
+                    entry.rect.height,
                 );
             }
             Some(diff)
@@ -151,9 +147,12 @@ impl ScrollTilingManager {
         // 8. Animate initial layout with user-configured duration.
         if let Some(ref diff) = initial_diff {
             // Use a standalone function to avoid borrow checker issues
-            // — animate_diff takes &mut self, but we don't have Self yet.
-            log::debug!("init: submitting {} moves to animator", diff.moves.len());
-            animate_diff_raw(&mut animator, diff, &registry);
+            // — animate_layout takes &mut self, but we don't have Self yet.
+            log::debug!(
+                "init: submitting {} targets to animator",
+                diff.actual_layout.entries.len()
+            );
+            animate_layout_raw(&mut animator, diff, &registry);
 
             // Sync registry tiling state from the initial layout so that
             // queries return correct col/row and tiled_rect immediately.

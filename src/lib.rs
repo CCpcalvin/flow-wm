@@ -42,7 +42,7 @@
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # The 3-Layer Layout Pipeline
+//! # The 2-Layer Layout Pipeline
 //!
 //! Layout computation follows a functional, declarative pipeline:
 //!
@@ -55,10 +55,12 @@
 //!    Position is *implicit* from column index and cumulative widths — there is
 //!    no mutable "update Column → propagate to Windows" loop.
 //!
-//! 3. **Diff** ([`layout::diff::diff`]) — compares previous and new [`layout::types::ActualLayout`] to
-//!    produce [`layout::types::WindowMove`] instructions with [`layout::types::AnimationHint`]s.
+//! 3. **Animation** — the [`AppliedLayout`](layout::types::AppliedLayout) (new virtual +
+//!    actual layouts) is passed to the animation layer, which compares each window's
+//!    target rect against its real on-screen position and animates only the windows
+//!    that differ.
 //!
-//! Every mutation flows through: **mutate → project → diff**.
+//! Every mutation flows through: **mutate → project → animate**.
 //!
 //! # Ownership Model
 //!
