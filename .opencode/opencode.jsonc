@@ -6,7 +6,8 @@
     "permission": {
         "bash": {
             ".\\target\\debug\\stm.exe*": "allow", 
-            "komorebi stop": "allow",
+            "komorebi stop": "allow", 
+            "graphify*": "allow"
         }
     }
 }
