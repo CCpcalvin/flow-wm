@@ -367,6 +367,58 @@ impl LayoutEngine {
         self.apply_mutation(new_layout)
     }
 
+    /// Insert a new window as a column immediately after the focused window.
+    ///
+    /// This is the **window-creation placement strategy**: when a new tiling
+    /// window is detected, it is placed right next to the currently focused
+    /// window rather than at the far right end of the layout. All columns to
+    /// the right of the focused column shift rightward by one `column_shift`
+    /// on the canvas. Focus then moves to the new window, and the viewport
+    /// adjusts ([`mutations::ensure_column_visible`]) to keep it on screen.
+    ///
+    /// This runs the standard mutation pipeline (mutate → project),
+    /// so the returned [`AppliedLayout`] is ready to pass straight to the
+    /// animation system.
+    ///
+    /// # Edge cases
+    ///
+    /// - **No focused window** (first window in an empty layout): behaves like
+    ///   [`add_window`](Self::add_window) — the new window becomes the sole
+    ///   column.
+    /// - **Stale focus**: if the focused window ID is no longer in the layout,
+    ///   the new column is appended at the end.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use scrolling_tiling_manager::layout::{
+    /// #     LayoutEngine,
+    /// #     types::{MonitorInfo, Padding},
+    /// # };
+    /// # use scrolling_tiling_manager::common::WindowId;
+    /// # let monitor = MonitorInfo {
+    /// #     work_area: scrolling_tiling_manager::common::Rect { x: 0, y: 0, width: 1920, height: 1080 },
+    /// # };
+    /// # let mut engine = LayoutEngine::new(monitor, 960, 4, 320, Padding { window_gap: 4, up: 0, down: 0 }, 4);
+    /// engine.add_window(WindowId(1)); // col 0, focused
+    /// engine.add_window(WindowId(2)); // col 1, focused
+    /// engine.set_focus(WindowId(1));  // focus back to col 0
+    ///
+    /// engine.insert_window(WindowId(3)); // inserted at col 1, between 1 and 2
+    /// assert_eq!(engine.focused(), Some(WindowId(3)));
+    /// ```
+    pub fn insert_window(&mut self, window: WindowId) -> AppliedLayout {
+        let focused = self.focused;
+        let new_layout = mutations::insert_window_after_focused(
+            &self.virtual_layout,
+            focused,
+            window,
+            &self.config,
+        );
+        self.focused = Some(window);
+        self.apply_mutation(new_layout)
+    }
+
     /// Add a window as a new row in the focused column.
     pub fn add_window_to_focused_column(&mut self, window: WindowId) -> Option<AppliedLayout> {
         let focused = self.focused?;
@@ -376,19 +428,74 @@ impl LayoutEngine {
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Remove a window from the layout.
+    /// Remove a window from the layout and update focus.
+    ///
+    /// This implements the **window-removal pipeline**:
+    ///
+    /// 1. **Locate** the window's `(col, row)` in the virtual layout (before
+    ///    removal).
+    /// 2. **Focus resolution** — if the removed window was the focused window,
+    ///    pick a successor via [`mutations::next_available_window`] (left
+    ///    column preferred, then right). Otherwise focus is unchanged.
+    /// 3. **Remove** the window from the virtual layout. Because projection
+    ///    computes canvas positions cumulatively (a running `canvas_x`
+    ///    accumulator), deleting a column naturally shifts every window to its
+    ///    right leftward by one slot width — no explicit viewport adjustment is
+    ///    needed. This is the "natural compression" property.
+    /// 4. **Ensure visibility** — if there is a focused window after removal,
+    ///    scroll the viewport so its column is on-screen
+    ///    ([`mutations::ensure_column_visible`]).
+    /// 5. **Apply** — project the new layout to produce the [`AppliedLayout`]
+    ///    (canvas positions for every window), which is passed directly to the
+    ///    animation system.
+    ///
+    /// # Focus fallback
+    ///
+    /// When the focused window is removed, focus moves to the **left** adjacent
+    /// column's closest-row window, or — if there is no left column — the
+    /// **right** adjacent column's closest-row window. If the removed window
+    /// was the only one in the layout, focus becomes `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` — the [`WindowId`] to remove.
+    ///
+    /// # Returns
+    ///
+    /// An [`AppliedLayout`] describing the new layout and all window positions,
+    /// to be passed to the animation system.
     pub fn remove_window(&mut self, window: WindowId) -> AppliedLayout {
-        let new_layout = mutations::remove_window(&self.virtual_layout, window, &self.config);
+        // 1. Find the window's position before removal.
+        let pos = self.virtual_layout.find_window(window);
+        let was_focused = self.focused == Some(window);
 
-        // Update focus
-        if self.focused == Some(window) {
-            self.focused = self
-                .virtual_layout
-                .columns
-                .first()
-                .and_then(|c| c.rows.first().copied());
+        // 2. Resolve the new focus if the removed window was focused.
+        //    `next_available_window` operates on the pre-removal layout, so it
+        //    must run before step 3.
+        let new_focused = if was_focused {
+            pos.and_then(|(col, row)| {
+                mutations::next_available_window(&self.virtual_layout, col, row)
+            })
+        } else {
+            self.focused
+        };
+
+        // 3. Remove the window from the virtual layout.
+        //    Natural compression: deleting a column shifts right-side windows
+        //    left by their slot width during projection — no explicit shift.
+        let mut new_layout = mutations::remove_window(&self.virtual_layout, window, &self.config);
+
+        // Commit the new focus.
+        self.focused = new_focused;
+
+        // 4. Ensure the focused window's column is visible (if any focus remains).
+        if let Some(focused) = new_focused
+            && let Some((col, _)) = new_layout.find_window(focused)
+        {
+            new_layout = mutations::ensure_column_visible(&new_layout, col, &self.config);
         }
 
+        // 5. Project + diff → animation instructions.
         self.apply_mutation(new_layout)
     }
 
@@ -508,10 +615,11 @@ mod tests {
     #[test]
     fn engine_remove_window_updates_focus() {
         let mut engine = engine_with_three_columns();
+        // Layout: [W1][W2][W3], focus on W2 (col 1).
         engine.set_focus(WindowId(2));
         let _ = engine.remove_window(WindowId(2));
-        // Focus should fall back to first window of first column
-        assert!(engine.focused().is_some());
+        // Focus should fall back to the LEFT column's window (W1).
+        assert_eq!(engine.focused(), Some(WindowId(1)));
     }
 
     #[test]
@@ -678,6 +786,91 @@ mod tests {
         assert!(engine.add_window_to_focused_column(WindowId(1)).is_none());
     }
 
+    // --- Engine insert_window tests ---
+
+    #[test]
+    fn engine_insert_window_into_empty_layout() {
+        // Positive: first window in empty layout → sole column, focused.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.insert_window(WindowId(1));
+        assert_eq!(engine.virtual_layout().columns.len(), 1);
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn engine_insert_window_after_focused_shifts_right() {
+        // Positive: insert between focused col 0 and col 1.
+        // Layout: [W1][W2][W3], focus W1. insert W4 → [W1][W4][W2][W3].
+        let mut engine = engine_with_three_columns();
+        // engine_with_three_columns sets focus to W1 (col 0)
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+
+        engine.insert_window(WindowId(4));
+        assert_eq!(engine.virtual_layout().columns.len(), 4);
+        assert_eq!(engine.virtual_layout().columns[0].rows[0], WindowId(1));
+        assert_eq!(engine.virtual_layout().columns[1].rows[0], WindowId(4)); // new
+        assert_eq!(engine.virtual_layout().columns[2].rows[0], WindowId(2)); // shifted
+        assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(3)); // shifted
+        assert_eq!(engine.focused(), Some(WindowId(4))); // focus moved to new
+    }
+
+    #[test]
+    fn engine_insert_window_after_last_column() {
+        // Positive: focused on last column → insert at end.
+        let mut engine = engine_with_three_columns();
+        engine.set_focus(WindowId(3)); // last column
+
+        let _ = engine.insert_window(WindowId(4));
+        assert_eq!(engine.virtual_layout().columns.len(), 4);
+        assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(4));
+        assert_eq!(engine.focused(), Some(WindowId(4)));
+    }
+
+    #[test]
+    fn engine_insert_window_after_middle_column() {
+        // Positive: focused on col 1 (middle) → insert at index 2.
+        let mut engine = engine_with_three_columns();
+        engine.set_focus(WindowId(2));
+
+        let _ = engine.insert_window(WindowId(4));
+        assert_eq!(engine.virtual_layout().columns.len(), 4);
+        assert_eq!(engine.virtual_layout().columns[0].rows[0], WindowId(1)); // unchanged
+        assert_eq!(engine.virtual_layout().columns[1].rows[0], WindowId(2)); // unchanged
+        assert_eq!(engine.virtual_layout().columns[2].rows[0], WindowId(4)); // new
+        assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(3)); // shifted
+    }
+
+    #[test]
+    fn engine_insert_window_scrolls_when_new_column_offscreen() {
+        // Positive: many columns, insert creates a column off-screen right →
+        // viewport scrolls to reveal it.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(1)); // focus leftmost (col 0)
+
+        engine.insert_window(WindowId(4));
+        // New column at index 1. With 4 columns × 960px > 1920px viewport,
+        // ensure_column_visible keeps the new column visible.
+        assert_eq!(engine.focused(), Some(WindowId(4)));
+    }
+
+    #[test]
+    fn engine_insert_window_after_remove_falls_back() {
+        // Negative/edge: after removing the focused window, focus falls back
+        // to the first column. Inserting then uses that focus as the anchor.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        // Remove focused (W2) → focus falls back to W1 (first column).
+        let _ = engine.remove_window(WindowId(2));
+        // Insert W3 after focused (W1) → W3 at col 1.
+        engine.insert_window(WindowId(3));
+        assert_eq!(engine.virtual_layout().columns.len(), 2);
+        assert_eq!(engine.focused(), Some(WindowId(3)));
+    }
+
     #[test]
     fn engine_monocle_then_add_window() {
         // Positive: monocle on, add window (new column), toggle off on same column
@@ -771,7 +964,7 @@ mod tests {
 
     #[test]
     fn engine_remove_focused_window_focus_falls_back() {
-        // Positive: removing focused window falls back to first available
+        // Positive: removing a focused middle window falls back to the LEFT column.
         let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
@@ -779,9 +972,169 @@ mod tests {
         engine.set_focus(WindowId(2));
 
         let _ = engine.remove_window(WindowId(2));
-        // Focus should be some remaining window (first of first column)
-        assert!(engine.focused().is_some());
-        assert_ne!(engine.focused(), Some(WindowId(2)));
+        // Focus falls back to the left column's window (W1).
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn engine_remove_focused_leftmost_falls_to_right() {
+        // Removing the focused leftmost window has no left column, so focus
+        // falls back to the RIGHT column's window.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(1));
+
+        let _ = engine.remove_window(WindowId(1));
+        assert_eq!(engine.focused(), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn engine_remove_focused_rightmost_falls_to_left() {
+        // Removing the focused rightmost window falls back to the LEFT column.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(3));
+
+        let _ = engine.remove_window(WindowId(3));
+        assert_eq!(engine.focused(), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn engine_remove_only_window_clears_focus() {
+        // Removing the only window leaves focus as None.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+
+        let _ = engine.remove_window(WindowId(1));
+        assert_eq!(engine.focused(), None);
+        assert!(engine.virtual_layout().columns.is_empty());
+    }
+
+    #[test]
+    fn engine_remove_nonfocused_keeps_focus() {
+        // Removing a non-focused window must not change focus.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(1));
+
+        let _ = engine.remove_window(WindowId(2));
+        assert_eq!(engine.focused(), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn engine_remove_nonexistent_window_is_noop() {
+        // Negative: removing a window that doesn't exist in the layout should
+        // not crash, not change focus, and not alter the layout.
+        let mut engine = engine_with_three_columns();
+        engine.set_focus(WindowId(1));
+
+        let diff = engine.remove_window(WindowId(99));
+        assert_eq!(engine.focused(), Some(WindowId(1)), "focus must not change");
+        assert_eq!(
+            diff.virtual_layout.columns.len(),
+            3,
+            "column count must not change"
+        );
+        assert_eq!(
+            diff.virtual_layout.window_count(),
+            3,
+            "window count must not change"
+        );
+    }
+
+    #[test]
+    fn engine_remove_from_multirow_column_preserves_column() {
+        // Positive: removing a window from a multi-row column removes only the
+        // row — the column persists with the remaining window.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window_to_focused_column(WindowId(2));
+        // Layout: [W1, W2] in one column. Focus on W2.
+
+        let _ = engine.remove_window(WindowId(2));
+        // Column should still exist with W1.
+        assert_eq!(engine.virtual_layout().columns.len(), 1);
+        assert_eq!(engine.virtual_layout().columns[0].rows.len(), 1);
+        assert_eq!(engine.virtual_layout().columns[0].rows[0], WindowId(1));
+        // Focus was on W2 (removed). next_available_window at (col 0, row 1):
+        // no left, no right → None. Focus becomes None.
+        assert_eq!(
+            engine.focused(),
+            None,
+            "focus should be None after removing the focused window from a single-column multi-row layout"
+        );
+    }
+
+    #[test]
+    fn engine_remove_nonfocused_left_of_focus_shifts_column_index() {
+        // Positive: removing a non-focused window from a column to the LEFT of
+        // the focused window shifts the focused window's column index left by 1.
+        // The viewport should still show the focused window correctly.
+        // Layout: [W1][W2][W3], focus W3 (col 2). Remove W1 (col 0).
+        // After removal: [W2][W3], W3 is now at col 1.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(3));
+
+        let diff = engine.remove_window(WindowId(1));
+        // Focus should be unchanged (W3 was not removed).
+        assert_eq!(engine.focused(), Some(WindowId(3)));
+        // Layout should have 2 columns.
+        assert_eq!(diff.virtual_layout.columns.len(), 2);
+        // W3 should be in column index 1 (shifted from 2).
+        assert_eq!(diff.virtual_layout.columns[1].rows[0], WindowId(3));
+    }
+
+    #[test]
+    fn engine_remove_focused_scrolls_to_successor() {
+        // Positive: removing the focused window when the successor's column is
+        // off-screen should scroll the viewport to reveal the successor.
+        // Setup: 4 columns, viewport scrolled to show columns 2–3, focus on col 3.
+        // Remove col 3's window → successor is col 2 (left) which is already
+        // visible, so viewport doesn't scroll. Then test a case where successor
+        // IS off-screen: focus col 3, scroll viewport so col 0 is visible only,
+        // then remove col 3 → successor col 2 is off-screen → viewport adjusts.
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.add_window(WindowId(4));
+        engine.set_focus(WindowId(4));
+
+        // Scroll viewport so only the first column is visible (viewport_offset = 0).
+        // All 4 columns span ~3860px, viewport is 1920px. Col 0 is at [4, 964],
+        // col 1 at [968, 1928], col 2 at [1932, 2892], col 3 at [2896, 3860].
+        // Only col 0 is fully visible from offset 0.
+
+        let prev_offset = engine.virtual_layout().viewport_offset;
+        let diff = engine.remove_window(WindowId(4));
+        // Focus should fall to W3 (left neighbour).
+        assert_eq!(engine.focused(), Some(WindowId(3)));
+        // W3 is now in column index 2 (columns shifted after removal).
+        // W3's column is at canvas position ~1932, which is off-screen from
+        // offset 0 (viewport right = 1920). ensure_column_visible should scroll.
+        assert_eq!(
+            diff.virtual_layout.columns.len(),
+            3,
+            "should have 3 columns after removing W4"
+        );
+        // The viewport_offset should have changed (or at minimum, the diff
+        // should contain moves if any viewport shift happened).
+        // W3 at col 2, canvas ~1932. ensure_column_visible should shift viewport.
+        // The exact offset depends on the quantization math, but it should be
+        // non-zero because col 2 is off-screen at offset 0.
+        assert_ne!(
+            diff.virtual_layout.viewport_offset, prev_offset,
+            "viewport should scroll to reveal successor column that is off-screen"
+        );
     }
 
     #[test]

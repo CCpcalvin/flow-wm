@@ -345,6 +345,26 @@ pub fn send_ipc_ignore(pipe: &str, msg: &scrolling_tiling_manager::ipc::message:
     let _ = transport::send_message_to(pipe, msg);
 }
 
+/// Send `stm query layout actual` and return the JSON response.
+///
+/// Returns the actual (projected) layout: pixel-level rects for each window
+/// after projection and padding. Intended for integration tests to verify that
+/// remaining windows physically shift left after a column is removed.
+#[allow(dead_code)]
+pub fn query_layout_actual(pipe: &str) -> Result<serde_json::Value, String> {
+    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
+    use scrolling_tiling_manager::ipc::transport;
+
+    let response = transport::send_message_to(pipe, &SocketMessage::QueryLayoutActual)
+        .map_err(|e| format!("query layout actual failed: {e}"))?;
+
+    match response {
+        SocketResponse::Data { payload } => Ok(payload),
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Ok => Err("unexpected Ok response".into()),
+    }
+}
+
 /// Stop the test daemon by sending the Stop IPC command.
 ///
 /// Uses [`transport::send_message_to`] with the pipe name directly — no

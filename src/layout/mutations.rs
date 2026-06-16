@@ -167,6 +167,78 @@ fn closest_row(column: &Column, preferred_row: usize) -> usize {
     preferred_row.min(column.rows.len().saturating_sub(1))
 }
 
+/// Find the next window to focus after a window is removed.
+///
+/// Given the `(col, row)` of a window that is **about to be removed** (on the
+/// layout *before* removal), returns the best candidate to receive focus:
+///
+/// 1. **Left column** — if `col > 0`, the window in column `col - 1` whose row
+///    is closest to the removed window's row.
+/// 2. **Right column** — otherwise, if a column exists to the right
+///    (`col + 1 < columns.len()`), the window in column `col + 1` whose row is
+///    closest to the removed window's row.
+/// 3. **None** — if there is no column on either side (the removed window was
+///    the only one in the layout).
+///
+/// # Design decision: horizontal neighbours only
+///
+/// This function deliberately considers only *horizontal* neighbours (adjacent
+/// columns), not vertical siblings within the same column. In the scrolling
+/// horizontal-canvas model, focus after removal snaps to an adjacent column so
+/// the user's attention stays at roughly the same horizontal position. Windows
+/// stacked in the same column as the removed one are *not* chosen even when
+/// they exist — this matches the left-then-right preference the tiling manager
+/// uses throughout its focus model.
+///
+/// # Column non-emptiness invariant
+///
+/// Every column in a [`VirtualLayout`] always contains at least one row: the
+/// mutation API deletes a column the moment its last row is removed, and no
+/// mutation ever creates an empty column. Therefore indexing into the chosen
+/// neighbour's `rows` after [`closest_row`] is always safe.
+///
+/// # Arguments
+///
+/// * `layout` — the virtual layout **before** the window is removed.
+/// * `col` — the column index of the window being removed.
+/// * `row` — the row index of the window being removed (used to pick the
+///   closest row in the neighbour column).
+///
+/// # Returns
+///
+/// The [`WindowId`] of the best focus candidate, or `None` if the layout has
+/// no horizontal neighbours for the removed window.
+///
+/// # Examples
+///
+/// ```text
+/// Col 0        Col 1        Col 2
+/// [W1]         [W3]         [W5]
+///              [W4]
+///
+/// Removing W3 (col 1, row 0) → left col 0, closest row → W1
+/// Removing W1 (col 0, row 0) → no left, right col 1, closest row → W3
+/// Removing W5 (col 2, row 0) → left col 1, closest row → W3
+/// ```
+#[must_use]
+pub fn next_available_window(layout: &VirtualLayout, col: usize, row: usize) -> Option<WindowId> {
+    // Prefer the column to the left.
+    if col > 0 {
+        let left = &layout.columns[col - 1];
+        let r = closest_row(left, row);
+        return Some(left.rows[r]);
+    }
+    // Otherwise, fall back to the column to the right.
+    let right_idx = col + 1;
+    if right_idx < layout.columns.len() {
+        let right = &layout.columns[right_idx];
+        let r = closest_row(right, row);
+        return Some(right.rows[r]);
+    }
+    // No neighbour on either side — the removed window was the only one.
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Scroll mutations
 // ---------------------------------------------------------------------------
@@ -917,6 +989,65 @@ pub fn add_window(
     new_layout
 }
 
+/// Insert a new window as a column immediately **after** the focused window's
+/// column.
+///
+/// This is the window-creation placement strategy: rather than appending the
+/// new window to the far right end of the layout (which [`add_window`] does),
+/// this inserts it right next to the focused window so the user sees their
+/// newly opened window adjacent to where they were working.
+///
+/// # How "make space" works
+///
+/// In the virtual layout, columns are stored in a `Vec` and their canvas
+/// positions are derived from that order. Inserting a new column at index
+/// `focused_col + 1` pushes every column to the right of the insertion point
+/// rightward by exactly one `column_shift` (= `column_width + window_gap`) on
+/// the canvas — no manual coordinate math is needed. This is the "make space"
+/// step the placement algorithm describes.
+///
+/// # Edge cases
+///
+/// - **No focused window** (empty layout, first window): the new column is
+///   appended at the end, which for an empty layout means it becomes the sole
+///   column.
+/// - **Focused window is the last column**: insertion at `col + 1` is
+///   equivalent to appending at the end.
+/// - **Focused window not found** (stale focus): falls back to appending at
+///   the end.
+///
+/// # Viewport
+///
+/// After insertion, [`ensure_column_visible`] is called on the new column's
+/// index to bring it into the viewport. If the new column is already visible
+/// (e.g. there is room on screen), the viewport is unchanged. If it is
+/// off-screen right, the camera scrolls right by a quantized `column_shift`.
+///
+/// The caller is responsible for setting focus to the new window — this
+/// function only computes the layout.
+#[must_use]
+pub fn insert_window_after_focused(
+    layout: &VirtualLayout,
+    focused: Option<WindowId>,
+    window: WindowId,
+    config: &MutationConfig,
+) -> VirtualLayout {
+    let mut new_layout = layout.clone();
+    let new_column = Column::new(config.default_column_width_eighths, window);
+
+    // Determine the insertion index: immediately after the focused column.
+    // Falls back to the end when there is no focus or the focused window is
+    // no longer present (stale focus / empty layout).
+    let insert_idx = focused
+        .and_then(|f| layout.find_window(f))
+        .map(|(col, _)| col + 1)
+        .unwrap_or_else(|| new_layout.columns.len());
+
+    new_layout.columns.insert(insert_idx, new_column);
+
+    ensure_column_visible(&new_layout, insert_idx, config)
+}
+
 /// Add a window to an existing column as a new row (vertical container append).
 #[must_use]
 pub fn add_window_to_column(
@@ -1041,6 +1172,84 @@ mod tests {
             ],
             0,
         )
+    }
+
+    // --- next_available_window ---
+
+    #[test]
+    fn next_available_prefers_left_column() {
+        // Layout: [W1][W2][W3]; removing W2 (col 1, row 0) → left col 0 → W1.
+        let layout = three_column_layout();
+        assert_eq!(next_available_window(&layout, 1, 0), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn next_available_leftmost_falls_to_right() {
+        // Removing W1 (col 0) has no left → right col 1 → W2.
+        let layout = three_column_layout();
+        assert_eq!(next_available_window(&layout, 0, 0), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn next_available_rightmost_falls_to_left() {
+        // Removing W3 (col 2) → left col 1 → W2.
+        let layout = three_column_layout();
+        assert_eq!(next_available_window(&layout, 2, 0), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn next_available_only_window_returns_none() {
+        // Single column [W1]; removing W1 (col 0) → no neighbours → None.
+        let layout = VirtualLayout::with_columns(vec![Column::new(4, WindowId(1))], 0);
+        assert_eq!(next_available_window(&layout, 0, 0), None);
+    }
+
+    #[test]
+    fn next_available_clamps_row_to_neighbour() {
+        // Layout: col 0 has 1 row [W1], col 1 has 2 rows [W2, W3].
+        // Removing a window at (col 1, row 1): left col 0 has only 1 row, so
+        // the closest row clamps to 0 → W1.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3)]),
+            ],
+            0,
+        );
+        assert_eq!(next_available_window(&layout, 1, 1), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn next_available_picks_closest_row_in_left_column() {
+        // Layout: col 0 has 2 rows [W1, W4], col 1 has 3 rows [W2, W3, W5].
+        // Removing (col 1, row 2): left col 0, closest row clamps 2 → 1 → W4.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_equal_rows(4, vec![WindowId(1), WindowId(4)]),
+                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(5)]),
+            ],
+            0,
+        );
+        assert_eq!(next_available_window(&layout, 1, 2), Some(WindowId(4)));
+    }
+
+    #[test]
+    fn next_available_single_column_multirow_returns_none() {
+        // Negative: single column with multiple rows — no horizontal neighbours
+        // exist, so the result is None even though vertical siblings (W1, W3)
+        // remain in the same column. This validates the "horizontal neighbours
+        // only" design decision documented in next_available_window's docstring.
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_equal_rows(
+                4,
+                vec![WindowId(1), WindowId(2), WindowId(3)],
+            )],
+            0,
+        );
+        // Removing W2 at (col 0, row 1): no left, no right → None.
+        assert_eq!(next_available_window(&layout, 0, 1), None);
+        // Removing W1 at (col 0, row 0): same result.
+        assert_eq!(next_available_window(&layout, 0, 0), None);
     }
 
     // --- Scroll ---
@@ -1918,6 +2127,93 @@ mod tests {
         assert_eq!(result.columns.len(), 4);
         assert_eq!(result.columns[3].rows[0], WindowId(10));
         assert_eq!(result.columns[3].width_eighths, 4);
+    }
+
+    // --- insert_window_after_focused ---
+
+    #[test]
+    fn insert_after_focused_inserts_between_columns() {
+        // Positive: focused on col 0 → new column inserted at index 1,
+        // shifting the old col 1 and col 2 rightward.
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(1)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[0].rows[0], WindowId(1)); // unchanged
+        assert_eq!(result.columns[1].rows[0], WindowId(10)); // new window
+        assert_eq!(result.columns[2].rows[0], WindowId(2)); // shifted right
+        assert_eq!(result.columns[3].rows[0], WindowId(3)); // shifted right
+    }
+
+    #[test]
+    fn insert_after_focused_middle_column() {
+        // Positive: focused on col 1 (middle) → insert at index 2.
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(2)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[0].rows[0], WindowId(1)); // unchanged
+        assert_eq!(result.columns[1].rows[0], WindowId(2)); // unchanged
+        assert_eq!(result.columns[2].rows[0], WindowId(10)); // new
+        assert_eq!(result.columns[3].rows[0], WindowId(3)); // shifted right
+    }
+
+    #[test]
+    fn insert_after_focused_last_column_appends() {
+        // Positive: focused on last column → insert at end (same as append).
+        let layout = three_column_layout();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(3)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[3].rows[0], WindowId(10));
+    }
+
+    #[test]
+    fn insert_after_focused_no_focus_appends_to_empty() {
+        // Positive: no focus + empty layout → single column.
+        let layout = VirtualLayout::new();
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, None, WindowId(1), &config);
+        assert_eq!(result.columns.len(), 1);
+        assert_eq!(result.columns[0].rows[0], WindowId(1));
+    }
+
+    #[test]
+    fn insert_after_focused_stale_focus_appends() {
+        // Negative: focused window not in layout (stale) → append at end.
+        let layout = three_column_layout();
+        let config = test_config();
+        let result =
+            insert_window_after_focused(&layout, Some(WindowId(99)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.columns[3].rows[0], WindowId(10));
+    }
+
+    #[test]
+    fn insert_after_focused_brings_new_column_into_view() {
+        // Positive: when the new column is off-screen right, the viewport
+        // scrolls to make it visible.
+        // 4 columns at 960px each, monitor 1920 → only 2 visible. Focus col 1.
+        // Insert after col 1 → new col at index 2, which is off-screen right.
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(4, WindowId(1)),
+                Column::new(4, WindowId(2)),
+                Column::new(4, WindowId(3)),
+                Column::new(4, WindowId(4)),
+            ],
+            0,
+        );
+        let config = test_config();
+        let result = insert_window_after_focused(&layout, Some(WindowId(2)), WindowId(10), &config);
+        assert_eq!(result.columns.len(), 5);
+        assert_eq!(result.columns[2].rows[0], WindowId(10));
+        // Viewport should have scrolled right to reveal the new column.
+        assert!(
+            result.viewport_offset > 0,
+            "viewport should scroll to reveal newly inserted column, got offset {}",
+            result.viewport_offset
+        );
     }
 
     #[test]
