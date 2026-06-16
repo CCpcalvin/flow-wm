@@ -12,7 +12,7 @@ use crate::floating::FloatingManager;
 use crate::ipc::transport::PipeServer;
 use crate::layout::engine::LayoutEngine;
 use crate::registry::WindowRegistry;
-use crate::registry::hooks::HookThreadHandle;
+use crate::registry::hooks::{HookSignal, HookThreadHandle};
 
 /// Intermediate struct holding layout engine parameters derived from
 /// [`StmConfig`]. Used during construction to keep the parameter list
@@ -129,7 +129,40 @@ pub struct ScrollTilingManager {
     /// which posts `WM_QUIT` to the hook thread's message loop.
     pub(super) _hook_handle: HookThreadHandle,
 
+    /// Win32 Event handle signaled by the hook callback thread.
+    ///
+    /// The main event loop waits on this via `WaitForMultipleObjects` so hook
+    /// events (window create/destroy/focus) are processed immediately, even
+    /// when no IPC client is connected.
+    ///
+    /// RAII: closed automatically on drop via `HookSignal`'s `Drop` impl.
+    pub(super) hook_signal: HookSignal,
+
     /// Set to `true` when the `Stop` IPC command is received, causing
     /// the main event loop to exit on the next iteration.
     pub(super) shutting_down: bool,
+
+    /// Windows whose `Created` hook event fired before they were fully
+    /// initialized (not yet visible, no title, styles not finalized).
+    ///
+    /// Each entry is `(hwnd, retry_count)`. On every `process_hook_events`
+    /// call, pending windows are retried via `handle_created`. A window is
+    /// removed from the list when classification succeeds or when
+    /// `retry_count` exceeds `MAX_PENDING_RETRIES`.
+    ///
+    /// # Why this is needed
+    ///
+    /// `EVENT_OBJECT_CREATE` fires early in the Win32 window lifecycle —
+    /// before `ShowWindow`, `SetWindowText`, or style finalization. With
+    /// the event-driven loop (ResetEvent + immediate drain), hook events
+    /// are processed within microseconds of arrival, so the window's
+    /// classification checks (`is_window_visible`, title non-empty, etc.)
+    /// fail. A short retry gives the window time to finish initializing.
+    ///
+    /// # Timeout interaction
+    ///
+    /// When this list is non-empty, `run()` uses a finite timeout (100 ms)
+    /// on `WaitForMultipleObjects` instead of `INFINITE`. This ensures
+    /// pending windows are retried even if no new hook events arrive.
+    pub(super) pending_creations: Vec<(isize, u8)>,
 }

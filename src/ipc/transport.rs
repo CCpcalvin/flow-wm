@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -17,6 +17,7 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};
 
 use super::message::{self, SocketMessage, SocketResponse};
 
@@ -48,24 +49,104 @@ impl Drop for PipeHandle {
 // Safety: HANDLE is a raw pointer-like value. We manage its lifetime via Drop.
 unsafe impl Send for PipeHandle {}
 
+/// RAII wrapper around a Win32 Event handle used for I/O signaling.
+///
+/// Created via [`CreateEventW`] (manual-reset mode, initially unset). The
+/// handle is closed automatically when this wrapper is dropped, preventing
+/// kernel handle leaks.
+///
+/// # Design
+///
+/// In the daemon's event-driven architecture, an [`EventHandle`] bridges
+/// between a background thread (blocked in `ConnectNamedPipe`) and the main
+/// thread (blocked in `WaitForMultipleObjects`). When the accept thread
+/// detects a client connection it calls [`SetEvent`], waking the main thread
+/// so it can proceed with IPC processing.
+#[derive(Debug)]
+struct EventHandle(HANDLE);
+
+impl EventHandle {
+    /// Creates a new manual-reset event that is initially unset.
+    ///
+    /// A manual-reset event stays signaled until explicitly reset, which is
+    /// the correct semantic here: once a client connects, the event remains
+    /// signaled until the main thread processes the connection and calls
+    /// `start_accept` for the next one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`CreateEventW`] fails or returns an invalid handle.
+    fn new() -> io::Result<Self> {
+        let handle = unsafe { CreateEventW(None, true, false, windows::core::PCWSTR::null()) }
+            .map_err(|e| io::Error::other(format!("CreateEventW failed: {e}")))?;
+
+        if handle.is_invalid() {
+            return Err(io::Error::other("CreateEventW returned invalid handle"));
+        }
+
+        Ok(Self(handle))
+    }
+
+    /// Returns the raw [`HANDLE`] for use with `WaitForMultipleObjects`.
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for EventHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+// SAFETY: HANDLE is a process-wide kernel object identifier. Sending it
+// across threads is safe — the kernel synchronizes access to the event object.
+unsafe impl Send for EventHandle {}
+
 /// Named pipe server for the `stmd` daemon.
 ///
 /// Listens on `\\.\pipe\stm`, accepts one client at a time (sequential),
 /// reads newline-delimited JSON messages, and writes responses.
+///
+/// # Event-Driven Architecture
+///
+/// Instead of blocking the main thread in `ConnectNamedPipe`, the server
+/// uses a background accept thread. The flow is:
+///
+/// 1. Main thread calls [`start_accept()`] to spawn a one-shot thread that
+///    blocks in `ConnectNamedPipe`.
+/// 2. When a client connects, the accept thread calls `SetEvent` on the
+///    `connected_event`, waking the main thread's `WaitForMultipleObjects`.
+/// 3. The main thread processes IPC messages via [`read_message()`] /
+///    [`write_response()`], then calls [`disconnect()`] and [`start_accept()`]
+///    to accept the next client.
+///
+/// This decouples pipe-accept blocking from the main loop, allowing hook
+/// events (window creation/removal) to be processed immediately even when no
+/// CLI client is connected.
 pub struct PipeServer {
     handle: PipeHandle,
+    /// Manual-reset event signaled when a client connects to the pipe.
+    /// The main thread waits on this via `WaitForMultipleObjects`.
+    connected_event: EventHandle,
+    /// Background thread blocked in `ConnectNamedPipe`.
+    /// `None` when no accept is pending.
+    accept_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PipeServer {
     /// Create a new named pipe server instance.
     ///
-    /// This creates the pipe in a listening state. Call [`Self::wait_for_client`]
-    /// to accept a connection.
+    /// This creates the pipe and the `connected_event` Win32 event object.
+    /// The pipe is ready to accept connections — call [`Self::start_accept`]
+    /// to begin listening on a background thread.
     ///
     /// # Errors
     ///
     /// Returns an error if the pipe cannot be created (e.g., another daemon is
-    /// already running).
+    /// already running) or if the event object cannot be created.
     pub fn create() -> io::Result<Self> {
         let name = wide(&message::pipe_name());
 
@@ -93,30 +174,83 @@ impl PipeServer {
             ));
         }
 
+        let connected_event = EventHandle::new()?;
+
         Ok(Self {
             handle: PipeHandle(handle),
+            connected_event,
+            accept_thread: None,
         })
     }
 
-    /// Block until a client connects to the pipe.
+    /// Start accepting the next client connection on a background thread.
     ///
-    /// # Errors
+    /// Spawns a short-lived thread that calls `ConnectNamedPipe` (blocking).
+    /// When a client connects, the thread signals `connected_event` via
+    /// `SetEvent` and exits. The main thread should use
+    /// [`connected_event_handle`] to obtain the event handle for
+    /// `WaitForMultipleObjects`.
     ///
-    /// Returns an error if the connection fails unexpectedly.
-    pub fn wait_for_client(&self) -> io::Result<()> {
-        let result = unsafe { ConnectNamedPipe(self.handle.raw(), None) };
-        if let Err(e) = result {
-            // ERROR_PIPE_CONNECTED (536) means a client already connected
-            // before we called ConnectNamedPipe — this is a success case.
-            let err = unsafe { GetLastError() };
-            if err.0 != 536 {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!("ConnectNamedPipe failed: {e}"),
-                ));
-            }
+    /// Call this method:
+    /// - Once at startup (before entering the main loop)
+    /// - After each client disconnects (to accept the next client)
+    pub fn start_accept(&mut self) {
+        // Join the previous accept thread if it exists.
+        // The accept thread is one-shot: it exits after ConnectNamedPipe
+        // returns and SetEvent is called. By the time we get here, the
+        // thread has already finished, so join() returns immediately.
+        if let Some(handle) = self.accept_thread.take()
+            && let Err(e) = handle.join()
+        {
+            log::warn!("PipeServer: previous accept thread panicked: {e:?}");
         }
-        Ok(())
+
+        // Reset the connected event before spawning a new accept thread.
+        let _ = unsafe { ResetEvent(self.connected_event.raw()) };
+
+        let handle = self.handle.raw().0 as isize;
+        let event = self.connected_event.raw().0 as isize;
+
+        self.accept_thread = Some(std::thread::spawn(move || {
+            // Block until a client connects. This runs on a background thread
+            // so the main thread is free to process hook events.
+            //
+            // SAFETY: HANDLE values are process-wide kernel object identifiers.
+            // We pass them as isize to satisfy Send requirements (HANDLE itself
+            // is !Send in windows-rs), then reconstruct inside the closure.
+            let pipe = HANDLE(handle as *mut core::ffi::c_void);
+            let event = HANDLE(event as *mut core::ffi::c_void);
+            let result = unsafe { ConnectNamedPipe(pipe, None) };
+            match result {
+                Ok(()) => {}
+                Err(e) => {
+                    // ERROR_PIPE_CONNECTED (Win32 error 535 / 0x217, HRESULT
+                    // 0x80070217) means a client already connected before we
+                    // called ConnectNamedPipe — this is a success case.
+                    //
+                    // We compare the HRESULT from the error object rather than
+                    // GetLastError() because windows-rs may have called other
+                    // Win32 functions internally that changed the last error.
+                    let hresult = e.code();
+                    let is_pipe_connected =
+                        hresult == windows::core::HRESULT(0x8007_0217_u32 as i32);
+                    if !is_pipe_connected {
+                        log::error!("PipeServer accept thread: ConnectNamedPipe failed: {e}");
+                        return;
+                    }
+                }
+            }
+            // Signal the main thread that a client is connected.
+            let _ = unsafe { SetEvent(event) };
+        }));
+    }
+
+    /// Returns the event handle that is signaled when a client connects.
+    ///
+    /// Used by the main thread with `WaitForMultipleObjects` to wait for
+    /// either hook events or pipe connections simultaneously.
+    pub fn connected_event_handle(&self) -> HANDLE {
+        self.connected_event.raw()
     }
 
     /// Read a single newline-terminated JSON message from the client.

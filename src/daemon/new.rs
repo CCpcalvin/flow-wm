@@ -9,18 +9,18 @@
 //! 5. Creates [`LayoutEngine`] with those parameters.
 //! 6. Batch-initializes layout from existing tiling windows (sorted by x
 //!    coordinate for deterministic column assignment; viewport centered
-///    on the focused column).
-/// 7. Creates [`WindowAnimator`] with Win32 backend and the user's
-///    configured animation duration (instant if animation is disabled).
-/// 8. Animates the initial layout diff (windows animate to tiling positions).
-/// 9. Starts the WinEvent hook thread.
-/// 10. Creates the IPC named pipe server.
-///
-/// # Config Model
-///
-/// The `app_config` parameter is already a fully-resolved [`StmConfig`]:
-/// serde defaults (see [`config::defaults`]) fill in any fields absent from
-/// the user's `stm.toml`. No further merging is needed here.
+//!    on the focused column).
+//! 7. Creates [`WindowAnimator`] with Win32 backend and the user's
+//!    configured animation duration (instant if animation is disabled).
+//! 8. Animates the initial layout diff (windows animate to tiling positions).
+//! 9. Starts the WinEvent hook thread.
+//! 10. Creates the IPC named pipe server.
+//!
+//! # Config Model
+//!
+//! The `app_config` parameter is already a fully-resolved [`StmConfig`]:
+//! serde defaults (see [`config::defaults`]) fill in any fields absent from
+//! the user's `stm.toml`. No further merging is needed here.
 use std::time::Duration;
 
 use crate::animation::WindowAnimator;
@@ -162,7 +162,10 @@ impl ScrollTilingManager {
         }
 
         // 9. Start hook thread.
-        let (hook_receiver, _hook_handle) = hooks::start_hook_thread(desktop_name)?;
+        //    Returns the mpsc receiver, thread handle (RAII cleanup via Drop),
+        //    and a Win32 manual-reset Event (HookSignal) that the hook callback
+        //    signals to wake the main thread's WaitForMultipleObjects loop.
+        let (hook_receiver, _hook_handle, hook_signal) = hooks::start_hook_thread(desktop_name)?;
 
         // 10. Create IPC server.
         let server = PipeServer::create()
@@ -181,7 +184,9 @@ impl ScrollTilingManager {
             config_dir,
             hook_receiver,
             _hook_handle,
+            hook_signal,
             shutting_down: false,
+            pending_creations: Vec::new(),
         })
     }
 }

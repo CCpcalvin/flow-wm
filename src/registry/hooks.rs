@@ -59,8 +59,8 @@
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{CreateEventW, GetCurrentThreadId, SetEvent};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_QUIT};
 
@@ -152,6 +152,20 @@ pub enum HookEvent {
 /// The sender is `Send + Sync`, so reading it from the hook thread is safe.
 static HOOK_SENDER: OnceLock<Sender<HookEvent>> = OnceLock::new();
 
+/// Global Win32 Event handle (raw value) used by the hook callback to signal
+/// the main thread that a hook event is available.
+///
+/// Stored as `isize` (not `HANDLE`) because `HANDLE` is `!Send + !Sync` in
+/// windows-rs, but `OnceLock<T>` requires `T: Send + Sync`. The raw value is
+/// just an integer — it's safe to share across threads because kernel handles
+/// are process-wide. The callback converts it back to `HANDLE` via
+/// `HANDLE(raw as *mut core::ffi::c_void)` before calling `SetEvent`.
+///
+/// Set exactly once in [`start_hook_thread`] before any hooks are registered.
+/// The RAII [`HookSignal`] wrapper owns the actual `HANDLE` and closes it on
+/// drop; this global is purely for read-only access from the callback.
+static HOOK_SIGNAL: OnceLock<isize> = OnceLock::new();
+
 // ── HookThreadHandle ─────────────────────────────────────────────────
 
 /// Handle to the background hook thread.
@@ -186,6 +200,54 @@ impl Drop for HookThreadHandle {
     }
 }
 
+// ── HookSignal ───────────────────────────────────────────────────────
+
+/// RAII wrapper around the manual-reset Win32 Event used to wake the main
+/// thread when a hook event arrives.
+///
+/// Created in [`start_hook_thread`] and stored by `ScrollTilingManager`.
+/// The main thread waits on this handle via `WaitForMultipleObjects`, allowing
+/// hook events (window creation, destruction, focus changes) to be processed
+/// immediately — even when no IPC client is connected.
+///
+/// # Thread Safety
+///
+/// Kernel `HANDLE` values are process-wide. The same `HANDLE` can be used
+/// from any thread in the process. We implement `Send` manually (it is not
+/// auto-derived because `HANDLE` wraps a raw pointer in windows-rs).
+///
+/// # Lifecycle
+///
+/// The event is created in [`start_hook_thread`] BEFORE the hook thread
+/// spawns. The raw handle value is stored in [`HOOK_SIGNAL`] (a global
+/// `OnceLock<isize>`) so the hook callback can call `SetEvent` on it.
+/// The [`HookSignal`] wrapper retains the actual `HANDLE` and closes it
+/// via `CloseHandle` on drop.
+pub struct HookSignal(HANDLE);
+
+impl HookSignal {
+    /// Returns the raw handle for use with `WaitForMultipleObjects`.
+    ///
+    /// The caller must ensure the `HookSignal` outlives any use of the
+    /// raw handle. In practice, `HookSignal` lives for the entire daemon
+    /// lifetime (stored on `ScrollTilingManager`).
+    pub fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for HookSignal {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+// SAFETY: HANDLE is a process-wide kernel object identifier. The same value
+// can be safely used from any thread. See type-level docs for rationale.
+unsafe impl Send for HookSignal {}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /// Spawns the background hook thread and returns a channel receiver.
@@ -197,9 +259,12 @@ impl Drop for HookThreadHandle {
 /// 4. Runs a `GetMessageW` message loop (required for `WINEVENT_OUTOFCONTEXT`)
 /// 5. The callback sends typed [`HookEvent`]s through the channel
 ///
-/// Returns a tuple of `(event_receiver, thread_handle)`. The receiver should
-/// be polled periodically via
-/// [`WindowRegistry::process_pending_events`](super::WindowRegistry::process_pending_events).
+/// Returns a tuple of `(event_receiver, thread_handle, hook_signal)`. The
+/// receiver should be polled periodically via `process_hook_events` on the
+/// main thread. The `hook_signal` is a Win32 Event handle that the hook
+/// callback signals after each `send()` — the main thread waits on it via
+/// `WaitForMultipleObjects` so hook events are processed immediately even
+/// when no IPC client is connected.
 ///
 /// # Arguments
 ///
@@ -213,7 +278,7 @@ impl Drop for HookThreadHandle {
 /// the hook thread fails to start, or the desktop switch fails.
 pub fn start_hook_thread(
     desktop_name: Option<String>,
-) -> Result<(Receiver<HookEvent>, HookThreadHandle), String> {
+) -> Result<(Receiver<HookEvent>, HookThreadHandle, HookSignal), String> {
     // In release builds, desktop_name must always be None.
     // This is a defense-in-depth check — the CLI arg is gated by debug_assertions
     // so this should never happen, but if it does, fail loudly.
@@ -232,6 +297,23 @@ pub fn start_hook_thread(
     HOOK_SENDER
         .set(sender)
         .map_err(|_| "start_hook_thread called more than once — this is a bug".to_owned())?;
+
+    // Create a manual-reset Win32 Event that the hook callback will signal
+    // after each `sender.send()`. The main thread waits on this via
+    // `WaitForMultipleObjects` so it wakes instantly when a hook event arrives,
+    // even while no IPC client is connected.
+    //
+    // The raw handle value is stored in HOOK_SIGNAL (isize) for access from
+    // the extern "system" callback. The HookSignal RAII wrapper retains the
+    // HANDLE and closes it on drop.
+    let signal_event = unsafe { CreateEventW(None, true, false, windows::core::PCWSTR::null()) }
+        .map_err(|e| format!("failed to create hook signal event: {e}"))?;
+
+    HOOK_SIGNAL
+        .set(signal_event.0 as isize)
+        .map_err(|_| "start_hook_thread called more than once — this is a bug".to_owned())?;
+
+    let hook_signal = HookSignal(signal_event);
 
     std::thread::spawn(move || {
         // Switch to test desktop before any User32/GDI calls (debug builds only).
@@ -261,7 +343,7 @@ pub fn start_hook_thread(
 
     log::info!("hook thread started (OS tid={os_thread_id})");
 
-    Ok((receiver, HookThreadHandle { os_thread_id }))
+    Ok((receiver, HookThreadHandle { os_thread_id }, hook_signal))
 }
 
 // ── Hook thread internals ────────────────────────────────────────────
@@ -399,12 +481,12 @@ fn is_valid_hook(h: HWINEVENTHOOK) -> bool {
 /// Called by Windows on the hook thread for every event in the registered
 /// range. We filter by `OBJID_WINDOW` to only process events for actual
 /// windows (not child controls), then send typed [`HookEvent`]s through
-/// the global sender.
+/// the global sender and signal the main thread via [`HOOK_SIGNAL`].
 ///
 /// # Safety
 ///
-/// This is called by Windows. The `HOOK_SENDER` global must be initialized
-/// before any hook is registered.
+/// This is called by Windows. The `HOOK_SENDER` and `HOOK_SIGNAL` globals
+/// must be initialized before any hook is registered.
 unsafe extern "system" fn hook_callback(
     _h_win_event_hook: HWINEVENTHOOK,
     event: u32,
@@ -440,4 +522,11 @@ unsafe extern "system" fn hook_callback(
     // Send the event. If the receiver is dropped (daemon shutting down),
     // that's fine — we just stop sending.
     let _ = sender.send(hook_event);
+
+    // Signal the main thread that a hook event is available. This wakes
+    // WaitForMultipleObjects on the main thread so hook events are processed
+    // immediately, even when no IPC client is connected.
+    if let Some(&raw) = HOOK_SIGNAL.get() {
+        let _ = unsafe { SetEvent(HANDLE(raw as *mut core::ffi::c_void)) };
+    }
 }

@@ -35,6 +35,24 @@ impl ScrollTilingManager {
     ///    - `animate_diff(diff)` — animates the resulting layout change.
     /// 3. If the window was floating, ignored, or skipped: no action needed.
     ///
+    /// # Return value
+    ///
+    /// Returns `true` if [`handle_created`](crate::registry::WindowRegistry::handle_created)
+    /// processed the window (classified it as tiling, floating, or ignored).
+    /// Returns `false` if classification **failed** — the window is not yet
+    /// ready (not visible, no title, styles not finalized). The caller should
+    /// add the hwnd to the pending-creations retry list when this returns
+    /// `false`.
+    ///
+    /// # Why classification can fail
+    ///
+    /// `EVENT_OBJECT_CREATE` fires early in the Win32 window lifecycle —
+    /// before `ShowWindow`, `SetWindowText`, or style finalization. The
+    /// classification checks (`is_window_visible`, title non-empty,
+    /// `is_alt_tab_visible`) all fail on a not-yet-shown window. A subsequent
+    /// retry (after `EVENT_SYSTEM_FOREGROUND` or other events arrive) will
+    /// typically succeed.
+    ///
     /// # Placement strategy
     ///
     /// Unlike [`on_window_restored`](Self::on_window_restored) which re-adds a
@@ -43,10 +61,20 @@ impl ScrollTilingManager {
     /// the user is actively working. See
     /// [`LayoutEngine::insert_window`](crate::layout::LayoutEngine::insert_window)
     /// for the full algorithm.
-    pub(super) fn on_window_created(&mut self, hwnd: isize) {
+    pub(super) fn on_window_created(&mut self, hwnd: isize) -> bool {
         if let Some(window_id) = self.registry.handle_created(hwnd) {
             let diff = self.layout.insert_window(window_id);
             self.animate_diff(&diff);
+            true
+        } else {
+            // Classification failed — either the window isn't ready yet
+            // (not visible, no title) or it was classified as floating/
+            // ignored (already registered). The caller adds the hwnd to
+            // the pending-creations retry list. For already-registered
+            // windows, handle_created returns None immediately on retry
+            // (line 730 check), so the retry is cheap and the window is
+            // dropped after the retry limit — harmless.
+            false
         }
     }
 
