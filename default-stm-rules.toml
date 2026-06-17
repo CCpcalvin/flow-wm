@@ -104,8 +104,33 @@ action = "float"
 match = { exe = "Microsoft.CmdPal.UI.exe" }
 action = "float"
 
-# ── Chrome ───────────────────────────────────────────────────
+# ── Chromium-based apps (Chrome, Edge, VS Code, Electron, ...) ──────
+
+# Chromium "Legacy Window" — an invisible helper (class
+# `Chrome_RenderWidgetHostHWND`, title "Chrome Legacy Window") created by every
+# Chromium-based host: Chrome, Edge, VS Code (Electron), Slack, Discord, etc.
+#
+# It passes the Win32 pre-filters (WS_VISIBLE, non-empty title, no owner, not
+# DWM-cloaked) yet is never shown to the user, so it must be ignored.
+#
+# Why match by `class` instead of `exe` + `title`?
+# - `exe` differs per host (chrome.exe vs Code.exe vs msedge.exe ...), so an
+#   exe-constrained rule only ever catches one app. The class name is identical
+#   across all of them, so a single rule covers every Chromium host.
+# - The class is assigned at window creation, while the title may be set a few
+#   milliseconds later. Class matching is therefore race-free; title matching
+#   can miss a window classified at creation time before its title arrives.
+#
+# This also kills the layout/animation churn caused by the transient legacy
+# windows that Chrome spawns and destroys whenever a tab is opened or closed —
+# ignored windows never enter the tiling layout, so no recalculation fires.
+[[rules]]
+match = { class = "Chrome_RenderWidgetHostHWND" }
+action = "ignore"
+
+# ── Chrome.exe ──────
+
+# Chrome picture-in-picture overlay — keep it floating.
 [[rules]]
 match = { exe = "chrome.exe", title = "Picture in picture" }
 action = "float"
-
