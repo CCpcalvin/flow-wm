@@ -265,8 +265,13 @@ impl Window {
 /// | (new) | classification | `Tiling(Active)` / `Floating(Active)` / `Ignored(...)` |
 /// | `Tiling(Active)` | `MinimizeStart` | `Tiling(Minimized)` |
 /// | `Tiling(Minimized)` | `MinimizeEnd` | `Tiling(Active)` with restored slot |
+/// | `Tiling(Active)` | `EVENT_OBJECT_HIDE` | `Tiling(Hidden)` (slot saved to `last_virtual_slot`) |
+/// | `Tiling(Hidden)` | `EVENT_OBJECT_SHOW` | `Tiling(Active)` with restored slot |
+/// | `Tiling(Hidden)` | Destroyed | removed from registry |
 /// | `Floating(Active)` | `MinimizeStart` | `Floating(Minimized)` |
 /// | `Floating(Minimized)` | `MinimizeEnd` | `Floating(Active)` with original rect |
+/// | `Floating(Active)` | `EVENT_OBJECT_HIDE` | `Floating(Hidden)` |
+/// | `Floating(Hidden)` | `EVENT_OBJECT_SHOW` | `Floating(Active)` with `pre_manage_rect` |
 ///
 /// Note: transitions between `Tiling`, `Floating`, and `Ignored` (e.g., toggle
 /// float, maximize while tiled) are not yet implemented — they will be added
@@ -306,6 +311,16 @@ pub enum TilingState {
     },
     /// Window is minimized (preserving its virtual-slot assignment).
     Minimized,
+    /// Window is hidden from the user (tray-hidden / cloaked / `SW_HIDE`) but
+    /// still tracked. The original tiling slot is preserved in
+    /// [`Window::last_virtual_slot`] so it can be restored on re-show.
+    ///
+    /// Distinct from [`Minimized`](Self::Minimized): a minimize is an
+    /// explicit user action via the taskbar/minimize button, whereas
+    /// `Hidden` captures tray-hide (Discord/Steam "close" button) and DWM
+    /// cloaking. Both remove the window from the live layout but are
+    /// tracked separately for future heuristics.
+    Hidden,
 }
 
 // ── FloatingState ──────────────────────────────────────────────────
@@ -325,6 +340,16 @@ pub enum FloatingState {
     },
     /// Window is minimized to the taskbar.
     Minimized,
+    /// Window is hidden from the user (tray-hidden / cloaked / `SW_HIDE`) but
+    /// still tracked. The original position is preserved in
+    /// [`Window::pre_manage_rect`] so it can be restored on re-show.
+    ///
+    /// Distinct from [`Minimized`](Self::Minimized): a minimize is an
+    /// explicit user action via the taskbar/minimize button, whereas
+    /// `Hidden` captures tray-hide (Discord/Steam "close" button) and DWM
+    /// cloaking. Both remove the window from the live layout but are
+    /// tracked separately for future heuristics.
+    Hidden,
 }
 
 // ── IgnoredReason ──────────────────────────────────────────────────
@@ -379,4 +404,27 @@ pub struct VirtualSlot {
     pub col: usize,
     /// Row index within the column.
     pub row: usize,
+}
+
+// ── VisibilityChange ────────────────────────────────────────────────
+
+/// Outcome of a visibility reconciliation pass on a tracked window.
+///
+/// Returned by [`WindowRegistry::reconcile_visibility`](super::core::WindowRegistry::reconcile_visibility).
+/// The daemon layer uses this to decide whether to add/remove the window
+/// from the live layout. The [`Unchanged`](VisibilityChange::Unchanged) case
+/// is what makes reconciliation **idempotent** against duplicate
+/// `EVENT_OBJECT_HIDE` events (e.g. an ordinary minimize also fires HIDE,
+/// but the window is already `Minimized` → `Unchanged`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityChange {
+    /// Window transitioned Active → Hidden (was visible, now not). The caller
+    /// should remove it from the live layout.
+    Hidden,
+    /// Window transitioned Hidden → Active (was hidden, now visible). The
+    /// caller should re-add it to the live layout.
+    Shown,
+    /// No state transition needed: either the window is untracked, already in
+    /// the matching state, or already Minimized/Ignored.
+    Unchanged,
 }

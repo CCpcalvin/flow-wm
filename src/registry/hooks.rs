@@ -27,7 +27,7 @@
 //!
 //! ```text
 //! Main Thread (IPC):                Hook Thread:
-//!   owns Arc<Mutex<Registry>>         SetWinEventHook ×3
+//!   owns Arc<Mutex<Registry>>         SetWinEventHook ×4
 //!   process_pending_events()          GetMessageW loop
 //!       ↑ receiver.try_recv()             ↓ callback
 //!       │                           sender.send(HookEvent)
@@ -35,13 +35,14 @@
 //!
 //! # Hook Registration
 //!
-//! Three hooks are registered as event ranges:
+//! Four hooks are registered as event ranges:
 //!
 //! | Hook | Event Range | Purpose |
 //! |------|-------------|---------|
 //! | CREATE/DESTROY | `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` | Window lifecycle |
 //! | FOREGROUND | `EVENT_SYSTEM_FOREGROUND` | Focus changes |
 //! | MINIMIZE | `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` | Minimize/restore |
+//! | SHOW/HIDE | `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` | Tray-hide, DWM cloak, re-show |
 //!
 //! # Cleanup
 //!
@@ -81,6 +82,18 @@ const EVENT_OBJECT_CREATE: u32 = 0x8000;
 
 /// `EVENT_OBJECT_DESTROY` — a window was destroyed.
 const EVENT_OBJECT_DESTROY: u32 = 0x8001;
+
+/// `EVENT_OBJECT_SHOW` — a window object became visible.
+const EVENT_OBJECT_SHOW: u32 = 0x8002;
+
+/// `EVENT_OBJECT_HIDE` — a window object was hidden.
+///
+/// Fires for `ShowWindow(SW_HIDE)`, DWM cloaking, and other hide operations —
+/// including ordinary minimizes. This is the primary signal raised by apps
+/// like Discord/Steam when "closed to the system tray", which
+/// `EVENT_SYSTEM_MINIMIZESTART` does NOT cover. Without this hook, tray-hidden
+/// windows remain in the registry's virtual layout as blank columns.
+const EVENT_OBJECT_HIDE: u32 = 0x8003;
 
 /// `OBJID_WINDOW` — identifies the window object itself (not a child).
 const OBJID_WINDOW: i32 = 0x0000;
@@ -132,6 +145,25 @@ pub enum HookEvent {
     /// A window was restored from minimize (`EVENT_SYSTEM_MINIMIZEEND`).
     MinimizeEnd {
         /// The restored window handle value.
+        hwnd: isize,
+    },
+    /// A window was shown / became visible (`EVENT_OBJECT_SHOW`).
+    ///
+    /// Distinct from [`MinimizeEnd`](Self::MinimizeEnd): it also fires when a
+    /// tray-hidden app (Discord, Steam) is reopened from the tray.
+    Shown {
+        /// The shown window handle value.
+        hwnd: isize,
+    },
+    /// A window was hidden (`EVENT_OBJECT_HIDE`).
+    ///
+    /// Fires for `ShowWindow(SW_HIDE)`, DWM cloaking, and minimize. Apps that
+    /// "close to the system tray" raise this — not
+    /// [`MinimizeStart`](Self::MinimizeStart). The registry reconciles these
+    /// against actual Win32 visibility to avoid double-processing (since
+    /// minimize also fires HIDE).
+    Hidden {
+        /// The hidden window handle value.
         hwnd: isize,
     },
 }
@@ -407,6 +439,7 @@ fn run_hook_loop() {
 /// - `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` (create + destroy)
 /// - `EVENT_SYSTEM_FOREGROUND` (focus change)
 /// - `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` (minimize/restore)
+/// - `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` (tray-hide, DWM cloak, re-show)
 fn register_hooks() -> Vec<HWINEVENTHOOK> {
     let mut hooks = Vec::new();
 
@@ -468,6 +501,27 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
         log::error!("failed to hook MINIMIZE events");
     }
 
+    // Hook: EVENT_OBJECT_SHOW + EVENT_OBJECT_HIDE (range)
+    // Catches tray-hide (Discord/Steam close-to-tray) and re-show, which
+    // MINIMIZESTART/END do NOT cover.
+    let h = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_HIDE,
+            None,
+            Some(hook_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if is_valid_hook(h) {
+        hooks.push(h);
+        log::debug!("hook registered: SHOW/HIDE");
+    } else {
+        log::error!("failed to hook SHOW/HIDE");
+    }
+
     hooks
 }
 
@@ -516,6 +570,8 @@ unsafe extern "system" fn hook_callback(
         EVENT_SYSTEM_FOREGROUND => HookEvent::Foreground { hwnd: hwnd_val },
         EVENT_SYSTEM_MINIMIZESTART => HookEvent::MinimizeStart { hwnd: hwnd_val },
         EVENT_SYSTEM_MINIMIZEEND => HookEvent::MinimizeEnd { hwnd: hwnd_val },
+        EVENT_OBJECT_SHOW => HookEvent::Shown { hwnd: hwnd_val },
+        EVENT_OBJECT_HIDE => HookEvent::Hidden { hwnd: hwnd_val },
         _ => return, // Ignore other events in the range.
     };
 
@@ -528,5 +584,36 @@ unsafe extern "system" fn hook_callback(
     // immediately, even when no IPC client is connected.
     if let Some(&raw) = HOOK_SIGNAL.get() {
         let _ = unsafe { SetEvent(HANDLE(raw as *mut core::ffi::c_void)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_event_shown_carries_hwnd() {
+        let ev = HookEvent::Shown { hwnd: 12345 };
+        match ev {
+            HookEvent::Shown { hwnd } => assert_eq!(hwnd, 12345),
+            _ => panic!("expected Shown"),
+        }
+    }
+
+    #[test]
+    fn hook_event_hidden_carries_hwnd() {
+        let ev = HookEvent::Hidden { hwnd: 67890 };
+        match ev {
+            HookEvent::Hidden { hwnd } => assert_eq!(hwnd, 67890),
+            _ => panic!("expected Hidden"),
+        }
+    }
+
+    #[test]
+    fn event_object_show_hide_constants_correct() {
+        // Microsoft Win32 event-constant values (verify invariant).
+        assert_eq!(EVENT_OBJECT_SHOW, 0x8002);
+        assert_eq!(EVENT_OBJECT_HIDE, 0x8003);
+        assert!(EVENT_OBJECT_SHOW < EVENT_OBJECT_HIDE);
     }
 }

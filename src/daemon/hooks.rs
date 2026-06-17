@@ -6,11 +6,14 @@
 //! - [`on_window_destroyed`] — handles window destruction
 //! - [`on_window_minimized`] — handles window minimize events
 //! - [`on_window_restored`] — handles window restore (un-minimize) events
+//! - [`on_window_hidden`] — handles tray-hide / DWM-cloak events
+//! - [`on_window_shown`] — handles un-hide (tray-restore) events
 //! - [`on_focus_changed`] — handles focus changes
 //!
 //! # Window-removal pipeline
 //!
-//! Both [`on_window_destroyed`] and [`on_window_minimized`] share the
+//! Both [`on_window_destroyed`] and [`on_window_minimized`] and
+//! [`on_window_hidden`] share the
 //! [`remove_from_layout_and_refocus`] helper, which implements the full
 //! removal pipeline: remove from the virtual layout → push OS-level focus to
 //! the successor window if focus changed → animate the resulting layout diff.
@@ -18,6 +21,7 @@
 //! [`mutations::next_available_window`] (left column, then right).
 
 use crate::common::WindowId;
+use crate::registry::types::VisibilityChange;
 use crate::registry::win32 as registry_win32;
 
 use super::types::ScrollTilingManager;
@@ -114,6 +118,39 @@ impl ScrollTilingManager {
         }
     }
 
+    /// Handle `EVENT_OBJECT_HIDE` for a window that may have been tray-hidden
+    /// or DWM-cloaked (Discord/Steam "close to tray"), as opposed to an
+    /// explicit minimize (handled by [`on_window_minimized`](Self::on_window_minimized)).
+    ///
+    /// Pipeline:
+    /// 1. Capture active-tiling status **before** reconcile mutates state.
+    /// 2. `registry.reconcile_visibility(hwnd)` — state-based idempotent
+    ///    transition (`Active → Hidden`, preserving the layout slot in
+    ///    `last_virtual_slot`). Returns [`VisibilityChange::Unchanged`] if the
+    ///    window was already hidden/minimized (this event also fires on ordinary
+    ///    minimize — the state check prevents double-removal).
+    /// 3. If the window was an **active** tiling window immediately before the
+    ///    transition and the state actually changed to `Hidden`:
+    ///    [`remove_from_layout_and_refocus`] — removes from layout, pushes focus
+    ///    to the successor, and animates.
+    ///
+    /// # Why `is_tiling_active` instead of `is_tiling`
+    ///
+    /// [`is_tiling`](crate::registry::WindowRegistry::is_tiling) returns `true`
+    /// for both `Tiling(Active)` and `Tiling(Minimized)`. Using it here would
+    /// cause a second removal from the layout when a minimized window also
+    /// receives `EVENT_OBJECT_HIDE` (Win32 fires both). `is_tiling_active` is
+    /// `true` **only** for `Tiling(Active)`, so the first transition (minimize
+    /// or hide) removes the window, and the second event sees `is_tiling_active`
+    /// as `false` and is a no-op.
+    pub(super) fn on_window_hidden(&mut self, hwnd: isize) {
+        let was_active_tiling = self.registry.is_tiling_active(hwnd);
+        let change = self.registry.reconcile_visibility(hwnd);
+        if change == VisibilityChange::Hidden && was_active_tiling {
+            self.remove_from_layout_and_refocus(WindowId(hwnd));
+        }
+    }
+
     /// Shared window-removal pipeline for destroy and minimize events.
     ///
     /// This implements the focus-aware removal flow used by both
@@ -170,6 +207,36 @@ impl ScrollTilingManager {
 
         // After restore, check if the window is now tiling-active.
         if self.registry.is_tiling(hwnd) {
+            let applied = self.layout.add_window(WindowId(hwnd));
+            self.animate_layout(&applied);
+        }
+    }
+
+    /// Handle `EVENT_OBJECT_SHOW` for a window that may have been un-hidden
+    /// (e.g. Discord reopened from the tray), as opposed to an explicit
+    /// restore-from-minimize (handled by [`on_window_restored`](Self::on_window_restored)).
+    ///
+    /// Pipeline:
+    /// 1. `registry.reconcile_visibility(hwnd)` — state-based idempotent
+    ///    transition (`Hidden → Active`, restoring the saved slot from
+    ///    `last_virtual_slot`). Returns [`VisibilityChange::Unchanged`] if the
+    ///    window was already active or not tracked.
+    /// 2. If the state actually changed to `Shown` and the window is now an
+    ///    **active** tiling window:
+    ///    - `layout.add_window(id)` — re-adds to layout.
+    ///    - `animate_layout(applied)` — animates the window reappearing.
+    ///
+    /// # Why check `is_tiling_active` after reconcile
+    ///
+    /// Floating windows receive state updates but are never in the layout —
+    /// `is_tiling_active` returns `false` for floating states, so they are
+    /// correctly skipped. Untracked windows and already-active windows produce
+    /// `Unchanged` and fall through the first guard. This makes the handler
+    /// safe to call for the many `EVENT_OBJECT_SHOW` events Win32 fires for
+    /// windows we do not manage.
+    pub(super) fn on_window_shown(&mut self, hwnd: isize) {
+        let change = self.registry.reconcile_visibility(hwnd);
+        if change == VisibilityChange::Shown && self.registry.is_tiling_active(hwnd) {
             let applied = self.layout.add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }

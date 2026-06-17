@@ -25,7 +25,7 @@
 //!   UTF-16 buffers to `String`.
 //! - **Geometry**: [`get_window_rect`], [`is_fullscreen`] — window position
 //!   and size queries.
-//! - **State checks**: [`is_window_visible`], [`is_zoomed`] — boolean checks.
+//! - **State checks**: [`is_window_visible`], [`is_zoomed`], [`is_iconic`] — boolean checks.
 //! - **Process info**: [`get_process_exe_and_path`] — executable name/path.
 //! - **Aggregator**: [`get_window_info`] — queries all metadata at once.
 
@@ -44,8 +44,8 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, IsZoomed, SM_CXSCREEN, SM_CYSCREEN, SetForegroundWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    IsIconic, IsWindowVisible, IsZoomed, SM_CXSCREEN, SM_CYSCREEN, SetForegroundWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -330,6 +330,27 @@ pub fn is_window_visible(hwnd: HWND) -> bool {
 #[must_use]
 pub fn is_zoomed(hwnd: HWND) -> bool {
     let result = unsafe { IsZoomed(hwnd) };
+    result.as_bool()
+}
+
+/// Returns `true` if the window is minimized (iconic).
+///
+/// Wraps the Win32 `IsIconic()` call. A minimized window keeps the
+/// `WS_VISIBLE` style, so [`is_window_visible`] returns `true` for it — this
+/// function is therefore **not** redundant with the visibility check. It is the
+/// komorebi-style "ignore iconic windows" filter: such windows should not
+/// participate in the tiling layout.
+///
+/// Used together with [`is_cloaked`] in the registry's visibility
+/// reconciliation to detect tray-hidden apps (Discord, Steam) and ordinary
+/// minimizes alike.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+#[must_use]
+pub fn is_iconic(hwnd: HWND) -> bool {
+    let result = unsafe { IsIconic(hwnd) };
     result.as_bool()
 }
 
@@ -1032,5 +1053,14 @@ mod tests {
     fn zero_hwnd_is_documented_edge_case() {
         let zero_hwnd: isize = 0;
         assert_eq!(zero_hwnd, 0, "zero hwnd should be 0");
+    }
+
+    // --- is_iconic tests ---
+
+    /// Positive: `is_iconic` exists and has the correct `fn(HWND) -> bool` signature.
+    #[test]
+    fn is_iconic_has_correct_signature() {
+        let fn_ptr: fn(HWND) -> bool = is_iconic;
+        let _ = fn_ptr; // Compile-time signature check.
     }
 }

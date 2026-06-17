@@ -287,6 +287,12 @@ impl ScrollTilingManager {
                 HookEvent::MinimizeEnd { hwnd } => {
                     self.on_window_restored(hwnd);
                 }
+                HookEvent::Shown { hwnd } => {
+                    self.on_window_shown(hwnd);
+                }
+                HookEvent::Hidden { hwnd } => {
+                    self.on_window_hidden(hwnd);
+                }
             }
         }
     }
