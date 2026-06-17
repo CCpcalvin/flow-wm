@@ -236,6 +236,92 @@ pub fn user_app_config_path() -> PathBuf {
     config_dir().join("stm.toml")
 }
 
+// ── Logs directory and date-stamped log file paths ─────────────────
+//
+// Logs are co-located with the config directory (under `<config_dir>/logs/`)
+// rather than under `%LOCALAPPDATA%\stm\logs\`. This matches the
+// discoverability decision made by [`resolve_config_dir`]: users can find
+// and `tail` their logs without digging through hidden `AppData` folders.
+// The same rationale that rejected `%APPDATA%` for config applies doubly to
+// logs, which users want to inspect frequently while debugging.
+//
+// The daemon writes one log file per day, named `stmd-YYYY-MM-DD.log`,
+// opened in **append** mode so multiple daemon starts on the same day
+// accumulate into a single file. No automatic rotation or deletion is
+// performed — all historical logs are preserved. The `date` string is
+// computed by the logging module (via Win32 `GetLocalTime`) and passed in
+// here, keeping this module pure and free of Win32 dependencies.
+
+/// Returns the logs subdirectory path inside an explicitly provided config
+/// directory.
+///
+/// # Arguments
+///
+/// * `dir` — The config directory to use. Typically from [`resolve_config_dir`].
+///
+/// # Returns
+///
+/// `dir.join("logs")` as a [`PathBuf`].
+///
+/// # Examples
+///
+/// ```ignore
+/// use scrolling_tiling_manager::config::dirs::logs_dir_in;
+/// use std::path::Path;
+///
+/// let logs = logs_dir_in(Path::new("C:\\stm"));
+/// assert!(logs.ends_with("logs"));
+/// ```
+#[must_use]
+pub fn logs_dir_in(dir: &Path) -> PathBuf {
+    dir.join("logs")
+}
+
+/// Returns the logs subdirectory path using the default config directory
+/// resolution (CLI flag → `STM_CONFIG_DIR` → `%USERPROFILE%\.config\stm\`).
+///
+/// Convenience wrapper around [`logs_dir_in`] that resolves the config
+/// directory first via [`resolve_config_dir`]`(None)`.
+///
+/// # Returns
+///
+/// Full path to the logs directory as a [`PathBuf`].
+#[must_use]
+pub fn logs_dir() -> PathBuf {
+    logs_dir_in(&resolve_config_dir(None))
+}
+
+/// Returns the path to a date-stamped daemon log file inside an explicitly
+/// provided config directory.
+///
+/// The `date` parameter must be a `YYYY-MM-DD` string (e.g. `"2026-06-17"`).
+/// The caller is responsible for computing it in the local timezone — this
+/// function is pure and does no date arithmetic, which keeps it trivially
+/// testable and free of Win32 dependencies.
+///
+/// # Arguments
+///
+/// * `dir` — The config directory to use. Typically from [`resolve_config_dir`].
+/// * `date` — A `YYYY-MM-DD` date string for the desired log file.
+///
+/// # Returns
+///
+/// `logs_dir_in(dir).join(format!("stmd-{date}.log"))` as a [`PathBuf`].
+///
+/// # Examples
+///
+/// ```ignore
+/// use scrolling_tiling_manager::config::dirs::log_file_path_in;
+/// use std::path::Path;
+///
+/// let path = log_file_path_in(Path::new("C:\\stm"), "2026-06-17");
+/// assert!(path.ends_with("stmd-2026-06-17.log"));
+/// ```
+#[must_use]
+pub fn log_file_path_in(dir: &Path, date: &str) -> PathBuf {
+    logs_dir_in(dir).join(format!("stmd-{date}.log"))
+}
+
 /// Compute the default config directory: `%USERPROFILE%\.config\stm\`.
 ///
 /// Falls back to `%APPDATA%` with `\AppData\Roaming` stripped, and ultimately
@@ -446,5 +532,51 @@ mod tests {
         let dir = Path::new("C:\\test\\config");
         let path = user_app_config_path_in(dir);
         assert_eq!(path, dir.join("stm.toml"));
+    }
+
+    // ── Logs path tests ────────────────────────────────────────────────
+
+    /// Positive: `logs_dir_in` appends "logs" to the given directory.
+    #[test]
+    fn logs_dir_in_appends_logs_subdir() {
+        let dir = Path::new("C:\\test\\config");
+        let logs = logs_dir_in(dir);
+        assert_eq!(logs, dir.join("logs"));
+    }
+
+    /// Positive: `logs_dir` (default resolution) ends with "logs".
+    #[test]
+    fn logs_dir_ends_with_logs() {
+        let logs = logs_dir();
+        assert!(logs.ends_with("logs"), "logs dir was: {logs:?}");
+    }
+
+    /// Positive: `log_file_path_in` produces the expected dated filename.
+    #[test]
+    fn log_file_path_in_produces_dated_filename() {
+        let dir = Path::new("C:\\test\\config");
+        let path = log_file_path_in(dir, "2026-06-17");
+        assert!(path.ends_with("stmd-2026-06-17.log"), "path was: {path:?}");
+    }
+
+    /// Positive: `log_file_path_in` nests the file directly under the logs dir.
+    #[test]
+    fn log_file_path_in_nests_under_logs() {
+        let dir = Path::new("C:\\test\\config");
+        let path = log_file_path_in(dir, "2026-06-17");
+        assert_eq!(
+            path.parent(),
+            Some(logs_dir_in(dir).as_path()),
+            "log file should be directly under the logs dir"
+        );
+    }
+
+    /// Positive: different dates produce different filenames in the same dir.
+    #[test]
+    fn log_file_path_in_distinguishes_dates() {
+        let dir = Path::new("C:\\test\\config");
+        let a = log_file_path_in(dir, "2026-06-17");
+        let b = log_file_path_in(dir, "2026-06-18");
+        assert_ne!(a, b, "different dates must produce different paths");
     }
 }

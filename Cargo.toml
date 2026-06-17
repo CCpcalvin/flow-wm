@@ -32,6 +32,7 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Pi
 regex = "1.12.3"
 crossbeam-channel = "0.5.15"
 toml = "1.1.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 
 [profile.release]
 opt-level = 3

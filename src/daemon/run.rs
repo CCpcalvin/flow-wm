@@ -265,6 +265,7 @@ impl ScrollTilingManager {
 
         // 2. Drain new hook events from the channel.
         while let Ok(event) = self.hook_receiver.try_recv() {
+            log::debug!("hook: received {event:?}");
             match event {
                 HookEvent::Created { hwnd } => {
                     // Try to classify immediately. EVENT_OBJECT_CREATE fires

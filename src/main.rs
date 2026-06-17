@@ -18,6 +18,7 @@ use scrolling_tiling_manager::config::{
     dirs, init_config_dir, load_app_config, load_default_rules, load_rules_config,
 };
 use scrolling_tiling_manager::daemon::ScrollTilingManager;
+use scrolling_tiling_manager::logging;
 
 #[cfg(debug_assertions)]
 use scrolling_tiling_manager::registry::desktop;
@@ -41,7 +42,10 @@ struct Args {
 
 /// Daemon entry point.
 fn main() {
-    env_logger::init();
+    // Initialize logging BEFORE anything else so that all subsequent
+    // initialization (config loading, window scanning, hook setup) is
+    // captured. This tees to both the date-stamped log file and stderr.
+    logging::init();
 
     let args = Args::parse();
     if let Err(e) = run(args) {

@@ -98,4 +98,5 @@ pub mod daemon;
 pub mod floating;
 pub mod ipc;
 pub mod layout;
+pub mod logging;
 pub mod registry;

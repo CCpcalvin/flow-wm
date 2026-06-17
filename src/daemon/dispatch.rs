@@ -22,6 +22,7 @@ impl ScrollTilingManager {
     /// - **Query commands**: return registry data as JSON.
     /// - **Unimplemented commands**: return an error response.
     pub(super) fn dispatch(&mut self, msg: &SocketMessage) -> SocketResponse {
+        log::debug!("ipc: dispatching {msg:?}");
         match msg {
             // --- Shutdown ---
             SocketMessage::Stop => {
