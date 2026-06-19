@@ -21,7 +21,7 @@
 //! [`mutations::next_available_window`] (left column, then right).
 
 use crate::common::WindowId;
-use crate::registry::types::VisibilityChange;
+use crate::registry::types::{ReclassifyResult, VisibilityChange};
 use crate::registry::win32 as registry_win32;
 
 use super::types::ScrollTilingManager;
@@ -76,8 +76,8 @@ impl ScrollTilingManager {
             // ignored (already registered). The caller adds the hwnd to
             // the pending-creations retry list. For already-registered
             // windows, handle_created returns None immediately on retry
-            // (line 730 check), so the retry is cheap and the window is
-            // dropped after the retry limit — harmless.
+            // via its `contains_key` de-duplication gate, so the retry is
+            // cheap and the window is dropped after the retry limit — harmless.
             false
         }
     }
@@ -212,29 +212,79 @@ impl ScrollTilingManager {
         }
     }
 
-    /// Handle `EVENT_OBJECT_SHOW` for a window that may have been un-hidden
-    /// (e.g. Discord reopened from the tray), as opposed to an explicit
-    /// restore-from-minimize (handled by [`on_window_restored`](Self::on_window_restored)).
+    /// Handle `EVENT_OBJECT_SHOW`.
     ///
-    /// Pipeline:
+    /// This event covers two distinct situations, handled in order below.
+    ///
+    /// # 1. Recovery — a window created *invisible* (never registered)
+    ///
+    /// Some applications create their top-level window hidden and only show it
+    /// **after** their title has arrived via `EVENT_OBJECT_NAMECHANGE`. For
+    /// such windows both `CREATE` and the
+    /// [`on_window_name_change`](Self::on_window_name_change) recovery fail
+    /// [`handle_created`](crate::registry::WindowRegistry::handle_created)'s
+    /// visibility gate (the window is not yet visible), so they stay untracked.
+    /// Windows Terminal launched as `wt -p PowerShell` is the canonical
+    /// example, with event order `Created → NameChange → Shown`.
+    ///
+    /// `SHOW` is the first event at which the window is actually visible, so it
+    /// is the natural point to retry registration. If the window is **not
+    /// already tracked**, we re-run the full creation pipeline via
+    /// [`on_window_created`](Self::on_window_created). By the time `SHOW`
+    /// fires the title is already set (the earlier `NAMECHANGE` proved it —
+    /// it failed for *visibility*, not *empty title*), so the only thing that
+    /// changed is visibility, and the window now passes every gate.
+    ///
+    /// This path is **complementary** to `on_window_name_change`: that handler
+    /// catches the opposite ordering (window visible *first*, title arriving
+    /// *later*), where `SHOW` would see an empty title. Both are needed for
+    /// full coverage of asynchronous-window lifecycles.
+    ///
+    /// # 2. Re-show — a tracked window returning from hidden
+    ///
+    /// A window we already manage (e.g. Discord reopened from the tray, as
+    /// opposed to an explicit restore-from-minimize handled by
+    /// [`on_window_restored`](Self::on_window_restored)) transitions
+    /// `Hidden → Active`:
     /// 1. `registry.reconcile_visibility(hwnd)` — state-based idempotent
     ///    transition (`Hidden → Active`, restoring the saved slot from
     ///    `last_virtual_slot`). Returns [`VisibilityChange::Unchanged`] if the
-    ///    window was already active or not tracked.
+    ///    window was already active.
     /// 2. If the state actually changed to `Shown` and the window is now an
     ///    **active** tiling window:
     ///    - `layout.add_window(id)` — re-adds to layout.
     ///    - `animate_layout(applied)` — animates the window reappearing.
     ///
-    /// # Why check `is_tiling_active` after reconcile
+    /// # Why this is safe to fire on every `SHOW`
     ///
-    /// Floating windows receive state updates but are never in the layout —
-    /// `is_tiling_active` returns `false` for floating states, so they are
-    /// correctly skipped. Untracked windows and already-active windows produce
-    /// `Unchanged` and fall through the first guard. This makes the handler
-    /// safe to call for the many `EVENT_OBJECT_SHOW` events Win32 fires for
-    /// windows we do not manage.
+    /// Win32 fires `EVENT_OBJECT_SHOW` for many windows we do not manage. The
+    /// untracked branch is bounded by `handle_created`'s full gate pipeline
+    /// (visibility, title, Alt+Tab, owner) — non-app windows are filtered, not
+    /// registered. The tracked branch is bounded by `reconcile_visibility`,
+    /// which returns `Unchanged` for already-active and floating windows.
+    /// `Floating` windows receive state updates but are never in the layout.
+    ///
+    /// Duplicate registration across recovery events (`NAMECHANGE` + `SHOW`) is
+    /// impossible: [`is_tracked`](crate::registry::WindowRegistry::is_tracked)
+    /// short-circuits the second handler, and `handle_created`'s `contains_key`
+    /// gate is the final guard — an `HWND` is unique per window, so a window
+    /// already in the registry is ignored.
     pub(super) fn on_window_shown(&mut self, hwnd: isize) {
+        // Recovery: a window created invisible (e.g. `wt -p PowerShell`, whose
+        // title arrives via NAMECHANGE while still hidden) was missed by both
+        // CREATE and NAMECHANGE (both gate on visibility). SHOW is the first
+        // event where the window is actually visible — attempt registration
+        // now. Mirrors `on_window_name_change`; safe because `handle_created`
+        // de-duplicates by HWND.
+        if !self.registry.is_tracked(hwnd) {
+            log::debug!(
+                "on_window_shown: {hwnd:#x} not tracked — attempting creation (created invisible?)"
+            );
+            self.on_window_created(hwnd);
+            return;
+        }
+
+        // Re-show path: a tracked window returning from hidden (Hidden → Active).
         let change = self.registry.reconcile_visibility(hwnd);
         if change == VisibilityChange::Shown && self.registry.is_tiling_active(hwnd) {
             let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
@@ -258,5 +308,78 @@ impl ScrollTilingManager {
         if self.registry.is_tiling(hwnd) {
             self.active_scrolling_mut().set_focus(WindowId(hwnd));
         }
+    }
+
+    /// Handle `EVENT_OBJECT_STATECHANGE` — Option D recovery for windows that
+    /// launched maximized or fullscreen.
+    ///
+    /// Pipeline:
+    /// 1. `registry.reclassify_os_state(hwnd)` — re-queries the live OS state.
+    ///    If a tracked window was `Ignored(Maximized|Fullscreen)` but is no
+    ///    longer, the classifier is re-run and its stored state is updated.
+    /// 2. If the window transitioned to tiling
+    ///    ([`ReclassifyResult::Recovered`] with `now_tiling == true`):
+    ///    - `layout.add_window(id)` — appends the recovered window to the
+    ///      layout (mirrors [`on_window_restored`](Self::on_window_restored)).
+    ///    - `animate_layout(applied)` — animates the window entering.
+    ///
+    /// # Why `add_window` (append) and not `insert_window`
+    ///
+    /// A recovered window was never part of the layout (it was ignored from
+    /// creation), so there is no saved slot to restore. Appending at the far
+    /// right is the predictable choice and matches the restore/show recovery
+    /// paths. The cheap non-recovery cases (untracked / not OS-ignored /
+    /// still ignored) are filtered inside the registry, so this handler costs
+    /// almost nothing when nothing is recoverable.
+    pub(super) fn on_window_state_change(&mut self, hwnd: isize) {
+        let outcome = self.registry.reclassify_os_state(hwnd);
+        if let ReclassifyResult::Recovered { now_tiling: true } = outcome {
+            let applied = self.layout.add_window(WindowId(hwnd));
+            self.animate_layout(&applied);
+        }
+    }
+
+    /// Handle `EVENT_OBJECT_NAMECHANGE` — Option A recovery for windows whose
+    /// title arrives *after* `EVENT_OBJECT_CREATE`.
+    ///
+    /// Some applications — most notably Windows Terminal — set their window
+    /// title asynchronously, long after `CREATE` fired and after stm's
+    /// pending-creations retry budget has been exhausted. Such windows are
+    /// never registered and silently fall outside the tiling layout.
+    ///
+    /// `NAMECHANGE` fires the moment the title lands. This handler gives stm a
+    /// second chance: if the window is **not already tracked**, it re-attempts
+    /// the full creation pipeline via
+    /// [`on_window_created`](Self::on_window_created).
+    ///
+    /// # Why only untracked windows?
+    ///
+    /// Re-classifying an already-tracked window on every title change would
+    /// risk layout churn (a rule could match the new title differently). The
+    /// [`is_tracked`](crate::registry::WindowRegistry::is_tracked) guard
+    /// ensures we only ever register windows that were missed the first time.
+    ///
+    /// If `on_window_created` still returns `false` (e.g. the window is not
+    /// yet visible), we do **not** re-add it to `pending_creations` here:
+    /// apps often fire several `NAMECHANGE`s during initialization, so the
+    /// next one will give us another opportunity.
+    pub(super) fn on_window_name_change(&mut self, hwnd: isize) {
+        if self.registry.is_tracked(hwnd) {
+            // Tracked windows fire NAMECHANGE frequently (e.g. a terminal's
+            // title updating on every prompt). Re-classifying them would risk
+            // layout churn, so we silently ignore these — no log line, to avoid
+            // flooding the daemon log with per-keystroke title updates.
+            return;
+        }
+        // Untracked window just got a name — likely a late-titled app (such as
+        // Windows Terminal, which sets its title only after its child shell
+        // starts). Give it a second chance at the full creation pipeline.
+        log::debug!(
+            "on_window_name_change: {hwnd:#x} not tracked — re-attempting creation (late title?)"
+        );
+        // Re-attempt registration. The window now has a title (this is a
+        // NAMECHANGE event), so handle_created's title-empty gate should pass.
+        // If it still returns false, we simply wait for the next NAMECHANGE.
+        self.on_window_created(hwnd);
     }
 }

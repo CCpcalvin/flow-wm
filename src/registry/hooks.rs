@@ -35,7 +35,10 @@
 //!
 //! # Hook Registration
 //!
-//! Four hooks are registered as event ranges:
+//! Six hooks are registered. Four as event ranges and two as single-event
+//! hooks (so the ultra-noisy `EVENT_OBJECT_LOCATIONCHANGE`, which sits between
+//! `STATECHANGE` and `NAMECHANGE` in the numeric ordering, is deliberately
+//! excluded):
 //!
 //! | Hook | Event Range | Purpose |
 //! |------|-------------|---------|
@@ -43,6 +46,28 @@
 //! | FOREGROUND | `EVENT_SYSTEM_FOREGROUND` | Focus changes |
 //! | MINIMIZE | `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` | Minimize/restore |
 //! | SHOW/HIDE | `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` | Tray-hide, DWM cloak, re-show |
+//! | STATECHANGE | `EVENT_OBJECT_STATECHANGE` (single) | Maximized/fullscreen recovery |
+//! | NAMECHANGE | `EVENT_OBJECT_NAMECHANGE` (single) | Late-title recovery (e.g. Windows Terminal) |
+//!
+//! ## Recovery hooks (STATECHANGE + NAMECHANGE)
+//!
+//! The last two hooks exist to recover windows that `EVENT_OBJECT_CREATE`
+//! misses. `CREATE` fires very early in the Win32 lifecycle — before a window
+//! is visible, titled, or has finalized its styles. stm's registration gate
+//! (visible + titled) therefore drops some windows that *would* otherwise tile:
+//!
+//! - **Late title (NAMECHANGE recovery)**: apps like Windows Terminal set
+//!   their title asynchronously, often more than 500 ms after creation. By the
+//!   time the title arrives, the `CREATE` retry budget is exhausted. The
+//!   `NAMECHANGE` hook lets stm re-attempt registration when the title finally
+//!   lands — but only for windows not already tracked, to avoid re-classifying
+//!   every window on every title change.
+//!
+//! - **Maximized at launch (STATECHANGE recovery)**: a window that starts
+//!   maximized is classified `Ignored(Maximized)`. The `STATECHANGE` hook lets
+//!   stm re-evaluate it once the user restores it (`WS_MAXIMIZE` flips off),
+//!   so it can join the layout. Only windows currently
+//!   `Ignored(Maximized|Fullscreen)` are re-evaluated.
 //!
 //! # Cleanup
 //!
@@ -94,6 +119,36 @@ const EVENT_OBJECT_SHOW: u32 = 0x8002;
 /// `EVENT_SYSTEM_MINIMIZESTART` does NOT cover. Without this hook, tray-hidden
 /// windows remain in the registry's virtual layout as blank columns.
 const EVENT_OBJECT_HIDE: u32 = 0x8003;
+
+/// `EVENT_OBJECT_STATECHANGE` — a window object's state bits changed.
+///
+/// Fires when Win32 window-state bits flip — most importantly `WS_MAXIMIZE`
+/// being set or cleared. stm uses this to *recover* a window that was ignored
+/// at creation because it launched maximized (or fullscreen): once the user
+/// restores it, the state bits change and we re-classify it so it can join
+/// the tiling layout. See Option D in the module-level hook table.
+///
+/// Note: this event fires for many state bits, not just maximize, so the
+/// daemon handler filters aggressively (cheap registry lookup first, win32
+/// queries only for windows currently `Ignored(Maximized|Fullscreen)`).
+const EVENT_OBJECT_STATECHANGE: u32 = 0x800A;
+
+// `EVENT_OBJECT_LOCATIONCHANGE` (0x800B) is deliberately NOT hooked. It fires
+// on every pixel of window move/resize and would flood the event channel.
+// Maximize/restore is already covered by STATECHANGE above.
+
+/// `EVENT_OBJECT_NAMECHANGE` — a window object's name (title) changed.
+///
+/// This is the key event for recovering windows whose title arrives *late*.
+/// `EVENT_OBJECT_CREATE` fires very early in the Win32 lifecycle — often before
+/// the window has a title. Apps like Windows Terminal set their title
+/// asynchronously (only after their hosted shell starts), routinely more than
+/// 500 ms after `CREATE`. Because stm's title-empty gate drops titleless
+/// windows after a short retry window, such windows are never registered.
+/// `NAMECHANGE` fires the moment the title finally lands, giving stm a second
+/// chance to classify and register the window. See Option A in the module-level
+/// hook table.
+const EVENT_OBJECT_NAMECHANGE: u32 = 0x800C;
 
 /// `OBJID_WINDOW` — identifies the window object itself (not a child).
 const OBJID_WINDOW: i32 = 0x0000;
@@ -164,6 +219,36 @@ pub enum HookEvent {
     /// minimize also fires HIDE).
     Hidden {
         /// The hidden window handle value.
+        hwnd: isize,
+    },
+    /// A window's state bits changed (`EVENT_OBJECT_STATECHANGE`).
+    ///
+    /// Used by the daemon to *recover* a window that was ignored at creation
+    /// because it launched maximized/fullscreen. When the user later restores
+    /// the window, `WS_MAXIMIZE` flips and this event fires; the daemon then
+    /// re-classifies the window and (if it now qualifies) adds it to the
+    /// layout. The handler only acts on tracked windows currently in the
+    /// `Ignored(Maximized|Fullscreen)` state, so the common-case cost is a
+    /// single `HashMap` lookup.
+    ///
+    /// This does **not** handle the reverse direction (a tiled window becoming
+    /// maximized) — that remains a pre-existing limitation.
+    StateChange {
+        /// The window whose state bits changed.
+        hwnd: isize,
+    },
+    /// A window's name (title) changed (`EVENT_OBJECT_NAMECHANGE`).
+    ///
+    /// This is the recovery path for windows whose title arrives *late* — most
+    /// notably Windows Terminal, which sets its title asynchronously after its
+    /// hosted shell starts. Because `EVENT_OBJECT_CREATE` fires before the
+    /// title exists, stm's title-empty gate drops such windows after a short
+    /// retry window. `NAMECHANGE` gives stm a second chance: when the title
+    /// finally lands, the daemon re-attempts registration **only for windows
+    /// not already tracked** (re-classifying a tracked window on every title
+    /// change would cause layout churn).
+    NameChange {
+        /// The window whose title changed.
         hwnd: isize,
     },
 }
@@ -435,11 +520,18 @@ fn run_hook_loop() {
 /// Returns a vector of hook handles. Each handle must be unregistered via
 /// `UnhookWinEvent` when the hook thread exits.
 ///
-/// Hooks are registered as ranges:
-/// - `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` (create + destroy)
-/// - `EVENT_SYSTEM_FOREGROUND` (focus change)
-/// - `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` (minimize/restore)
-/// - `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` (tray-hide, DWM cloak, re-show)
+/// Hooks are registered:
+/// - `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` (range; create + destroy)
+/// - `EVENT_SYSTEM_FOREGROUND` (single; focus change)
+/// - `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` (range; minimize/restore)
+/// - `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` (range; tray-hide, DWM cloak, re-show)
+/// - `EVENT_OBJECT_STATECHANGE` (single; maximized/fullscreen recovery)
+/// - `EVENT_OBJECT_NAMECHANGE` (single; late-title recovery)
+///
+/// `STATECHANGE` and `NAMECHANGE` are registered as **single-event** hooks
+/// rather than a `0x800A..=0x800C` range so that the intervening
+/// `EVENT_OBJECT_LOCATIONCHANGE` (`0x800B`) is NOT hooked — it fires on every
+/// pixel of window movement and would flood the channel.
 fn register_hooks() -> Vec<HWINEVENTHOOK> {
     let mut hooks = Vec::new();
 
@@ -522,6 +614,54 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
         log::error!("failed to hook SHOW/HIDE");
     }
 
+    // Hook: EVENT_OBJECT_STATECHANGE (single event)
+    //
+    // Registered as a single-event hook (min == max == STATECHANGE) so the
+    // immediately-following EVENT_OBJECT_LOCATIONCHANGE (0x800B) is NOT
+    // included. LOCATIONCHANGE fires on every move/resize pixel and would
+    // overwhelm the channel. STATECHANGE alone covers the maximize/restore
+    // transition (WS_MAXIMIZE bit flip) that drives Option D recovery.
+    let h = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_STATECHANGE,
+            EVENT_OBJECT_STATECHANGE,
+            None,
+            Some(hook_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if is_valid_hook(h) {
+        hooks.push(h);
+        log::debug!("hook registered: STATECHANGE");
+    } else {
+        log::error!("failed to hook STATECHANGE");
+    }
+
+    // Hook: EVENT_OBJECT_NAMECHANGE (single event)
+    //
+    // Drives Option A recovery: when a window's title finally arrives (e.g.
+    // Windows Terminal's async title), this fires and the daemon re-attempts
+    // registration for windows it does not yet track.
+    let h = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_NAMECHANGE,
+            EVENT_OBJECT_NAMECHANGE,
+            None,
+            Some(hook_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if is_valid_hook(h) {
+        hooks.push(h);
+        log::debug!("hook registered: NAMECHANGE");
+    } else {
+        log::error!("failed to hook NAMECHANGE");
+    }
+
     hooks
 }
 
@@ -572,6 +712,8 @@ unsafe extern "system" fn hook_callback(
         EVENT_SYSTEM_MINIMIZEEND => HookEvent::MinimizeEnd { hwnd: hwnd_val },
         EVENT_OBJECT_SHOW => HookEvent::Shown { hwnd: hwnd_val },
         EVENT_OBJECT_HIDE => HookEvent::Hidden { hwnd: hwnd_val },
+        EVENT_OBJECT_STATECHANGE => HookEvent::StateChange { hwnd: hwnd_val },
+        EVENT_OBJECT_NAMECHANGE => HookEvent::NameChange { hwnd: hwnd_val },
         _ => return, // Ignore other events in the range.
     };
 
@@ -615,5 +757,35 @@ mod tests {
         assert_eq!(EVENT_OBJECT_SHOW, 0x8002);
         assert_eq!(EVENT_OBJECT_HIDE, 0x8003);
         assert!(EVENT_OBJECT_SHOW < EVENT_OBJECT_HIDE);
+    }
+
+    #[test]
+    fn hook_event_name_change_carries_hwnd() {
+        let ev = HookEvent::NameChange { hwnd: 24680 };
+        match ev {
+            HookEvent::NameChange { hwnd } => assert_eq!(hwnd, 24680),
+            _ => panic!("expected NameChange"),
+        }
+    }
+
+    #[test]
+    fn hook_event_state_change_carries_hwnd() {
+        let ev = HookEvent::StateChange { hwnd: 13579 };
+        match ev {
+            HookEvent::StateChange { hwnd } => assert_eq!(hwnd, 13579),
+            _ => panic!("expected StateChange"),
+        }
+    }
+
+    #[test]
+    fn event_object_statechange_namechange_constants_correct() {
+        // Microsoft Win32 event-constant values (verify invariant).
+        assert_eq!(EVENT_OBJECT_STATECHANGE, 0x800A);
+        assert_eq!(EVENT_OBJECT_NAMECHANGE, 0x800C);
+        // STATECHANGE < LOCATIONCHANGE (0x800B, intentionally NOT hooked)
+        //   < NAMECHANGE — so a 0x800A..=0x800C range would wrongly include
+        //   the noisy LOCATIONCHANGE. The single-event registration avoids it.
+        assert!(EVENT_OBJECT_STATECHANGE < 0x800B);
+        assert!(0x800B < EVENT_OBJECT_NAMECHANGE);
     }
 }
