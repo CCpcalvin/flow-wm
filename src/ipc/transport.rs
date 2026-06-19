@@ -6,23 +6,49 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::core::HRESULT;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    ReadFile, WriteFile,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
+    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
+use windows::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, WaitForSingleObject};
 
 use super::message::{self, SocketMessage, SocketResponse};
 
 /// Read buffer size for pipe I/O (8 KiB).
 const BUF_SIZE: u32 = 8192;
+
+/// Maximum wall-clock time a single client-side IPC round trip may take.
+///
+/// The CLI's transport is a request/response pair: write a message, then read
+/// the daemon's reply. With a *synchronous* (blocking) pipe read there is no
+/// escape hatch if the daemon accepts the connection but never replies — the
+/// caller blocks forever. This is exactly what produced the integration-test
+/// hang: a test panicking mid-cleanup destroys its windows, the daemon's main
+/// thread stalls recomputing layout (including `SetWindowPos`, which is
+/// unreliable on isolated test desktops), and so it never reads the `Stop`
+/// command the dropping `DaemonGuard` sends.
+///
+/// The client pipe is therefore opened for **overlapped** I/O and every
+/// read/write is bounded by this deadline (see [`read_line_overlapped`] and
+/// [`write_all_overlapped`]). Thirty seconds is deliberately generous — a
+/// healthy daemon answers in milliseconds, so this ceiling only ever trips when
+/// the daemon is genuinely stuck, at which point failing fast beats hanging.
+const IPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Win32 `ERROR_IO_PENDING` (997 / `0x3E5`) expressed as the `HRESULT`
+/// windows-rs returns from an overlapped `ReadFile`/`WriteFile` that has not
+/// yet completed. It is the normal "operation in flight" result, not an error.
+const ERROR_IO_PENDING_HRESULT: HRESULT = HRESULT(0x8007_03E5_u32 as i32);
 
 /// Wrapper around a Windows `HANDLE` that is closed on drop.
 ///
@@ -361,6 +387,211 @@ fn write_all(handle: HANDLE, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+// ── Overlapped (deadline-bounded) client I/O ────────────────────────
+//
+// The synchronous `read_line`/`write_all` above block forever: a `ReadFile`
+// on a byte-mode pipe returns only when data arrives or the peer disconnects,
+// with no timeout. That is acceptable for the *server* (whose clients are
+// one-shot `stm` invocations that always send immediately), but dangerous for
+// the *client*: if the daemon accepts the connection yet never replies, the
+// CLI — or a test's cleanup path — hangs indefinitely.
+//
+// The functions below service the client side of `send_message_to`. Because
+// the client handle is opened with `FILE_FLAG_OVERLAPPED` (see
+// [`connect_to_named_pipe`]), each I/O can be initiated asynchronously and
+// then awaited with a deadline. On timeout the outstanding operation is
+// cancelled via `CancelIo`, so an unresponsive daemon yields a `TimedOut`
+// error instead of a permanent hang.
+
+/// Convert a deadline (`Instant`) into the millisecond argument expected by
+/// [`WaitForSingleObject`], clamped at zero. Returns `None` if the deadline
+/// has already passed.
+fn ms_until(deadline: Instant) -> Option<u32> {
+    let dur = deadline.checked_duration_since(Instant::now())?;
+    // `WaitForSingleObject` takes a `u32`; cap at u32::MAX (~49 days).
+    let ms = dur.as_millis().min(u128::from(u32::MAX)) as u32;
+    Some(ms.max(1)) // never pass 0 (would mean "return immediately without waiting")
+}
+
+/// Block until the overlapped operation associated with `overlapped` completes
+/// or `deadline` expires.
+///
+/// # Returns
+///
+/// On completion this calls [`GetOverlappedResult`] to retrieve the number of
+/// bytes transferred and returns it. On timeout it cancels the operation with
+/// [`CancelIo`] and returns a `TimedOut` error. Any other wait/I/O failure is
+/// mapped to a `BrokenPipe` error.
+///
+/// # Safety
+///
+/// `overlapped` must reference an operation that was just started on `handle`
+/// with the given event, and `event` must be the event recorded in
+/// `overlapped.hEvent`.
+unsafe fn await_overlapped(
+    handle: HANDLE,
+    event: HANDLE,
+    overlapped: &OVERLAPPED,
+    deadline: Instant,
+) -> io::Result<u32> {
+    let ms = ms_until(deadline).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::TimedOut, "IPC operation timed out (deadline passed)")
+    })?;
+
+    match unsafe { WaitForSingleObject(event, ms) } {
+        // WAIT_OBJECT_0 (0): the overlapped operation's event was signalled —
+        // it completed. Retrieve the authoritative byte count.
+        WAIT_OBJECT_0 => {
+            let mut transferred = 0u32;
+            // SAFETY: `overlapped` was just used to start an I/O on `handle`
+            // and its event has signalled completion; we only read the result.
+            unsafe {
+                GetOverlappedResult(handle, overlapped, &mut transferred, false)
+            }
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::BrokenPipe, format!("GetOverlappedResult: {e}"))
+            })?;
+            Ok(transferred)
+        }
+        // WAIT_TIMEOUT (258): the deadline expired before any I/O completed.
+        // Cancel the in-flight operation so the kernel releases the buffers,
+        // then surface a timeout.
+        WAIT_TIMEOUT => {
+            // SAFETY: cancelling I/O on our own client handle.
+            let _ = unsafe { CancelIo(handle) };
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "IPC operation timed out waiting for the daemon",
+            ))
+        }
+        other => {
+            // SAFETY: as above.
+            let _ = unsafe { CancelIo(handle) };
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("WaitForSingleObject returned {other:?}"),
+            ))
+        }
+    }
+}
+
+/// Write all of `data` to an overlapped pipe handle, bounded by `deadline`.
+///
+/// Loops until every byte is written, each chunk awaited via
+/// [`await_overlapped`]. Returns `TimedOut` if the deadline passes before the
+/// write completes.
+fn write_all_overlapped(handle: HANDLE, data: &[u8], deadline: Instant) -> io::Result<()> {
+    let event = EventHandle::new()?;
+    let mut total = 0usize;
+
+    while total < data.len() {
+        // Manual-reset event: reset before each operation so the signal from a
+        // previous chunk doesn't make the next wait return spuriously.
+        let _ = unsafe { ResetEvent(event.raw()) };
+        let mut overlapped = OVERLAPPED {
+            hEvent: event.raw(),
+            ..Default::default()
+        };
+        let mut written = 0u32;
+
+        let result = unsafe {
+            WriteFile(
+                handle,
+                Some(&data[total..]),
+                Some(&mut written),
+                Some(&mut overlapped),
+            )
+        };
+
+        match result {
+            // Completed synchronously — `written` is already authoritative.
+            Ok(()) => {}
+            Err(e) if e.code() == ERROR_IO_PENDING_HRESULT => {
+                written = unsafe { await_overlapped(handle, event.raw(), &overlapped, deadline)? };
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("WriteFile: {e}"),
+                ));
+            }
+        }
+
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "WriteFile wrote zero bytes",
+            ));
+        }
+        total += written as usize;
+    }
+
+    Ok(())
+}
+
+/// Read a newline-terminated line from an overlapped pipe handle, bounded by
+/// `deadline`.
+///
+/// Each chunk is read asynchronously and awaited via [`await_overlapped`]; the
+/// function returns as soon as a `\n` is seen. If `deadline` passes with no
+/// data, the outstanding read is cancelled and a `TimedOut` error is returned.
+fn read_line_overlapped(handle: HANDLE, deadline: Instant) -> io::Result<String> {
+    let event = EventHandle::new()?;
+    let mut buf = vec![0u8; BUF_SIZE as usize];
+    let mut raw: Vec<u8> = Vec::new();
+
+    loop {
+        let _ = unsafe { ResetEvent(event.raw()) };
+        let mut overlapped = OVERLAPPED {
+            hEvent: event.raw(),
+            ..Default::default()
+        };
+        let mut bytes_read = 0u32;
+
+        let result = unsafe {
+            ReadFile(
+                handle,
+                Some(buf.as_mut_slice()),
+                Some(&mut bytes_read),
+                Some(&mut overlapped),
+            )
+        };
+
+        match result {
+            Ok(()) => {}
+            Err(e) if e.code() == ERROR_IO_PENDING_HRESULT => {
+                bytes_read =
+                    unsafe { await_overlapped(handle, event.raw(), &overlapped, deadline)? };
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("ReadFile: {e}"),
+                ));
+            }
+        }
+
+        if bytes_read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer disconnected",
+            ));
+        }
+
+        raw.extend_from_slice(&buf[..bytes_read as usize]);
+        if raw.contains(&b'\n') {
+            break;
+        }
+    }
+
+    String::from_utf8(raw).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("non-UTF-8 data from pipe: {e}"),
+        )
+    })
+}
+
 /// Connect to the daemon's named pipe, send a message, and read the response.
 ///
 /// This is the primary function used by the `stm` CLI to communicate with
@@ -382,18 +613,32 @@ pub fn send_message(msg: &SocketMessage) -> io::Result<SocketResponse> {
 /// from the `STM_PIPE_NAME` environment variable. Thread-safe for concurrent
 /// use with different pipe names (no global env-var mutation).
 ///
+/// # Timeout behaviour
+///
+/// The whole request/response is bounded by [`IPC_TIMEOUT`]. The client pipe
+/// is opened for overlapped I/O and each read/write is awaited with that
+/// deadline; if the daemon never replies (or replies too slowly) the call
+/// returns [`io::ErrorKind::TimedOut`] instead of blocking forever. This is
+/// what stops an unresponsive daemon from hanging the CLI — or, during panic
+/// unwinding, a test's `DaemonGuard` drop.
+///
 /// # Errors
 ///
-/// Same as [`send_message`].
+/// - `ConnectionRefused` if the daemon is not running (pipe does not exist).
+/// - `TimedOut` if the daemon does not complete the round trip within
+///   [`IPC_TIMEOUT`].
+/// - `InvalidData` if serialisation fails or the daemon sends a malformed response.
+/// - Other I/O errors for transport failures.
 pub fn send_message_to(pipe_name: &str, msg: &SocketMessage) -> io::Result<SocketResponse> {
     let handle = connect_to_named_pipe(pipe_name)?;
+    let deadline = Instant::now() + IPC_TIMEOUT;
 
-    // Write the message
+    // Write the message (overlapped, deadline-bounded).
     let wire = message::encode_message(msg)?;
-    write_all(handle.raw(), wire.as_bytes())?;
+    write_all_overlapped(handle.raw(), wire.as_bytes(), deadline)?;
 
-    // Read the response
-    let line = read_line(handle.raw())?;
+    // Read the response (overlapped, same overall deadline).
+    let line = read_line_overlapped(handle.raw(), deadline)?;
 
     message::decode_message(&line).ok_or_else(|| {
         io::Error::new(
@@ -433,6 +678,12 @@ fn connect_to_pipe() -> io::Result<PipeHandle> {
 }
 
 /// Open a named pipe by path, returning an RAII-wrapped handle.
+///
+/// The handle is opened for **overlapped I/O** (`FILE_FLAG_OVERLAPPED`) so that
+/// every read and write on it can be bounded by a deadline (see
+/// [`send_message_to`]). This is what prevents an unresponsive daemon from
+/// hanging the CLI/test forever: overlapped operations are awaited with
+/// [`WaitForSingleObject`] and cancelled with [`CancelIo`] on timeout.
 fn connect_to_named_pipe(pipe_name: &str) -> io::Result<PipeHandle> {
     let name = wide(pipe_name);
     let handle = unsafe {
@@ -442,7 +693,7 @@ fn connect_to_named_pipe(pipe_name: &str) -> io::Result<PipeHandle> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
             None,
         )
     }
