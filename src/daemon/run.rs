@@ -294,6 +294,20 @@ impl ScrollTilingManager {
                 HookEvent::Hidden { hwnd } => {
                     self.on_window_hidden(hwnd);
                 }
+                HookEvent::StateChange { hwnd } => {
+                    // Option D recovery: a window ignored at creation because
+                    // it launched maximized/fullscreen may now be restored.
+                    // The handler re-classifies only tracked, OS-ignored
+                    // windows, so this is cheap when nothing is recoverable.
+                    self.on_window_state_change(hwnd);
+                }
+                HookEvent::NameChange { hwnd } => {
+                    // Option A recovery: a window whose title arrived late
+                    // (e.g. Windows Terminal) gets a second chance at
+                    // registration. The handler only acts on untracked
+                    // windows to avoid re-classifying tracked ones.
+                    self.on_window_name_change(hwnd);
+                }
             }
         }
     }

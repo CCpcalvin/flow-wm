@@ -838,6 +838,139 @@ impl WindowRegistry {
         }
     }
 
+    /// Returns `true` iff `hwnd` is currently tracked by the registry,
+    /// regardless of state (tiling, floating, or ignored).
+    ///
+    /// Used by the daemon's late-title recovery path
+    /// ([`HookEvent::NameChange`](super::HookEvent::NameChange)) to decide
+    /// whether a title change concerns a window stm already manages. Acting
+    /// only on *untracked* windows avoids re-classifying (and potentially
+    /// re-tiling) tracked windows on every title change, which would churn
+    /// the layout.
+    ///
+    /// # Arguments
+    ///
+    /// * `hwnd_val` - The window handle value (HWND as `isize`).
+    #[must_use]
+    pub fn is_tracked(&self, hwnd_val: isize) -> bool {
+        self.windows.contains_key(&hwnd_val)
+    }
+
+    /// Re-evaluates a tracked window's OS state (maximized/fullscreen) and
+    /// updates its stored [`WindowState`] if that state has changed.
+    ///
+    /// Drives Option D recovery: a window that launched maximized or
+    /// fullscreen was classified `Ignored(Maximized|Fullscreen)` and never
+    /// entered the tiling layout. When the user later restores it,
+    /// `EVENT_OBJECT_STATECHANGE` fires; the daemon calls this method to
+    /// re-run the classifier against the window's *current* OS state. If the
+    /// window is now tile-eligible, the returned
+    /// [`Recovered`](super::types::ReclassifyResult::Recovered) variant tells
+    /// the daemon to insert it into the live layout.
+    ///
+    /// # Filtering — why this is cheap on a noisy event
+    ///
+    /// `EVENT_OBJECT_STATECHANGE` fires for many state bits on many windows.
+    /// This method short-circuits in every non-recovery case, so the common
+    /// path is a single `HashMap` lookup plus a state match:
+    ///
+    /// - **Untracked** → [`Untracked`](super::types::ReclassifyResult::Untracked)
+    ///   (the window is not managed by stm; let `CREATE`/`NAMECHANGE` handle it).
+    /// - **Not OS-ignored** → [`NotApplicable`](super::types::ReclassifyResult::NotApplicable)
+    ///   (the window is already tiling/floating, or ignored by an explicit
+    ///   rule). OS-state recovery does not touch rule-classified windows.
+    /// - **Still OS-ignored** → [`Unchanged`](super::types::ReclassifyResult::Unchanged)
+    ///   (the user has not actually restored the window; `IsZoomed`/fullscreen
+    ///   still true).
+    ///
+    /// Only when the stored state *was* OS-ignored but the live Win32 state no
+    /// longer matches do we pay for a full re-classification (which clones the
+    /// stored metadata strings — acceptable, since this runs only on a genuine
+    /// recovery, not on every `STATECHANGE`).
+    ///
+    /// # Why not the reverse direction?
+    ///
+    /// This method recovers ignored → tiling only. It deliberately does NOT
+    /// turn a tiling window into `Ignored(Maximized)` when the user maximizes
+    /// it; that would evict an in-layout window on every maximize and is a
+    /// separate, opt-in behavior outside this recovery feature's scope.
+    ///
+    /// # Arguments
+    ///
+    /// * `hwnd_val` - The window handle value (HWND as `isize`).
+    #[must_use]
+    pub fn reclassify_os_state(&mut self, hwnd_val: isize) -> super::types::ReclassifyResult {
+        use super::types::ReclassifyResult;
+
+        // Stage 1: cheap read-only check — is this window a recovery candidate?
+        // Returns early for every common non-recovery case (untracked, or
+        // tracked-but-not-OS-ignored), so the noisy STATECHANGE event costs
+        // almost nothing on the happy path. `was_maximized`/`was_fullscreen`
+        // are Copy bools, so no borrow is held past this block.
+        let (was_maximized, was_fullscreen) = match self.windows.get(&hwnd_val) {
+            None => return ReclassifyResult::Untracked,
+            Some(window) => {
+                let mx = matches!(window.state, WindowState::Ignored(IgnoredReason::Maximized));
+                let fs = matches!(
+                    window.state,
+                    WindowState::Ignored(IgnoredReason::Fullscreen)
+                );
+                if !mx && !fs {
+                    return ReclassifyResult::NotApplicable;
+                }
+                (mx, fs)
+            }
+        };
+
+        // Stage 2: query the live OS state. No registry borrow is held here,
+        // and these use the same predicates the classification pipeline applied
+        // at creation time, so recovery stays consistent with initial classify.
+        let hwnd = HWND(hwnd_val as *mut _);
+        let is_maximized = win32::is_zoomed(hwnd);
+        let is_fullscreen = win32::is_fullscreen(hwnd).unwrap_or(false);
+
+        // If the OS condition that originally caused the ignore is still in
+        // effect, the user hasn't restored the window — nothing to do.
+        if (was_maximized && is_maximized) || (was_fullscreen && is_fullscreen) {
+            return ReclassifyResult::Unchanged;
+        }
+
+        // Stage 3: the OS state genuinely changed — re-run the classifier. We
+        // rebuild the candidate from the stored metadata: the app identity has
+        // not changed, only its maximized/fullscreen state has. (Note: the
+        // result may still be ignored, e.g. maximized → fullscreen; that's fine
+        // — `now_tiling` will be false and the daemon simply won't tile it.)
+        let new_state = match self.windows.get(&hwnd_val) {
+            Some(window) => {
+                let candidate = classification::WindowCandidate {
+                    exe: window.exe.clone(),
+                    title: window.title.clone(),
+                    class: window.class.clone(),
+                    process_path: window.process_path.to_string_lossy().into_owned(),
+                };
+                classification::classify_with_state_pipeline(
+                    &candidate,
+                    is_maximized,
+                    is_fullscreen,
+                    &self.pipeline,
+                )
+            }
+            // The window vanished between stages (e.g. destroyed mid-recovery).
+            None => return ReclassifyResult::Untracked,
+        };
+        let now_tiling = matches!(new_state, WindowState::Tiling(_));
+
+        // Stage 4: commit the new state.
+        if let Some(window) = self.windows.get_mut(&hwnd_val) {
+            window.state = new_state;
+        }
+        log::info!(
+            "reclassify_os_state: window isize={hwnd_val} recovered \
+             (is_maximized={is_maximized}, is_fullscreen={is_fullscreen}, now_tiling={now_tiling})"
+        );
+        ReclassifyResult::Recovered { now_tiling }
+    }
+
     /// Handles a window creation event from the WinEvent hook.
     /// 6. Delegates to [`register_window_from_info`](Self::register_window_from_info).
     ///
@@ -1038,6 +1171,7 @@ unsafe extern "system" fn enum_windows_callback(
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::ReclassifyResult;
     use super::*;
     use crate::config::types::{WindowAction, WindowRulesConfig};
 
@@ -1982,5 +2116,207 @@ mod tests {
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
         let _result: super::super::types::VisibilityChange = reg.reconcile_visibility(0);
+    }
+
+    // ── is_tracked tests ───────────────────────────────────────────────
+    //
+    // is_tracked is a cheap HashMap::contains_key wrapper. Fully
+    // unit-testable — no Win32 calls.
+
+    #[test]
+    fn is_tracked_true_for_registered_window() {
+        // Positive: a window in the registry should return true.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        assert!(reg.is_tracked(42));
+    }
+
+    #[test]
+    fn is_tracked_false_for_unknown_hwnd() {
+        // Negative: an HWND never inserted should return false.
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        assert!(!reg.is_tracked(99999));
+    }
+
+    #[test]
+    fn is_tracked_false_after_removal() {
+        // Negative: after removing a window, is_tracked should return false.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            77,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        assert!(reg.is_tracked(77));
+        reg.remove_window(77);
+        assert!(!reg.is_tracked(77));
+    }
+
+    #[test]
+    fn is_tracked_works_for_all_window_states() {
+        // Positive: is_tracked should return true regardless of window state
+        // (tiling, floating, ignored) — it checks existence, not state.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        insert_test_window(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        insert_test_window(
+            &mut reg,
+            20,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            }),
+        );
+        insert_test_window(&mut reg, 30, WindowState::Ignored(IgnoredReason::Maximized));
+
+        assert!(reg.is_tracked(10), "tiling window should be tracked");
+        assert!(reg.is_tracked(20), "floating window should be tracked");
+        assert!(reg.is_tracked(30), "ignored window should be tracked");
+    }
+
+    // ── reclassify_os_state tests ─────────────────────────────────────
+    //
+    // reclassify_os_state has 4 result branches:
+    //   1. Untracked    → pure HashMap miss (unit-testable)
+    //   2. NotApplicable → pure state match (unit-testable)
+    //   3. Unchanged    → calls win32::is_zoomed/is_fullscreen (Win32)
+    //   4. Recovered    → calls win32::is_zoomed/is_fullscreen + classifier (Win32)
+    //
+    // Branches 1 and 2 are short-circuits before any Win32 call, so they
+    // are fully unit-testable. Branches 3 and 4 require a live HWND for
+    // is_zoomed/is_fullscreen and there is NO test seam (trait abstraction /
+    // mock) for these Win32 calls. They are documented as requiring Win32
+    // integration testing.
+
+    #[test]
+    fn reclassify_os_state_untracked_for_unknown_hwnd() {
+        // Positive: untracked window returns ReclassifyResult::Untracked.
+        // This exercises the first short-circuit (HashMap miss, no Win32).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        let result = reg.reclassify_os_state(99999);
+        assert_eq!(result, ReclassifyResult::Untracked);
+    }
+
+    #[test]
+    fn reclassify_os_state_untracked_after_removal() {
+        // Negative: a window removed between the STATECHANGE event and the
+        // reclassify call should return Untracked (window vanished mid-event).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(&mut reg, 55, WindowState::Ignored(IgnoredReason::Maximized));
+        reg.remove_window(55);
+        let result = reg.reclassify_os_state(55);
+        assert_eq!(result, ReclassifyResult::Untracked);
+    }
+
+    #[test]
+    fn reclassify_os_state_not_applicable_for_tiling_window() {
+        // Positive: a tiling window is not in an OS-ignored state, so
+        // reclassify returns NotApplicable (no Win32 call).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        let result = reg.reclassify_os_state(42);
+        assert_eq!(result, ReclassifyResult::NotApplicable);
+    }
+
+    #[test]
+    fn reclassify_os_state_not_applicable_for_floating_window() {
+        // Positive: a floating window is not OS-ignored → NotApplicable.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            88,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 200,
+                },
+            }),
+        );
+        let result = reg.reclassify_os_state(88);
+        assert_eq!(result, ReclassifyResult::NotApplicable);
+    }
+
+    #[test]
+    fn reclassify_os_state_not_applicable_for_explicit_rule_ignored() {
+        // Positive: a window ignored by an explicit rule (not OS state) is
+        // NotApplicable — recovery only targets OS-ignored windows.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            33,
+            WindowState::Ignored(IgnoredReason::ExplicitRule),
+        );
+        let result = reg.reclassify_os_state(33);
+        assert_eq!(result, ReclassifyResult::NotApplicable);
+    }
+
+    #[test]
+    fn reclassify_os_state_not_applicable_for_tiling_minimized() {
+        // Positive: a minimized tiling window is not OS-ignored → NotApplicable.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(&mut reg, 44, WindowState::Tiling(TilingState::Minimized));
+        let result = reg.reclassify_os_state(44);
+        assert_eq!(result, ReclassifyResult::NotApplicable);
+    }
+
+    // ── ReclassifyResult PartialEq tests ────────────────────────────────
+
+    #[test]
+    fn reclassify_result_variants_are_comparable() {
+        // Positive: all ReclassifyResult variants support equality comparison.
+        assert_eq!(ReclassifyResult::Untracked, ReclassifyResult::Untracked);
+        assert_eq!(
+            ReclassifyResult::NotApplicable,
+            ReclassifyResult::NotApplicable
+        );
+        assert_eq!(ReclassifyResult::Unchanged, ReclassifyResult::Unchanged);
+        assert_eq!(
+            ReclassifyResult::Recovered { now_tiling: true },
+            ReclassifyResult::Recovered { now_tiling: true }
+        );
+        assert_eq!(
+            ReclassifyResult::Recovered { now_tiling: false },
+            ReclassifyResult::Recovered { now_tiling: false }
+        );
+        // Negative: variants differ from each other.
+        assert_ne!(ReclassifyResult::Untracked, ReclassifyResult::NotApplicable);
+        assert_ne!(ReclassifyResult::NotApplicable, ReclassifyResult::Unchanged);
+        assert_ne!(
+            ReclassifyResult::Unchanged,
+            ReclassifyResult::Recovered { now_tiling: true }
+        );
+        // Negative: Recovered with different flags are not equal.
+        assert_ne!(
+            ReclassifyResult::Recovered { now_tiling: true },
+            ReclassifyResult::Recovered { now_tiling: false }
+        );
     }
 }

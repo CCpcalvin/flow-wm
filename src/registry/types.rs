@@ -428,3 +428,50 @@ pub enum VisibilityChange {
     /// the matching state, or already Minimized/Ignored.
     Unchanged,
 }
+
+// ── ReclassifyResult ────────────────────────────────────────────────
+
+/// Outcome of an OS-state re-classification pass on a tracked window.
+///
+/// Returned by [`WindowRegistry::reclassify_os_state`](super::core::WindowRegistry::reclassify_os_state)
+/// in response to [`EVENT_OBJECT_STATECHANGE`](super::HookEvent::StateChange).
+/// The daemon layer uses this to decide whether to add the window to the live
+/// layout: only [`ReclassifyResult::Recovered`] with `now_tiling == true`
+/// triggers a layout insertion.
+///
+/// # Why a dedicated result type?
+///
+/// The daemon must distinguish several "no-op" cases from a genuine recovery:
+///
+/// - `Untracked` — the `STATECHANGE` was for a window stm does not manage
+///   (let `NAMECHANGE`/`CREATE` handle it). Cheap HashMap miss; do nothing.
+/// - `NotApplicable` — the window is tracked but not in an OS-ignored state
+///   (e.g. it is already tiling, or ignored by an explicit rule). Do nothing.
+/// - `Unchanged` — the window is still `Ignored(Maximized|Fullscreen)`; the
+///   user has not restored it yet. Do nothing.
+/// - `Recovered` — the OS state genuinely changed; the classifier was
+///   re-run and the window's stored state was updated. The `now_tiling` flag
+///   tells the daemon whether the new state warrants a layout insertion.
+///
+/// This makes the `STATECHANGE` handler both cheap (early-return on the common
+/// no-op cases) and explicit (no spurious layout churn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclassifyResult {
+    /// The window is not tracked by stm. No action.
+    Untracked,
+    /// The window is tracked but was not ignored due to an OS state
+    /// (maximized/fullscreen) — e.g. it is already tiling, floating, or
+    /// ignored by an explicit rule. OS-state recovery does not apply.
+    NotApplicable,
+    /// The window is still ignored due to its current OS state
+    /// (still maximized or fullscreen). No transition occurred.
+    Unchanged,
+    /// The OS state changed and the classifier was re-run; the stored state
+    /// was updated. When `now_tiling` is true the daemon should add the window
+    /// to the live layout.
+    Recovered {
+        /// Whether the window's new state is `Tiling` (and thus belongs in the
+        /// layout). False means it moved to a different ignored/floating state.
+        now_tiling: bool,
+    },
+}

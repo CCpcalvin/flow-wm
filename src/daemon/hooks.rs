@@ -21,7 +21,7 @@
 //! [`mutations::next_available_window`] (left column, then right).
 
 use crate::common::WindowId;
-use crate::registry::types::VisibilityChange;
+use crate::registry::types::{ReclassifyResult, VisibilityChange};
 use crate::registry::win32 as registry_win32;
 
 use super::types::ScrollTilingManager;
@@ -258,5 +258,68 @@ impl ScrollTilingManager {
         if self.registry.is_tiling(hwnd) {
             self.layout.set_focus(WindowId(hwnd));
         }
+    }
+
+    /// Handle `EVENT_OBJECT_STATECHANGE` — Option D recovery for windows that
+    /// launched maximized or fullscreen.
+    ///
+    /// Pipeline:
+    /// 1. `registry.reclassify_os_state(hwnd)` — re-queries the live OS state.
+    ///    If a tracked window was `Ignored(Maximized|Fullscreen)` but is no
+    ///    longer, the classifier is re-run and its stored state is updated.
+    /// 2. If the window transitioned to tiling
+    ///    ([`ReclassifyResult::Recovered`] with `now_tiling == true`):
+    ///    - `layout.add_window(id)` — appends the recovered window to the
+    ///      layout (mirrors [`on_window_restored`](Self::on_window_restored)).
+    ///    - `animate_layout(applied)` — animates the window entering.
+    ///
+    /// # Why `add_window` (append) and not `insert_window`
+    ///
+    /// A recovered window was never part of the layout (it was ignored from
+    /// creation), so there is no saved slot to restore. Appending at the far
+    /// right is the predictable choice and matches the restore/show recovery
+    /// paths. The cheap non-recovery cases (untracked / not OS-ignored /
+    /// still ignored) are filtered inside the registry, so this handler costs
+    /// almost nothing when nothing is recoverable.
+    pub(super) fn on_window_state_change(&mut self, hwnd: isize) {
+        let outcome = self.registry.reclassify_os_state(hwnd);
+        if let ReclassifyResult::Recovered { now_tiling: true } = outcome {
+            let applied = self.layout.add_window(WindowId(hwnd));
+            self.animate_layout(&applied);
+        }
+    }
+
+    /// Handle `EVENT_OBJECT_NAMECHANGE` — Option A recovery for windows whose
+    /// title arrives *after* `EVENT_OBJECT_CREATE`.
+    ///
+    /// Some applications — most notably Windows Terminal — set their window
+    /// title asynchronously, long after `CREATE` fired and after stm's
+    /// pending-creations retry budget has been exhausted. Such windows are
+    /// never registered and silently fall outside the tiling layout.
+    ///
+    /// `NAMECHANGE` fires the moment the title lands. This handler gives stm a
+    /// second chance: if the window is **not already tracked**, it re-attempts
+    /// the full creation pipeline via
+    /// [`on_window_created`](Self::on_window_created).
+    ///
+    /// # Why only untracked windows?
+    ///
+    /// Re-classifying an already-tracked window on every title change would
+    /// risk layout churn (a rule could match the new title differently). The
+    /// [`is_tracked`](crate::registry::WindowRegistry::is_tracked) guard
+    /// ensures we only ever register windows that were missed the first time.
+    ///
+    /// If `on_window_created` still returns `false` (e.g. the window is not
+    /// yet visible), we do **not** re-add it to `pending_creations` here:
+    /// apps often fire several `NAMECHANGE`s during initialization, so the
+    /// next one will give us another opportunity.
+    pub(super) fn on_window_name_change(&mut self, hwnd: isize) {
+        if self.registry.is_tracked(hwnd) {
+            return;
+        }
+        // Re-attempt registration. The window now has a title (this is a
+        // NAMECHANGE event), so handle_created's title-empty gate should pass.
+        // If it still returns false, we simply wait for the next NAMECHANGE.
+        self.on_window_created(hwnd);
     }
 }
