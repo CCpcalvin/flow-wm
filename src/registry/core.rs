@@ -972,7 +972,10 @@ impl WindowRegistry {
     }
 
     /// Handles a window creation event from the WinEvent hook.
-    /// 6. Delegates to [`register_window_from_info`](Self::register_window_from_info).
+    ///
+    /// Applies the visibility/title/Alt+Tab/owner gates below, then delegates
+    /// to [`register_window_from_info`](Self::register_window_from_info) which
+    /// runs the classification pipeline and commits the resulting state.
     ///
     /// # Why Re-check Visibility and Title?
     ///
@@ -989,36 +992,57 @@ impl WindowRegistry {
     /// Returns `None` for floating, ignored, or skipped windows. This allows the
     /// caller (orchestrator) to immediately add the window to the layout engine
     /// without a second lookup.
+    ///
+    /// # Diagnostics
+    ///
+    /// Every early-return path emits a `log::debug!` line naming the gate that
+    /// rejected the window (e.g. `handle_created: skipping HWND(..) — not
+    /// Alt+Tab visible`), mirroring [`scan_existing_windows`](Self::scan_existing_windows).
+    /// This makes the common "window was created but never tiled" failure
+    /// (e.g. an app with an unusual extended-window style or a transient owner)
+    /// directly diagnosable from the daemon log instead of failing silently.
+    /// A window that passes every gate but is classified as non-tiling
+    /// (Floating/Ignored) is logged separately.
     pub fn handle_created(&mut self, hwnd_val: isize) -> Option<crate::common::WindowId> {
-        if self.windows.contains_key(&hwnd_val) {
-            return None; // Already tracked.
-        }
-
         let hwnd = HWND(hwnd_val as *mut _);
+
+        // Already tracked — benign no-op. This can happen on a duplicate
+        // CREATE event or when the init scan already registered the window.
+        // Logged so a "never evaluated" window is distinguishable from one we
+        // correctly de-duplicated.
+        if self.windows.contains_key(&hwnd_val) {
+            log::debug!("handle_created: {hwnd:?} already tracked — skipping");
+            return None;
+        }
 
         // Only manage visible windows with titles.
         if !win32::is_window_visible(hwnd) {
+            log::debug!("handle_created: skipping {hwnd:?} — not visible");
             return None;
         }
 
         let title = win32::get_window_text(hwnd).unwrap_or_default();
         if title.is_empty() {
+            log::debug!("handle_created: skipping {hwnd:?} — empty title");
             return None;
         }
 
         // Skip windows that wouldn't appear in Alt+Tab (tool windows,
         // tray icons, background helpers).
         if !win32::is_alt_tab_visible(hwnd) {
+            log::debug!("handle_created: skipping {hwnd:?} — not Alt+Tab visible");
             return None;
         }
 
         // Skip iconic (minimized) windows — same rationale as scan_existing_windows.
         if win32::is_iconic(hwnd) {
+            log::debug!("handle_created: skipping {hwnd:?} — iconic (minimized)");
             return None;
         }
 
         // Skip windows with an owner (dialogs, popups).
         if has_owner(hwnd) {
+            log::debug!("handle_created: skipping {hwnd:?} — has owner (dialog/popup)");
             return None;
         }
 
@@ -1027,7 +1051,7 @@ impl WindowRegistry {
                 self.register_window_from_info(&info);
             }
             Err(e) => {
-                log::warn!("handle_created: failed to get info for {:?}: {e}", hwnd);
+                log::warn!("handle_created: failed to get info for {hwnd:?}: {e}");
                 return None;
             }
         }
@@ -1036,7 +1060,14 @@ impl WindowRegistry {
         if let Some(window) = self.windows.get(&hwnd_val) {
             match &window.state {
                 WindowState::Tiling(_) => Some(crate::common::WindowId(hwnd_val)),
-                _ => None,
+                // Passed every gate, but classified Floating/Ignored (e.g.
+                // maximized, fullscreen, or an explicit rule) — so it does not
+                // enter the layout. Logged because "passed the gates but still
+                // not tiled" is otherwise indistinguishable from a rejection.
+                other => {
+                    log::debug!("handle_created: {hwnd:?} registered as non-tiling ({other:?})");
+                    None
+                }
             }
         } else {
             None
@@ -1858,6 +1889,98 @@ mod tests {
         // HWND 0 is typically invalid — handle_created should return None.
         let result = reg.handle_created(0);
         assert!(result.is_none());
+    }
+
+    // ── handle_created de-duplication gate tests ──────────────────────
+    //
+    // The first check in `handle_created` is `self.windows.contains_key(&hwnd_val)`.
+    // This gate is the *final guard* that makes the daemon-layer recovery
+    // handlers safe: when both `on_window_name_change` and `on_window_shown`
+    // attempt to register the same HWND (e.g. Windows Terminal's
+    // `Created → NameChange → Shown` lifecycle), the second attempt is a
+    // silent no-op rather than a duplicate registration or layout churn.
+    //
+    // These tests verify that guarantee directly. They are pure (no Win32
+    // calls) because `insert_test_window` inserts straight into the HashMap
+    // and the `contains_key` check fires BEFORE any `win32::` call inside
+    // `handle_created`.
+
+    #[test]
+    fn handle_created_skips_already_tracked_tiling_window() {
+        // Positive: an HWND already registered as Tiling(Active) must be
+        // silently ignored on a second handle_created call. This is the
+        // exact path taken when SHOW recovery re-runs creation for a window
+        // that NAMECHANGE recovery already registered.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        assert_eq!(reg.len(), 1);
+
+        // Second attempt — must return None and leave the registry untouched.
+        let result = reg.handle_created(42);
+        assert!(
+            result.is_none(),
+            "handle_created must no-op on an already-tracked HWND"
+        );
+        assert_eq!(
+            reg.len(),
+            1,
+            "registry size must not change on duplicate handle_created"
+        );
+        // State must be preserved exactly — no spurious reclassification.
+        let w = reg.get_window(HWND(42 as *mut _)).unwrap();
+        assert!(matches!(
+            w.state,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 })
+        ));
+    }
+
+    #[test]
+    fn handle_created_skips_already_tracked_non_tiling_window() {
+        // Edge: the de-dup gate is `contains_key`, which is state-agnostic.
+        // A window registered as Floating or Ignored must also be skipped,
+        // proving the gate's safety claim "an HWND is unique per window"
+        // regardless of classification. (A floating/ignored window that
+        // later receives a SHOW event must not be re-evaluated as tiling.)
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            10,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            }),
+        );
+        insert_test_window(&mut reg, 20, WindowState::Ignored(IgnoredReason::Maximized));
+        assert_eq!(reg.len(), 2);
+
+        // Both must be skipped without reclassification or churn.
+        assert!(reg.handle_created(10).is_none());
+        assert!(reg.handle_created(20).is_none());
+        assert_eq!(
+            reg.len(),
+            2,
+            "non-tiling tracked windows must not be churned"
+        );
+
+        // State preserved.
+        assert!(matches!(
+            reg.get_window(HWND(10 as *mut _)).unwrap().state,
+            WindowState::Floating(_)
+        ));
+        assert!(matches!(
+            reg.get_window(HWND(20 as *mut _)).unwrap().state,
+            WindowState::Ignored(IgnoredReason::Maximized)
+        ));
     }
 
     // ── tiling_window_ids_sorted_by_x tests ──────────────────────────
