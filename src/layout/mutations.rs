@@ -665,6 +665,7 @@ pub fn expand_column(
     let base = config.column_width as i32;
     let shift = config.column_shift();
     let abs_max = config.abs_max_width;
+    debug_assert!(shift > 0, "column_shift must be positive");
 
     // Already at (or beyond) the absolute top — no-op.
     if w >= abs_max {
@@ -688,10 +689,11 @@ pub fn expand_column(
 ///
 /// The mirror of [`expand_column`]. Behaviour from a column of width `W`:
 /// - `W ≤ column_width` → `None` (no-op; already at the ladder floor).
-/// - `W ≥ abs_max_width` → drop to `slot_max` (reverse of the two-step top).
-/// - otherwise → descend one rung: `target = column_width + (n−1) * column_shift`
+/// - otherwise → descend one rung to `target = column_width + (n−1) * column_shift`
 ///   where `n = ceil((W − column_width) / column_shift)`. `ceil` snaps a
-///   between-rung width down to the next boundary.
+///   between-rung (or `abs_max_width`) width down to the next lower boundary.
+///   From `abs_max_width` this lands on `slot_max` (the reverse of expand's
+///   two-step top), or one rung below when `abs_max == slot_max`.
 ///
 /// Note: shrink never goes below `column_width` (the ladder floor). Widths in
 /// `[min_column_width_px, column_width)` are reachable only via drag-resize
@@ -709,19 +711,20 @@ pub fn shrink_column(
     let w = layout.columns[col].width_px;
     let base = config.column_width as i32;
     let shift = config.column_shift();
-    let abs_max = config.abs_max_width;
+    debug_assert!(shift > 0, "column_shift must be positive");
 
     // At or below the ladder floor — no-op.
     if w <= base {
         return None;
     }
-    // Reverse of the two-step top: monocle → top regular slot.
-    if w >= abs_max {
-        return set_column_width(layout, focused, config.slot_max(), config);
-    }
 
-    // Descend one rung. ceil snaps a between-rung width down to the boundary
-    // just below it.
+    // Descend one rung to the next lower slot boundary. This also handles the
+    // `abs_max_width` case: ceil((abs_max - base) / shift) is `max_n + 1` when
+    // `abs_max > slot_max` (lands on `slot_max` — the reverse of expand's
+    // two-step top), and `max_n` when `abs_max == slot_max` (lands one rung
+    // down). The previous explicit `abs_max → slot_max` branch routed through
+    // `set_column_width`, which no-oped when `slot_max == abs_max` because the
+    // target equalled the current width (Bug 2).
     let n = ((w - base) + shift - 1).div_euclid(shift);
     let target_n = (n - 1).max(0);
     let target_px = base + target_n * shift;
@@ -3026,6 +3029,59 @@ mod tests {
         assert_eq!(expanded.columns[0].width_px, 1936);
         let shrunk = shrink_column(&expanded, WindowId(1), &config).expect("shrink");
         assert_eq!(shrunk.columns[0].width_px, 960);
+    }
+
+    // -------------------------------------------------------------------
+    // Bug 2 regression: shrink from abs_max when slot_max == abs_max.
+    //
+    // When `window_gap` divides the monitor evenly, `slot_max` collides with
+    // `abs_max_width`. The old `shrink_column` routed `w >= abs_max` through
+    // `set_column_width(slot_max)`, which returned `None` (target == current)
+    // and froze the column at the top — shrink was impossible. The general
+    // ceil-descent now handles it by landing one rung below.
+    // -------------------------------------------------------------------
+
+    /// Helper: a config where `slot_max == abs_max` (gap = 0).
+    ///
+    /// - monitor=1920, column_width=960, gap=0
+    /// - abs_max = 1920 − 0 = 1920
+    /// - column_shift = 960 + 0 = 960
+    /// - max_n = ⌊(1920 − 960) / 960⌋ = 1
+    /// - slot_max = 960 + 1×960 = 1920 == abs_max  ← the degenerate collision
+    fn slot_max_equals_abs_max_config() -> MutationConfig {
+        MutationConfig {
+            monitor_width: 1920,
+            column_width: 960,
+            min_column_width_px: 480,
+            max_n: 1,
+            abs_max_width: 1920,
+            padding: Padding {
+                window_gap: 0,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 2,
+        }
+    }
+
+    #[test]
+    fn shrink_from_abs_max_when_slot_max_equals_abs_max() {
+        // Bug 2: shrinking from abs_max must NOT no-op when slot_max == abs_max.
+        let config = slot_max_equals_abs_max_config(); // slot_max == abs_max == 1920
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(1920, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
+            0,
+        );
+        let result = shrink_column(&layout, WindowId(1), &config)
+            .expect("shrink from abs_max must succeed even when slot_max == abs_max");
+        // ceil((1920−960)/960) = 1 → target_n = 0 → base + 0 = 960.
+        assert_eq!(
+            result.columns[0].width_px, 960,
+            "shrink from abs_max lands one rung below when slot_max == abs_max"
+        );
     }
 
     // -------------------------------------------------------------------

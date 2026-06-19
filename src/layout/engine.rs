@@ -356,23 +356,22 @@ impl LayoutEngine {
     /// Toggle monocle mode for the focused window.
     pub fn toggle_monocle(&mut self) -> Option<AppliedLayout> {
         let focused = self.focused?;
-        let saved = self.monocle_saved_width.and_then(|(col, w)| {
-            // Only use saved width if it's for the same column
-            if self.virtual_layout.find_window(focused).map(|(c, _)| c) == Some(col) {
-                Some(w)
-            } else {
-                None
-            }
-        });
+        // Resolve the focused column up front, before any mutation runs. If the
+        // focused window isn't in the layout there's nothing to toggle, and
+        // returning early here is safe because nothing has been computed yet.
+        let focused_col = self.virtual_layout.find_window(focused).map(|(c, _)| c)?;
+        let saved = self
+            .monocle_saved_width
+            .and_then(|(col, w)| if col == focused_col { Some(w) } else { None });
         let (new_layout, new_saved) =
             mutations::toggle_monocle(&self.virtual_layout, focused, saved, &self.config)?;
 
-        if let Some(w) = new_saved {
-            let col = self.virtual_layout.find_window(focused).map(|(c, _)| c)?;
-            self.monocle_saved_width = Some((col, w));
-        } else {
-            self.monocle_saved_width = None;
-        }
+        // `focused_col` is still valid: `mutations::toggle_monocle` returns a
+        // brand-new layout and does not mutate `self.virtual_layout`, and it
+        // only succeeded because it located `focused`. Update the cache from
+        // the already-resolved `focused_col` instead of re-looking-up with a
+        // fragile `?` that could swallow the just-computed mutation.
+        self.monocle_saved_width = new_saved.map(|w| (focused_col, w));
 
         Some(self.apply_mutation(new_layout))
     }

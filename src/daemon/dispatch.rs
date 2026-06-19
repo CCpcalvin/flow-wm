@@ -242,7 +242,19 @@ impl ScrollTilingManager {
     /// applied directly and is not snapped to the expand/shrink slot ladder.
     fn dispatch_set_column_width(&mut self, width_px: u32) -> SocketResponse {
         let (min, max) = self.layout.column_width_bounds();
-        let target = width_px as i32;
+        // `u32 → i32` can fail for absurd inputs (`> i32::MAX`). Reject with a
+        // precise message instead of letting the cast wrap negative and report
+        // a misleading value.
+        let target = match i32::try_from(width_px) {
+            Ok(t) => t,
+            Err(_) => {
+                return SocketResponse::Error {
+                    message: format!(
+                        "width_px {width_px} exceeds the maximum representable column width"
+                    ),
+                };
+            }
+        };
         if target < min {
             return SocketResponse::Error {
                 message: format!("width_px must be >= {min}, got {target}"),
