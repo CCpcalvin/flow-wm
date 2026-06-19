@@ -5,6 +5,7 @@
 //! operate on this desktop, leaving the user's main desktop untouched.
 
 use std::ffi::OsStr;
+use std::ops::{Deref, DerefMut};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -190,11 +191,89 @@ impl Drop for TestWindow {
 
 // ── Daemon helpers ──────────────────────────────────────────────────
 
+/// Owns an `stmd` child process and **force-kills it on drop**.
+///
+/// # Why this exists
+///
+/// A plain [`std::process::Child`] is *not* killed when dropped — Rust only
+/// closes the handle, leaving the OS process running. In the integration
+/// tests that is a hazard: the daemon runs its own Win32 message/hook loop
+/// and, on an isolated test desktop, can stall mid-`SetWindowPos` during
+/// layout recomputation. When that happens:
+///
+/// 1. The [`DaemonGuard`] tries `Stop` via the IPC transport. The transport's
+///    overlapped read is deadline-bounded (see `send_message_to`), so this
+///    returns within ~30 s rather than hanging forever — *but* the daemon may
+///    still be alive (it acknowledged `Stop` yet blocked before exiting, or it
+///    never read the `Stop` at all).
+/// 2. Without a kill, the daemon process is orphaned: its parent test process
+///    is gone, nothing will ever wake it from its blocking kernel wait, and it
+///    lingers forever (confirmed in debugging — orphaned `stmd.exe` parked at
+///    0 % CPU that no test can recover).
+///
+/// `KillingChild` closes that hole. On drop it checks whether the daemon has
+/// already exited (via [`Child::try_wait`]); if not, it calls
+/// [`Child::kill`] ([`TerminateProcess`]) — which is unconditional on Windows
+/// and terminates even a process blocked in a kernel wait — then reaps it with
+/// [`Child::wait`]. This is idempotent: an already-exited daemon is left
+/// alone, so normal (graceful) shutdown is unaffected.
+///
+/// Because drop order on a panic runs the [`DaemonGuard`] *first* (graceful
+/// `Stop`) and the daemon handle *second*, the daemon always gets a chance to
+/// exit cleanly before being force-killed.
+///
+/// [`Child::try_wait`]: std::process::Child::try_wait
+/// [`Child::kill`]: std::process::Child::kill
+/// [`Child::wait`]: std::process::Child::wait
+/// [`TerminateProcess`]: windows::Win32::System::Threading::TerminateProcess
+pub struct KillingChild(std::process::Child);
+
+impl KillingChild {
+    /// Wrap a freshly-spawned daemon [`Child`] so it is force-killed on drop.
+    pub fn new(child: std::process::Child) -> Self {
+        Self(child)
+    }
+}
+
+/// Transparent access to the underlying [`Child`] so existing call sites that
+/// use `child.try_wait()` / `child.id()` etc. keep working unchanged.
+impl Deref for KillingChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for KillingChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for KillingChild {
+    fn drop(&mut self) {
+        // If the daemon already exited (graceful `Stop` succeeded) there is
+        // nothing to do — and we must not call `kill()` on a dead process.
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // Otherwise force-terminate (unconditional on Windows) and reap to
+        // avoid a zombie, ignoring errors: the process may have exited in the
+        // race window between `try_wait` and `kill`.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Start `stmd` in test mode on the given desktop.
 ///
 /// The daemon is spawned with `--desktop <name>` so both its main thread
 /// and hook thread join the isolated test desktop.
-pub fn start_test_daemon(pipe: &str, desktop_name: &str) -> Result<std::process::Child, String> {
+///
+/// The returned [`KillingChild`] force-kills the daemon when dropped, so a
+/// test that panics — or a daemon that stalls on the isolated desktop — can
+/// never leak an orphaned `stmd.exe`. See [`KillingChild`] for details.
+pub fn start_test_daemon(pipe: &str, desktop_name: &str) -> Result<KillingChild, String> {
     let exe = assert_cmd::cargo_bin!("stmd");
 
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
@@ -219,7 +298,7 @@ pub fn start_test_daemon(pipe: &str, desktop_name: &str) -> Result<std::process:
             }
             None => {
                 if is_pipe_available(pipe) {
-                    return Ok(child);
+                    return Ok(KillingChild::new(child));
                 }
                 if std::time::Instant::now() >= deadline {
                     return Err("timed out waiting for test daemon to start".into());
