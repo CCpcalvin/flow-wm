@@ -7,9 +7,11 @@
 //! - Individual `dispatch_*` helper methods for each command category.
 //! - Helper functions for unimplemented commands.
 
-use crate::common::Direction;
+use crate::common::{Direction, WindowId};
 use crate::ipc::message::{SocketMessage, SocketResponse};
+use crate::layout::types::ActualLayout;
 use crate::registry::win32 as registry_win32;
+use crate::workspace::{WorkspaceId, workspace_y_offset};
 
 use super::types::ScrollTilingManager;
 
@@ -82,14 +84,17 @@ impl ScrollTilingManager {
 
             // --- Workspace ---
             //
-            // Stubs only: the protocol surface is locked in so the CLI and
-            // keybindings can stabilise, but the animation design for
-            // switching workspaces (vertical analogue of horizontal column
-            // packing) is undecided. Each arm returns the standard
-            // `unimplemented_command` error until the workspace logic lands.
-            SocketMessage::SwitchWorkspace { .. } => unimplemented_command("switch_workspace"),
+            // SwitchWorkspace and MoveWindowToWorkspace animate the
+            // participating workspaces (see [`dispatch_switch_workspace`]
+            // and [`dispatch_move_window_to_workspace`]). SwapWorkspace is
+            // still pending — its animation model is undecided.
+            SocketMessage::SwitchWorkspace { workspace_id } => {
+                self.dispatch_switch_workspace(*workspace_id)
+            }
             SocketMessage::SwapWorkspace { .. } => unimplemented_command("swap_workspace"),
-            SocketMessage::MoveToWorkspace { .. } => unimplemented_command("move_to_workspace"),
+            SocketMessage::MoveWindowToWorkspace { workspace_id } => {
+                self.dispatch_move_window_to_workspace(*workspace_id)
+            }
         }
     }
 
@@ -340,6 +345,272 @@ impl ScrollTilingManager {
                 message: "cannot toggle monocle".into(),
             },
         }
+    }
+
+    /// Switch the active monitor's focus to a different workspace.
+    ///
+    /// Implements the **vertical packing** workspace model: each workspace
+    /// is parked one monitor-height (plus one `window_gap`) above or below
+    /// the active workspace, and only the source (previously active) and
+    /// destination (newly active) workspaces animate during a switch.
+    ///
+    /// # Animation partitioning
+    ///
+    /// Every non-empty workspace on the active monitor is classified into
+    /// exactly one of three buckets:
+    ///
+    /// | Bucket | Workspaces | Action |
+    /// |--------|------------|--------|
+    /// | **Animate** | source (`prev_active_id`) + destination (`target_id`) | submitted to [`animate_workspaces`](Self::animate_workspaces) as a single coordinated batch |
+    /// | **Teleport** | bystanders whose parked side changed (e.g. ws 3-7 when switching 2 → 8) | submitted to [`teleport_workspaces`](Self::teleport_workspaces) — instant `SetWindowPos`, no animator |
+    /// | **Untouched** | bystanders whose parked side stayed the same | skipped entirely |
+    ///
+    /// The animate/teleport split is what keeps the user's attention on the
+    /// two workspaces that are actually transitioning: a 10-workspace switch
+    /// could otherwise animate up to eight bystander workspaces all sliding
+    /// across the screen at once.
+    ///
+    /// # Why teleport before animate?
+    ///
+    /// Teleport is called first so the bystander "backdrop" snaps into its
+    /// post-switch configuration before the participant animation begins.
+    /// If a bystander is currently mid-flight from a prior animation, the
+    /// teleport retargets it instantly to its new parked slot — exactly the
+    /// behaviour we want for windows the user isn't looking at.
+    ///
+    /// # Why no registry sync?
+    ///
+    /// Unlike a layout mutation, a workspace switch does **not** change any
+    /// workspace's [`VirtualLayout`] or [`ActualLayout`] — windows keep their
+    /// workspace-local positions; only their *monitor-stack* y offset
+    /// changes. The registry's `tiled_rects` (workspace-local visible rects)
+    /// stay valid as-is, so neither [`update_tiling_slots_from_layout`] nor
+    /// [`update_tiled_rects`] is called here.
+    ///
+    /// [`update_tiling_slots_from_layout`]:
+    ///     crate::registry::WindowRegistry::update_tiling_slots_from_layout
+    /// [`update_tiled_rects`]:
+    ///     crate::registry::WindowRegistry::update_tiled_rects
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketResponse::Error`] when `target_id` does not match any
+    /// workspace on the active monitor. Switching to the already-active
+    /// workspace is a successful no-op.
+    fn dispatch_switch_workspace(&mut self, target_id_raw: u32) -> SocketResponse {
+        let target_id = WorkspaceId(target_id_raw);
+        let prev_active_id = self.active_monitor().active_workspace_id();
+
+        // Switch-to-self is a no-op success — preserves window positions and
+        // avoids submitting an empty animation batch.
+        if prev_active_id == target_id {
+            return SocketResponse::Ok;
+        }
+
+        // Reject unknown workspace ids up front with a precise message.
+        if self
+            .active_monitor()
+            .find_workspace_index(target_id)
+            .is_none()
+        {
+            return SocketResponse::Error {
+                message: format!("workspace {target_id:?} not found on the active monitor"),
+            };
+        }
+
+        // Geometry capture: every workspace on this monitor shares the same
+        // work-area and padding (derived once from StmConfig at construction),
+        // so the active workspace's values are authoritative for all.
+        let monitor_height = self.active_monitor().work_area().height;
+        let window_gap = self.active_scrolling().padding().window_gap;
+
+        // Update the active index synchronously. The id was just validated
+        // above so failure is impossible in practice — but the explicit guard
+        // keeps the codebase `.unwrap()`-free per AGENTS.md.
+        if self
+            .active_monitor_mut()
+            .set_active_workspace(target_id)
+            .is_none()
+        {
+            return SocketResponse::Error {
+                message: format!("workspace {target_id:?} disappeared mid-dispatch"),
+            };
+        }
+
+        // Partition every non-empty workspace into the animate / teleport /
+        // skip buckets described in the method-level docs.
+        let mut animate_batches: Vec<(ActualLayout, i32)> = Vec::new();
+        let mut teleport_batches: Vec<(ActualLayout, i32)> = Vec::new();
+        for ws in self.active_monitor().workspaces() {
+            if ws.scrolling.actual_layout().entries.is_empty() {
+                continue;
+            }
+
+            let prev_offset = workspace_y_offset(ws.id, prev_active_id, monitor_height, window_gap);
+            let new_offset = workspace_y_offset(ws.id, target_id, monitor_height, window_gap);
+
+            let is_participant = ws.id == target_id || ws.id == prev_active_id;
+            let side_changed = prev_offset != new_offset;
+
+            if is_participant {
+                animate_batches.push((ws.scrolling.actual_layout().clone(), new_offset));
+            } else if side_changed {
+                teleport_batches.push((ws.scrolling.actual_layout().clone(), new_offset));
+            }
+            // else: bystander at the same parked side — leave untouched.
+        }
+
+        // Teleport first (instant backdrop), then animate the participants
+        // (single coordinated batch — source and dest transition in lockstep).
+        self.teleport_workspaces(&teleport_batches);
+        self.animate_workspaces(&animate_batches);
+
+        SocketResponse::Ok
+    }
+
+    /// Move the focused window from the active workspace to a target workspace.
+    ///
+    /// Implements the cross-workspace window move: the focused window in the
+    /// active workspace is detached (with **local** focus succession — no OS
+    /// foreground push) and re-inserted into the target workspace's
+    /// [`ScrollingSpace`] after its currently focused column. The active
+    /// workspace itself does NOT change — focus stays with the source
+    /// workspace, and the moved window becomes the destination workspace's
+    /// focus.
+    ///
+    /// # Animation
+    ///
+    /// Both the source and destination workspaces are mutated, so both must
+    /// be repainted. The two [`ActualLayout`]s are submitted to
+    /// [`animate_workspaces`](Self::animate_workspaces) as a single
+    /// coordinated batch with each entry's `final_position.y` shifted by its
+    /// workspace's y-offset (active = 0, others = ±`(monitor_height +
+    /// window_gap)`). The animator's default `RetargetFromCurrent` policy
+    /// keeps the move non-blocking — any command issued mid-flight retargets
+    /// from each window's current interpolated position.
+    ///
+    /// # Registry sync (per-workspace)
+    ///
+    /// Unlike a workspace *switch*, a window *move* changes both
+    /// [`VirtualLayout`]s: the source loses a window, the destination gains
+    /// one. The registry's tiling slots and tiled rects must therefore be
+    /// refreshed for each. [`update_tiling_slots_from_layout`] and
+    /// [`update_tiled_rects`] only update windows present in the supplied
+    /// layout, so calling them with the destination layout last ensures the
+    /// moved window's slot/rect end up pointing at its destination position.
+    ///
+    /// [`update_tiling_slots_from_layout`]:
+    ///     crate::registry::WindowRegistry::update_tiling_slots_from_layout
+    /// [`update_tiled_rects`]:
+    ///     crate::registry::WindowRegistry::update_tiled_rects
+    ///
+    /// # Mutation order
+    ///
+    /// The destination id is validated **before** any state mutation, so a
+    /// bad id fails fast with no layout damage. The borrow checker forbids
+    /// holding `&mut` to two workspaces in the same `Vec<Workspace>`
+    /// simultaneously, so source and destination are mutated in two separate
+    /// single-workspace steps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketResponse::Error`] when:
+    /// - `dest_id` does not match any workspace on the active monitor.
+    /// - No window is focused on the active workspace (nothing to move).
+    /// - The destination lookup fails post-validation (impossible in practice
+    ///   but guarded to keep the codebase `.unwrap()`-free per AGENTS.md).
+    fn dispatch_move_window_to_workspace(&mut self, dest_id_raw: u32) -> SocketResponse {
+        let dest_id = WorkspaceId(dest_id_raw);
+
+        // Validate destination up front — fail fast with no state change.
+        if self
+            .active_monitor()
+            .find_workspace_index(dest_id)
+            .is_none()
+        {
+            return SocketResponse::Error {
+                message: format!("workspace {dest_id:?} not found on the active monitor"),
+            };
+        }
+
+        // Capture the focused window before mutating anything. The active
+        // workspace remains active after the move — focus succession inside
+        // the source workspace is handled by `remove_window`.
+        let focused: WindowId = match self.active_scrolling().focused() {
+            Some(f) => f,
+            None => {
+                return SocketResponse::Error {
+                    message: "no focused window to move".into(),
+                };
+            }
+        };
+
+        // The active workspace id does NOT change here — the moved window
+        // departs, but the user's viewport stays put.
+        let active_id = self.active_monitor().active_workspace_id();
+
+        // Geometry capture: shared across all workspaces on the monitor.
+        let monitor_height = self.active_monitor().work_area().height;
+        let window_gap = self.active_scrolling().padding().window_gap;
+
+        // --- Mutation 1: remove from source (the active workspace). ---
+        // `remove_window` runs the full focus-fallback + ensure-visible
+        // pipeline internally and returns the post-removal AppliedLayout.
+        let source_applied = self
+            .active_monitor_mut()
+            .active_scrolling_mut()
+            .remove_window(focused);
+        let source_virtual = source_applied.virtual_layout.clone();
+        let source_actual = source_applied.actual_layout.clone();
+
+        // Refresh registry state for the source workspace.
+        self.registry
+            .update_tiling_slots_from_layout(&source_virtual);
+        self.registry.update_tiled_rects(&source_actual);
+
+        // --- Mutation 2: insert into destination. ---
+        // `insert_window` places the window after the dest's focused column
+        // (or at the start if dest is empty) and re-focuses the new window.
+        let dest_applied = match self.active_monitor_mut().workspace_mut(dest_id) {
+            Some(ws) => ws.scrolling.insert_window(focused),
+            None => {
+                // `dest_id` was validated above, so this branch is
+                // unreachable in practice. Guard anyway to stay
+                // `.unwrap()`-free per AGENTS.md.
+                return SocketResponse::Error {
+                    message: format!("workspace {dest_id:?} disappeared mid-dispatch"),
+                };
+            }
+        };
+        let dest_virtual = dest_applied.virtual_layout.clone();
+        let dest_actual = dest_applied.actual_layout.clone();
+
+        // Refresh registry state for the destination workspace. This call
+        // wins for the moved window — its slot/rect now reflect the
+        // destination layout.
+        self.registry.update_tiling_slots_from_layout(&dest_virtual);
+        self.registry.update_tiled_rects(&dest_actual);
+
+        // Skip the animation batch entirely if both layouts ended up empty
+        // (the trivial case: moving the only window into an empty workspace
+        // when the source ends up empty too).
+        if source_actual.entries.is_empty() && dest_actual.entries.is_empty() {
+            return SocketResponse::Ok;
+        }
+
+        // Build a single coordinated batch: source paints at offset 0 (it's
+        // still the active workspace), destination paints at its parked
+        // offset (±y_unit depending on whether dest is above or below the
+        // active workspace in id order).
+        let source_y_offset = workspace_y_offset(active_id, active_id, monitor_height, window_gap);
+        let dest_y_offset = workspace_y_offset(dest_id, active_id, monitor_height, window_gap);
+        let batches = [
+            (source_actual, source_y_offset),
+            (dest_actual, dest_y_offset),
+        ];
+        self.animate_workspaces(&batches);
+
+        SocketResponse::Ok
     }
 }
 

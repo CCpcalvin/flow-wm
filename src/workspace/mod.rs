@@ -22,12 +22,13 @@
 //!
 //! The horizontal scrolling inside a [`ScrollingSpace`] (left/right across
 //! columns) now has a vertical analogue: workspaces are stacked "above" and
-//! "below" the active one. Switching workspaces will eventually animate the
-//! whole stack vertically, the same way scrolling a column animates windows
-//! horizontally. **The animation design is not yet finalised**, so the
-//! workspace-switch IPC commands (`switchworkspace`, `swapworkspace`,
-//! `movetoworkspace`) are wired up as stubs in this skeleton — see the daemon
-//! dispatch module.
+//! "below" the active one at ±`(monitor_height + window_gap)`. Switching
+//! workspaces animates the source and destination workspaces vertically (the
+//! same easing curve as horizontal column scroll), while bystander workspaces
+//! whose parked side changes are silently teleported to their new slots. The
+//! `switchworkspace` and `movetoworkspace` IPC commands are wired up to live
+//! handlers in the daemon dispatch module; `swapworkspace` remains a stub
+//! pending a separate animation model.
 //!
 //! # What Lives Here vs. What Doesn't
 //!
@@ -45,10 +46,12 @@ use serde::{Deserialize, Serialize};
 pub mod floating_space;
 pub mod monitor;
 pub mod scrolling_space;
+pub mod y_offset;
 
 pub use floating_space::FloatingSpace;
 pub use monitor::Monitor;
 pub use scrolling_space::ScrollingSpace;
+pub use y_offset::workspace_y_offset;
 
 /// Stable, IPC-friendly identifier for a workspace.
 ///

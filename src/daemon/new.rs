@@ -170,13 +170,44 @@ impl ScrollTilingManager {
 
         log::info!("stmd: daemon initialized successfully");
 
+        // ---- Build the workspace stack -------------------------------------
+        //
+        // The daemon ships with a fixed set of 10 workspaces (per the user
+        // spec: 1-indexed, default active = workspace 1). Workspace 1
+        // inherits the scrolling space that was just initialised with the
+        // existing tiling windows; workspaces 2..=10 start empty. All
+        // workspaces share the same layout parameters so columns size
+        // consistently when the user later switches between them or moves
+        // windows across.
+        //
+        // The count is hard-coded rather than read from config because the
+        // spec fixes it at 10 for now. If this ever becomes configurable,
+        // the natural home is a `[workspaces]` table in `stm.toml` with a
+        // default of 10 (and `default-config.toml` must then be updated in
+        // lockstep — see AGENTS.md).
+        const WORKSPACE_COUNT: u32 = 10;
+        let mut workspaces: Vec<Workspace> = Vec::with_capacity(WORKSPACE_COUNT as usize);
+        // Workspace 1 takes the already-initialised scrolling space — it owns
+        // every tiling window the registry knew about at startup.
+        workspaces.push(Workspace::new(WorkspaceId(1), scrolling));
+        // Workspaces 2..=10 each get a fresh empty scrolling space built from
+        // the same layout parameters. MonitorInfo and Padding are Copy, so
+        // passing `monitor` and `layout_config.padding` by value into each
+        // ScrollingSpace::new call is cheap and idiomatic.
+        for id in 2..=WORKSPACE_COUNT {
+            let empty_scrolling = ScrollingSpace::new(
+                monitor,
+                layout_config.column_width,
+                layout_config.min_column_width_px,
+                layout_config.padding,
+                app_config.columns_per_screen,
+            );
+            workspaces.push(Workspace::new(WorkspaceId(id), empty_scrolling));
+        }
+
         Ok(Self {
             registry,
-            monitors: vec![Monitor::new(
-                monitor.work_area,
-                vec![Workspace::new(WorkspaceId(1), scrolling)],
-                0,
-            )],
+            monitors: vec![Monitor::new(monitor.work_area, workspaces, 0)],
             active_monitor: 0,
             animator,
             server,

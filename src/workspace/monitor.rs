@@ -9,7 +9,7 @@
 //!
 //! See the [module-level docs](super) for the full hierarchy diagram.
 
-use super::{ScrollingSpace, Workspace};
+use super::{ScrollingSpace, Workspace, WorkspaceId};
 use crate::common::Rect;
 
 /// A physical monitor and the workspaces it can show.
@@ -115,5 +115,259 @@ impl Monitor {
     #[must_use]
     pub fn active_scrolling_mut(&mut self) -> &mut ScrollingSpace {
         &mut self.active_workspace_mut().scrolling
+    }
+
+    // ---- Workspace lookup-by-id ------------------------------------------
+    //
+    // The accessors above all operate on the *active* workspace. The
+    // workspace-op commands (SwitchWorkspace, MoveWindowToWorkspace) need to
+    // reach *other* workspaces on the same monitor — to read their layouts for
+    // animation, mutate their scrolling spaces on window-transport, or change
+    // which workspace is active. The methods below give the daemon stable-id
+    // access without exposing the underlying `Vec<Workspace>` indices, so the
+    // storage representation can change (e.g. a future swap operation that
+    // reorders the vec) without breaking callers.
+
+    /// Find the storage index of a workspace by its stable [`WorkspaceId`].
+    ///
+    /// Linear scan over the workspace stack. Workspaces are not guaranteed to
+    /// be sorted by id (a future `SwapWorkspace` operation may reorder them),
+    /// so a `position` search is the only correct general lookup.
+    ///
+    /// Returns `None` if no workspace on this monitor has the given id. Use
+    /// [`active_workspace_index`](Self::active_workspace_index) if you need
+    /// the active workspace's position rather than its id.
+    #[must_use]
+    pub fn find_workspace_index(&self, id: WorkspaceId) -> Option<usize> {
+        self.workspaces.iter().position(|ws| ws.id == id)
+    }
+
+    /// Borrow a workspace by stable [`WorkspaceId`].
+    ///
+    /// Returns `None` if no workspace on this monitor has the given id. For
+    /// the on-screen workspace prefer the cheaper
+    /// [`active_workspace`](Self::active_workspace) accessor.
+    #[must_use]
+    pub fn workspace(&self, id: WorkspaceId) -> Option<&Workspace> {
+        // `find_workspace_index` returns an owned `Option<usize>` (no borrow
+        // held), so NLL permits the indexing lookup immediately afterwards.
+        self.find_workspace_index(id).map(|i| &self.workspaces[i])
+    }
+
+    /// Mutably borrow a workspace by stable [`WorkspaceId`].
+    ///
+    /// Returns `None` if no workspace on this monitor has the given id. For
+    /// the on-screen workspace prefer
+    /// [`active_workspace_mut`](Self::active_workspace_mut).
+    ///
+    /// Note: this is intentionally a single-target lookup. If a caller needs
+    /// to mutate two workspaces at once (e.g. `MoveWindowToWorkspace`
+    /// removes a window from the source and inserts into the dest), it must
+    /// decompose the operation into single-workspace steps — Rust's borrow
+    /// checker forbids two simultaneous `&mut` borrows of the same `Vec`.
+    /// The daemon-side workspace-op handlers do exactly this.
+    #[must_use]
+    pub fn workspace_mut(&mut self, id: WorkspaceId) -> Option<&mut Workspace> {
+        match self.find_workspace_index(id) {
+            Some(i) => Some(&mut self.workspaces[i]),
+            None => None,
+        }
+    }
+
+    /// The stable [`WorkspaceId`] of the currently on-screen workspace.
+    ///
+    /// Convenience for `self.active_workspace().id`. The workspace-op dispatch
+    /// handlers use this to capture the source workspace before calling
+    /// [`set_active_workspace`](Self::set_active_workspace).
+    #[must_use]
+    pub fn active_workspace_id(&self) -> WorkspaceId {
+        self.active_workspace().id
+    }
+
+    /// Change which workspace is on screen, addressed by stable [`WorkspaceId`].
+    ///
+    /// This is the dispatch-time mechanism for `SwitchWorkspace`: the daemon
+    /// captures the current active id via
+    /// [`active_workspace_id`](Self::active_workspace_id), calls this method
+    /// to update the active index, then submits the animation batch (see the
+    /// daemon dispatch module).
+    ///
+    /// Returns the **previous** active *index* (not id) on success so callers
+    /// can report or restore it; returns `None` if no workspace on this
+    /// monitor has the given id, in which case the active index is left
+    /// untouched. Calling with the already-active id is a no-op but still
+    /// returns `Some(previous_index)`.
+    ///
+    /// This method is deliberately pure bookkeeping — it does **not** animate
+    /// or touch any window positions. The daemon is responsible for
+    /// submitting animation targets for both the source and destination
+    /// workspaces after this returns.
+    #[must_use]
+    pub fn set_active_workspace(&mut self, id: WorkspaceId) -> Option<usize> {
+        match self.find_workspace_index(id) {
+            Some(new_idx) => {
+                let prev = self.active_workspace;
+                self.active_workspace = new_idx;
+                Some(prev)
+            }
+            None => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::Rect;
+    use crate::layout::types::{MonitorInfo, Padding};
+
+    /// Build a minimal [`ScrollingSpace`] for tests — parameters mirror the
+    /// test setup in `scrolling_space.rs::tests` so behaviour matches the
+    /// production engine. We never drive the scrolling space in these tests;
+    /// it exists only to satisfy [`Workspace::new`]'s signature.
+    fn make_scrolling() -> ScrollingSpace {
+        ScrollingSpace::new(
+            MonitorInfo {
+                work_area: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            960,
+            320,
+            Padding {
+                window_gap: 4,
+                up: 0,
+                down: 0,
+            },
+            4,
+        )
+    }
+
+    /// Build a [`Monitor`] whose workspaces have the given ids (in order),
+    /// with the given index active. Helper keeps the lookup-by-id tests
+    /// self-contained.
+    fn make_monitor_with_ids(ids: &[u32], active_idx: usize) -> Monitor {
+        let workspaces: Vec<Workspace> = ids
+            .iter()
+            .map(|&id| Workspace::new(WorkspaceId(id), make_scrolling()))
+            .collect();
+        Monitor::new(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            workspaces,
+            active_idx,
+        )
+    }
+
+    // ---- find_workspace_index --------------------------------------------
+
+    // Positive: existing ids resolve to their storage position.
+    #[test]
+    fn find_workspace_index_returns_position_for_existing_id() {
+        let monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        assert_eq!(monitor.find_workspace_index(WorkspaceId(1)), Some(0));
+        assert_eq!(monitor.find_workspace_index(WorkspaceId(2)), Some(1));
+        assert_eq!(monitor.find_workspace_index(WorkspaceId(3)), Some(2));
+    }
+
+    // Negative: missing id returns None rather than panicking.
+    #[test]
+    fn find_workspace_index_returns_none_for_missing_id() {
+        let monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        assert_eq!(monitor.find_workspace_index(WorkspaceId(99)), None);
+    }
+
+    // Positive: lookup works even if workspaces are stored out of numeric
+    // order — important for a future SwapWorkspace that reorders the vec.
+    #[test]
+    fn find_workspace_index_works_for_unordered_ids() {
+        let monitor = make_monitor_with_ids(&[5, 1, 9], 0);
+        assert_eq!(monitor.find_workspace_index(WorkspaceId(9)), Some(2));
+        assert_eq!(monitor.find_workspace_index(WorkspaceId(5)), Some(0));
+    }
+
+    // ---- workspace / workspace_mut ---------------------------------------
+
+    #[test]
+    fn workspace_borrows_by_id() {
+        let monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        assert_eq!(
+            monitor.workspace(WorkspaceId(2)).map(|ws| ws.id),
+            Some(WorkspaceId(2)),
+        );
+    }
+
+    #[test]
+    fn workspace_returns_none_for_missing_id() {
+        let monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        assert!(monitor.workspace(WorkspaceId(99)).is_none());
+    }
+
+    #[test]
+    fn workspace_mut_borrows_by_id() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        let ws = monitor
+            .workspace_mut(WorkspaceId(3))
+            .expect("workspace 3 should exist");
+        assert_eq!(ws.id, WorkspaceId(3));
+    }
+
+    #[test]
+    fn workspace_mut_returns_none_for_missing_id() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        assert!(monitor.workspace_mut(WorkspaceId(99)).is_none());
+    }
+
+    // ---- active_workspace_id ---------------------------------------------
+
+    #[test]
+    fn active_workspace_id_reflects_current_active() {
+        // Active index 1 -> workspace with id 10.
+        let monitor = make_monitor_with_ids(&[5, 10, 15], 1);
+        assert_eq!(monitor.active_workspace_id(), WorkspaceId(10));
+    }
+
+    // ---- set_active_workspace --------------------------------------------
+
+    #[test]
+    fn set_active_workspace_updates_index_and_returns_previous() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        let prev = monitor.set_active_workspace(WorkspaceId(3));
+        assert_eq!(prev, Some(0));
+        assert_eq!(monitor.active_workspace_index(), 2);
+        assert_eq!(monitor.active_workspace_id(), WorkspaceId(3));
+    }
+
+    #[test]
+    fn set_active_workspace_returns_none_for_missing_id_leaving_state_unchanged() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        let prev = monitor.set_active_workspace(WorkspaceId(99));
+        assert_eq!(prev, None);
+        // Active index must be untouched.
+        assert_eq!(monitor.active_workspace_index(), 0);
+    }
+
+    #[test]
+    fn set_active_workspace_to_current_returns_previous_without_changing_state() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 1);
+        let prev = monitor.set_active_workspace(WorkspaceId(2));
+        assert_eq!(prev, Some(1));
+        assert_eq!(monitor.active_workspace_index(), 1);
+    }
+
+    #[test]
+    fn set_active_workspace_round_trip_restores_original_active() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        let _ = monitor.set_active_workspace(WorkspaceId(3));
+        let prev = monitor.set_active_workspace(WorkspaceId(1));
+        assert_eq!(prev, Some(2));
+        assert_eq!(monitor.active_workspace_index(), 0);
     }
 }

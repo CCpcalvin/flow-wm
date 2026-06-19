@@ -44,9 +44,9 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN,
-    SetForegroundWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+    SWP_NOZORDER, SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -557,6 +557,77 @@ pub fn close_window(hwnd_val: isize) -> bool {
     // queue); we always target a specific window, hence `Some(...)`.
     let queued = unsafe { PostMessageW(Some(target_hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
     queued.is_ok()
+}
+
+/// Directly reposition a single window via `SetWindowPos`, bypassing the animator.
+///
+/// This is the **silent teleport** primitive used during workspace-switch
+/// operations to relocate *bystander* workspaces — those whose vertical
+/// parking side changed (e.g. ws 3-7 when switching 2 → 8) but which are
+/// neither the source nor destination of the switch. They are moved
+/// instantly so the workspace stacking invariant is restored without
+/// every bystander workspace visibly sliding across the screen.
+///
+/// # Why bypass the animator?
+///
+/// The animator's `RetargetFromCurrent` interrupt policy would animate each
+/// retargeted window from its current position to the new target. For a
+/// 10-workspace switch that could mean eight bystander workspaces all
+/// visibly sliding at once, which is visually noisy and distracts from the
+/// two workspaces the user actually asked to switch between. Teleporting
+/// them directly keeps the animation focused on the participant workspaces.
+///
+/// # Coordinate space — window rect, not visible rect
+///
+/// The `(x, y, w, h)` arguments must already be in **window-rect** space
+/// (the coordinates `SetWindowPos` expects, which include invisible borders).
+/// The caller is responsible for translating from the layout engine's
+/// visible-rect space via
+/// [`InvisibleBounds::visible_to_window`](crate::common::InvisibleBounds::visible_to_window)
+/// before calling this function. The translation is **not** applied here so
+/// that callers computing batches can amortise the registry lookup across
+/// many windows.
+///
+/// # Z-order and focus
+///
+/// Uses `SWP_NOZORDER | SWP_NOACTIVATE` — the same flags used by the
+/// animator's `apply_batch` — so the window's Z-order and keyboard-focus
+/// state are preserved. This is critical for workspace switches: a
+/// teleport must not steal focus from the destination workspace's window.
+///
+/// # Arguments
+///
+/// * `hwnd_val` — Window handle as `isize` (project cross-thread convention).
+/// * `x`, `y` — Top-left corner of the target window rect, in screen coords.
+/// * `w`, `h` — Width and height of the target window rect, in pixels.
+///
+/// # Returns
+///
+/// `true` if `SetWindowPos` succeeded; `false` on Win32 failure (logged at
+/// `warn` level). A `false` return leaves the window at its previous
+/// position — a minor visual inconsistency, not a crash.
+///
+/// # Example
+///
+/// ```no_run
+/// use scrolling_tiling_manager::registry::win32::set_window_rect;
+/// // Instantly snap a window to (0, -1084) — the parking slot of a workspace
+/// // parked one unit above a 1080-tall monitor.
+/// let ok = set_window_rect(0x000C_1234, 0, -1084, 960, 1080);
+/// ```
+#[must_use]
+pub fn set_window_rect(hwnd_val: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
+    let target_hwnd = HWND(hwnd_val as *mut _);
+    // hwnd_insert_after = None + SWP_NOZORDER → preserve existing Z-order.
+    // SWP_NOACTIVATE → do not steal keyboard focus (critical for workspace switches).
+    let result =
+        unsafe { SetWindowPos(target_hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+    if let Err(e) = result {
+        log::warn!("set_window_rect SetWindowPos failed for hwnd {hwnd_val}: {e}");
+        false
+    } else {
+        true
+    }
 }
 
 /// Returns `true` if the window would appear in the Alt+Tab switcher.
@@ -1072,6 +1143,40 @@ mod tests {
     fn close_window_has_bool_return_type() {
         let fn_ptr: fn(isize) -> bool = close_window;
         let _ = fn_ptr; // Compile-time signature check.
+    }
+
+    /// Positive: verify that `set_window_rect` has the
+    /// `fn(isize, i32, i32, i32, i32) -> bool` signature.
+    ///
+    /// We cannot actually move a real window inside a unit test (it would
+    /// need a live, owned window on an interactive desktop), so this is a
+    /// compile-time signature check matching the pattern used by
+    /// [`close_window`](super::close_window) and
+    /// [`set_foreground_window`](super::set_foreground_window).
+    #[test]
+    fn set_window_rect_has_correct_signature() {
+        let fn_ptr: fn(isize, i32, i32, i32, i32) -> bool = set_window_rect;
+        let _ = fn_ptr; // Compile-time signature check.
+    }
+
+    /// Positive: `SetWindowPos` flags used by `set_window_rect` are
+    /// importable and non-zero. Guards against a future import resolving
+    /// to a different symbol.
+    #[test]
+    fn win32_set_window_pos_flags_are_usable() {
+        // SWP_NOZORDER and SWP_NOACTIVATE are non-zero single-bit flags.
+        // We verify the imports resolve and that the combined mask still
+        // contains each individual flag (bitfield algebra sanity check),
+        // mirroring how `set_window_rect` combines them.
+        let combined = SWP_NOZORDER | SWP_NOACTIVATE;
+        assert!(
+            combined.contains(SWP_NOZORDER),
+            "SWP_NOZORDER should be present in the combined mask"
+        );
+        assert!(
+            combined.contains(SWP_NOACTIVATE),
+            "SWP_NOACTIVATE should be present in the combined mask"
+        );
     }
 
     /// Positive: `WM_CLOSE` is the well-known message id (0x0010) and the
