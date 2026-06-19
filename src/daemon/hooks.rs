@@ -17,7 +17,7 @@
 //! [`remove_from_layout_and_refocus`] helper, which implements the full
 //! removal pipeline: remove from the virtual layout → push OS-level focus to
 //! the successor window if focus changed → animate the resulting layout diff.
-//! The successor window is chosen by [`LayoutEngine::remove_window`] via
+//! The successor window is chosen by [`ScrollingSpace::remove_window`](crate::workspace::ScrollingSpace::remove_window) via
 //! [`mutations::next_available_window`] (left column, then right).
 
 use crate::common::WindowId;
@@ -63,11 +63,11 @@ impl ScrollTilingManager {
     /// previously-minimized window at the far right via `add_window`, new
     /// windows are inserted next to the focused window so they appear where
     /// the user is actively working. See
-    /// [`LayoutEngine::insert_window`](crate::layout::LayoutEngine::insert_window)
+    /// [`ScrollingSpace::insert_window`](crate::workspace::ScrollingSpace::insert_window)
     /// for the full algorithm.
     pub(super) fn on_window_created(&mut self, hwnd: isize) -> bool {
         if let Some(window_id) = self.registry.handle_created(hwnd) {
-            let applied = self.layout.insert_window(window_id);
+            let applied = self.active_scrolling_mut().insert_window(window_id);
             self.animate_layout(&applied);
             true
         } else {
@@ -157,7 +157,7 @@ impl ScrollTilingManager {
     /// [`on_window_destroyed`] and [`on_window_minimized`]:
     ///
     /// 1. Capture the current focus (before removal).
-    /// 2. [`LayoutEngine::remove_window`] — removes the window from the virtual
+    /// 2. [`ScrollingSpace::remove_window`](crate::workspace::ScrollingSpace::remove_window) — removes the window from the virtual
     ///    layout, resolving a focus successor via
     ///    [`mutations::next_available_window`] when the removed window was
     ///    focused (left column preferred, then right).
@@ -176,9 +176,9 @@ impl ScrollTilingManager {
     /// already correct and we avoid a redundant (and potentially disruptive)
     /// `SetForegroundWindow` call.
     fn remove_from_layout_and_refocus(&mut self, window: WindowId) {
-        let prev_focus = self.layout.focused();
-        let applied = self.layout.remove_window(window);
-        let new_focus = self.layout.focused();
+        let prev_focus = self.active_scrolling().focused();
+        let applied = self.active_scrolling_mut().remove_window(window);
+        let new_focus = self.active_scrolling().focused();
 
         if new_focus != prev_focus
             && let Some(id) = new_focus
@@ -207,7 +207,7 @@ impl ScrollTilingManager {
 
         // After restore, check if the window is now tiling-active.
         if self.registry.is_tiling(hwnd) {
-            let applied = self.layout.add_window(WindowId(hwnd));
+            let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }
     }
@@ -237,7 +237,7 @@ impl ScrollTilingManager {
     pub(super) fn on_window_shown(&mut self, hwnd: isize) {
         let change = self.registry.reconcile_visibility(hwnd);
         if change == VisibilityChange::Shown && self.registry.is_tiling_active(hwnd) {
-            let applied = self.layout.add_window(WindowId(hwnd));
+            let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }
     }
@@ -256,7 +256,7 @@ impl ScrollTilingManager {
         self.registry.set_focused(hwnd);
 
         if self.registry.is_tiling(hwnd) {
-            self.layout.set_focus(WindowId(hwnd));
+            self.active_scrolling_mut().set_focus(WindowId(hwnd));
         }
     }
 }

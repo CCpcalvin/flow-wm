@@ -68,7 +68,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! See [`engine::LayoutEngine`] for the orchestrator that wires it all together.
+//! See [`workspace::ScrollingSpace`] for the orchestrator that wires it all together.
 //!
 //! # Submodules
 //!
@@ -77,13 +77,16 @@
 //! | [`types`] | Core data types — [`Column`], [`VirtualLayout`], [`ActualLayout`] |
 //! | [`projection`] | Virtual → actual projection with camera shift and parking |
 //! | [`mutations`] | All pure mutation functions (scroll, focus, swap, resize, etc.) |
-//! | [`engine`] | [`LayoutEngine`] orchestrator that wires mutations → projection → [`AppliedLayout`] |
+//!
+//! The orchestrator that wires mutations → projection → [`AppliedLayout`] used
+//! to live here as `LayoutEngine`; it has moved to [`workspace::ScrollingSpace`]
+//! as part of the workspace-hierarchy refactor. This module now holds only the
+//! pure layout *math* (types, projection, mutations), which
+//! [`workspace::ScrollingSpace`] consumes.
 
-pub mod engine;
 pub mod mutations;
 pub mod projection;
 pub mod types;
 
-pub use engine::LayoutEngine;
 pub use mutations::NeighborLocation;
 pub use types::{ActualEntry, ActualLayout, AppliedLayout, Column, VirtualLayout};

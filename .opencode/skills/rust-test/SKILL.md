@@ -77,35 +77,37 @@ Note any pre-existing broken tests separately from newly created ones.
 ## 3 — Inline Unit Tests
 
 ```rust
-// src/layout/engine.rs (excerpt)
+// src/workspace/scrolling_space.rs (excerpt)
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::types::Rect;
     use crate::common::types::WindowId;
 
+    // Local test helpers — see the real `test_monitor()` / `test_padding()`
+    // in scrolling_space.rs for the canonical pattern.
+    fn test_monitor() -> MonitorInfo { /* a small fake work area */ }
+    fn test_padding() -> Padding { /* gap + up/down */ }
+
     #[test]
-    fn add_window_increases_count() {
-        let mut engine = LayoutEngine::new(Default::default());
-        let wid = WindowId::new(1);
-        engine.add_window(wid);
-        assert_eq!(engine.window_count(), 1);
+    fn add_window_creates_a_new_column() {
+        let mut space = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
+        space.add_window(WindowId::new(1));
+        assert_eq!(space.virtual_layout().columns.len(), 1);
     }
 
     #[test]
     fn remove_last_window_returns_empty_layout() {
-        let mut engine = LayoutEngine::new(Default::default());
-        let wid = WindowId::new(1);
-        engine.add_window(wid);
-        engine.remove_window(&wid);
-        assert_eq!(engine.window_count(), 0);
+        let mut space = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
+        space.add_window(WindowId::new(1));
+        space.remove_window(&WindowId::new(1));
+        assert!(space.virtual_layout().columns.is_empty());
     }
 
     #[test]
-    fn projection_with_no_windows_returns_empty() {
-        let engine = LayoutEngine::new(Default::default());
-        let actual = engine.project();
-        assert!(actual.entries.is_empty());
+    fn actual_layout_with_no_windows_is_empty() {
+        let space = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
+        assert!(space.actual_layout().entries.is_empty());
     }
 }
 ```
@@ -120,28 +122,35 @@ Rules:
 ## 4 — Integration Tests
 
 ```rust
-// tests/layout_engine.rs
-use scrolling_tiling_manager::layout::engine::LayoutEngine;
+// tests/scrolling_space.rs
+use scrolling_tiling_manager::workspace::ScrollingSpace;
+use scrolling_tiling_manager::layout::types::{MonitorInfo, Padding};
 use scrolling_tiling_manager::common::types::WindowId;
+
+fn small_monitor() -> MonitorInfo { /* a small fake work area */ }
+fn gapless_padding() -> Padding { Padding { window_gap: 0, up: 0, down: 0 } }
 
 #[test]
 fn tiles_cover_entire_monitor_area() {
-    let mut engine = LayoutEngine::new(Default::default());
+    let monitor = small_monitor();
+    let mut space = ScrollingSpace::new(monitor, 960, 320, gapless_padding(), 4);
     for i in 0..3 {
-        engine.add_window(WindowId::new(i));
+        space.add_window(WindowId::new(i));
     }
-    let actual = engine.project();
+    let actual = space.actual_layout();
     // Verify no gaps between tiles (when gap = 0)
     // Property: sum of all tile widths == monitor width
+    let _ = actual;
 }
 
 #[test]
 fn tiles_do_not_overlap_with_gap() {
-    let mut engine = LayoutEngine::new(Default::default());
+    let monitor = small_monitor();
+    let mut space = ScrollingSpace::new(monitor, 960, 320, gapless_padding(), 4);
     for i in 0..4 {
-        engine.add_window(WindowId::new(i));
+        space.add_window(WindowId::new(i));
     }
-    let actual = engine.project();
+    let actual = space.actual_layout();
     for pair in actual.entries.windows(2) {
         let right_edge = pair[0].rect.x + pair[0].rect.width;
         let next_left = pair[1].rect.x;
@@ -275,6 +284,6 @@ Note any pre-existing broken tests.
 - **Layout integer rounding leaves uncovered pixels**: `projection` with non-divisible widths silently drops remainder pixels. Tests MUST assert that tiles cover the full area when gap=0, not just check one tile's width.
 - **`tempfile` must stay in `[dev-dependencies]`**: It is easy to accidentally add `tempfile` to `[dependencies]` when copy-pasting. This links it into the release binary — always check `Cargo.toml` after adding config tests.
 - **Mock structs outside `#[cfg(test)]` inflate binary size**: `MockWindowMover`, `MockAnimationBackend`, and similar test doubles MUST be inside `#[cfg(test)]` blocks or in `tests/` — never in `src/` without the cfg guard.
-- **`LayoutEngine` state carries over between tests**: If tests share an engine instance via `#[fixture]` or lazy statics, a mutation in one test can poison the next. Always construct a fresh `LayoutEngine::new(Default::default())` in each test.
+- **`ScrollingSpace` state carries over between tests**: If tests share a space instance via `#[fixture]` or lazy statics, a mutation in one test can poison the next. Always construct a fresh `ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4)` in each test.
 - **WindowId is opaque — tests must use arbitrary values**: `WindowId::new(42)` is fine for tests. The actual HWND value does not matter for pure logic tests.
 - **`assert_cmd` tests require the binary to compile first**: CLI integration tests in `tests/cli.rs` run against the compiled `stmd` binary. If `main.rs` has compile errors, the entire CLI test suite fails with an opaque "process not found" error — fix compilation first.

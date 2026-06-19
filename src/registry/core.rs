@@ -66,7 +66,7 @@
 //!       ├─ drain mpsc channel directly
 //!       ├─ dispatch to individual handlers
 //!       │    ├─ handle_created / remove_window / set_focused / etc.
-//!       │    └─ coordinate with LayoutEngine
+//!       │    └─ coordinate with ScrollingSpace
 //!       └─ handle IPC command
 //! ```
 //!
@@ -691,7 +691,7 @@ impl WindowRegistry {
     /// # Returns
     ///
     /// A `Vec<WindowId>` in no guaranteed order. The caller (orchestrator)
-    /// should pass these to [`LayoutEngine::initialize_windows`](crate::layout::LayoutEngine::initialize_windows)
+    /// should pass these to [`ScrollingSpace::initialize_windows`](crate::workspace::ScrollingSpace::initialize_windows)
     /// for efficient batch layout construction.
     #[must_use]
     pub fn tiling_window_ids(&self) -> Vec<crate::common::WindowId> {

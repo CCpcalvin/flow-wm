@@ -2,7 +2,7 @@
 //!
 //! These tests exercise the full daemon pipeline: when a window is destroyed
 //! or minimised, the daemon's hook fires `on_window_destroyed` /
-//! `on_window_minimized`, which calls `LayoutEngine::remove_window`. That
+//! `on_window_minimized`, which calls `ScrollingSpace::remove_window`. That
 //! method:
 //!
 //! 1. Finds the to-be-removed window's position in the virtual layout.

@@ -49,7 +49,7 @@ ActualLayout (pixel-accurate rects)
 Vec<WindowMove> (animation instructions)
 ```
 
-Key rules: mutations return new `VirtualLayout` (never mutate in place). `LayoutEngine` is pure math — zero Win32. `WindowId` bridges engine ↔ registry.
+Key rules: mutations return new `VirtualLayout` (never mutate in place). `ScrollingSpace` (in `workspace/`) is pure math — zero Win32. `WindowId` bridges the space ↔ registry.
 
 ## Module Structure
 
@@ -59,7 +59,8 @@ src/
 ├── bin/                  # stm CLI, stm-watchdog
 ├── common/               # Cross-cutting types (Rect, WindowId, StmError)
 ├── config/               # YAML config loading & validation
-├── layout/               # Pure layout logic (engine, mutations, projection, diff)
+├── layout/               # Pure layout primitives (mutations, projection, diff)
+├── workspace/            # Monitor → Workspace → ScrollingSpace + FloatingSpace
 ├── ipc/                  # IPC between CLI ↔ daemon (stub)
 ├── input/                # Keyboard/mouse interception (stub)
 ├── persist/              # State persistence (stub)
@@ -67,14 +68,14 @@ src/
 └── animation/            # Animation timing & easing (stub)
 ```
 
-Convention: each module has `mod.rs` + `types.rs`. `common/` is vocabulary only. Platform code isolated in `registry/`, `input/`.
+Convention: each module has `mod.rs` + `types.rs`. `common/` is vocabulary only. Platform code isolated in `registry/`, `input/`. The tiling engine (`ScrollingSpace`) lives under `workspace/`, not `layout/` — `layout/` holds only the pure primitives (types, projection, diff, mutations).
 
 ## Naming Conventions
 
 | Type | Convention | Example |
 |------|-----------|---------|
-| Files | `snake_case.rs` | `engine.rs`, `mutations.rs` |
-| Structs / Enums | `PascalCase` | `LayoutEngine`, `AnimationHint` |
+| Files | `snake_case.rs` | `scrolling_space.rs`, `mutations.rs` |
+| Structs / Enums | `PascalCase` | `ScrollingSpace`, `AnimationHint` |
 | Functions | `snake_case` | `add_window()`, `scroll_left()` |
 | Config fields | `snake_case` (YAML) | `window_rules`, `duration_ms` |
 | Serde reserved | `match_` field + `#[serde(rename)]` | `WindowRule.match_` → YAML `match` |

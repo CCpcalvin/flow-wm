@@ -32,7 +32,8 @@ stm/
     │   ├── stm.rs               # CLI client binary
     │   └── stm-watchdog.rs      # recovery helper binary
     ├── registry/                # WindowRegistry — OS sync, window state
-    ├── layout/                  # LayoutEngine — virtual + actual layout, animation diff
+    ├── layout/                  # Pure layout machinery: mutations, projection, diff, types
+    ├── workspace/               # ScrollingSpace + FloatingSpace + Workspace + Monitor (niri-style desktops)
     ├── input/                   # InputInterceptor — hotkeys, Super-drag
     ├── config/                  # Config parser, schema generation, config mutation helpers
     ├── persist/                 # Window memory (per-app learned state)
@@ -76,8 +77,12 @@ The project should move to a workspace only if a module becomes independently re
 │         │                  │                    │             │
 │         └──────────────────▼────────────────────▼             │
 │                      ┌─────────────┐                          │
-│                      │LayoutEngine │                          │
-│                      │(src/layout) │                          │
+│                      │  Monitors    │                          │
+│                      │  (src/workspace)                        │
+│                      │   Monitor   │                          │
+│                      │    └ Workspace                         │
+│                      │       ├ ScrollingSpace (the engine)    │
+│                      │       └ FloatingSpace   (stub)         │
 │                      └──────┬──────┘                          │
 │                             │                                 │
 │                      ┌──────▼──────────────┐                  │

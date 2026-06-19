@@ -14,10 +14,10 @@ use crate::layout::types::{MonitorInfo, Padding as LayoutPadding};
 
 use super::types::LayoutConfig;
 
-/// Derive layout engine parameters from [`StmConfig`].
+/// Derive scrolling-space parameters from [`StmConfig`].
 ///
 /// Converts the user-facing config types (from `stm.toml`) into the
-/// layout-engine-specific types needed by [`LayoutEngine::new`].
+/// layout-engine-specific types needed by [`ScrollingSpace::new`](crate::workspace::ScrollingSpace::new).
 ///
 /// # Column Width Resolution
 ///

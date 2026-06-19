@@ -359,13 +359,13 @@ pub struct MatchRule {
 
 /// Action to apply when a window rule matches.
 ///
-/// - `Tile` — managed by [`LayoutEngine`](crate::layout::LayoutEngine)
+/// - `Tile` — managed by [`ScrollingSpace`](crate::workspace::ScrollingSpace)
 /// - `Float` — free-floating, user-positioned, not tiled
 /// - `Ignore` — excluded from tiling entirely (e.g., fullscreen apps)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowAction {
-    /// Managed by [`LayoutEngine`](crate::layout::LayoutEngine).
+    /// Managed by [`ScrollingSpace`](crate::workspace::ScrollingSpace).
     Tile,
     /// Free-floating, user-positioned, not tiled.
     Float,

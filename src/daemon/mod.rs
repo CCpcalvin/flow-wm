@@ -14,12 +14,13 @@
 //! │                                                                      │
 //! │  Owns:                                                               │
 //! │  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-//! │  │ WindowRegistry │  │ LayoutEngine │  │ WindowAnimator           │  │
-//! │  │ (window state) │  │ (layout math)│  │ (src/animation/)         │  │
-//! │  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
-//! │  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-//! │  │ PipeServer     │  │ AppConfig    │  │ FloatingManager (stub)   │  │
-//! │  │ (IPC transport)│  │ (loaded once)│  │ (placeholder)            │  │
+//! │  │ WindowRegistry │  │ Vec<Monitor> │  │ WindowAnimator           │  │
+//! │  │ (window state) │  │ (workspaces: │  │ (src/animation/)         │  │
+//! │  └────────────────┘  │  Scrolling + │  └──────────────────────────┘  │
+//! │                      │  Floating)   │                                 │
+//! │  ┌────────────────┐  └──────────────┘  ┌──────────────────────────┐  │
+//! │  │ PipeServer     │  ┌──────────────┐  │ (FloatingManager now     │  │
+//! │  │ (IPC transport)│  │ AppConfig    │  │  lives inside Workspace) │  │
 //! │  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
 //! │                                                                      │
 //! │  Routes:                                                             │

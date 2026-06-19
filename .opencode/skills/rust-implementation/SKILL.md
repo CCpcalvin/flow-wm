@@ -57,12 +57,17 @@ src/
 │   ├── error.rs         # StmError enum, StmResult<T> alias
 │   └── types.rs         # WindowId (platform-independent HWND bridge)
 │
-├── layout/              # Pure tiling logic — NO windows crate imports
-│   ├── engine.rs        # LayoutEngine: virtual layout state + mutations
+├── layout/              # Pure tiling primitives — NO windows crate imports
 │   ├── types.rs         # VirtualLayout, ActualLayout, ActualEntry, AnimationHint
 │   ├── projection.rs    # Virtual → Actual coordinate projection (pure fn)
 │   ├── diff.rs          # ActualLayout diff → Vec<WindowMove> instructions
 │   └── mutations.rs     # High-level mutation API (add_window, remove_window, etc.)
+│
+├── workspace/           # Monitor → Workspace → ScrollingSpace + FloatingSpace
+│   ├── mod.rs           # WorkspaceId, Workspace (one virtual desktop)
+│   ├── scrolling_space.rs # ScrollingSpace: infinite-horizontal-canvas tiling engine
+│   ├── floating_space.rs  # FloatingSpace: stub for non-tiled windows
+│   └── monitor.rs       # Monitor: physical display + vertical stack of workspaces
 │
 ├── registry/            # Window tracking and Win32 bridge
 │   ├── core.rs          # WindowRegistry: HWND ↔ WindowId mapping, window metadata
@@ -81,7 +86,7 @@ src/
 ├── ipc/                 # Named-pipe IPC for stm CLI ↔ stmd daemon
 │   ├── message.rs       # Request/Response enums
 │   ├── transport.rs     # Named-pipe read/write framing
-│   └── dispatch.rs      # Message → LayoutEngine mutation dispatch
+│   └── dispatch.rs      # Message → ScrollingSpace mutation dispatch
 │
 ├── animation/           # Window move animation system
 │   ├── animator.rs      # Animation orchestration
@@ -97,17 +102,15 @@ src/
 │
 ├── daemon/              # Daemon orchestration (event loop, startup, shutdown)
 │   └── mod.rs
-│
-└── floating/            # Floating window management (non-tiled windows)
-    └── mod.rs
 ```
 
 ### Module Boundary Rules
 
-- **`layout/`** MUST contain zero `use windows` or `use std::os::windows` imports. It is pure Rust logic. It only knows about `WindowId`, never `HWND`.
+- **`layout/`** MUST contain zero `use windows` or `use std::os::windows` imports. It is pure Rust logic (types, projection, diff, mutations). It only knows about `WindowId`, never `HWND`. The tiling *engine* itself no longer lives here — it moved to `workspace/`.
+- **`workspace/`** owns the monitor → workspace → scrolling/floating hierarchy (`ScrollingSpace`, `FloatingSpace`, `Workspace`, `Monitor`, `WorkspaceId`). It MUST be pure like `layout/` — zero `use windows` — and may only import from `common/` and `layout/`.
 - **`registry/`** contains all Win32 interop. `registry/win32.rs` holds raw FFI wrappers; `registry/core.rs` maps HWND ↔ WindowId and manages window state.
 - **`common/`** is the shared foundation — error types and the `WindowId` bridge type. Both `layout/` and `registry/` may import from `common/`.
-- **`animation/`** may import `layout/types.rs` (for `AnimationHint`) and `registry/` (for Win32 backends). It MUST NOT import layout engine internals.
+- **`animation/`** may import `layout/types.rs` (for `AnimationHint`) and `registry/` (for Win32 backends). It MUST NOT import `workspace::ScrollingSpace` internals.
 - **`main.rs`** wires everything together; no layout or Win32 logic lives there directly.
 
 ---
@@ -220,15 +223,22 @@ Layout computation follows a functional, declarative pipeline. Every mutation fl
 3. **Diff** (`layout/diff::diff`) — compares previous and new `ActualLayout` to produce `WindowMove` instructions with `AnimationHint`s.
 
 ```rust
-// Example: adding a window to the layout
-use crate::layout::engine::LayoutEngine;
+// Example: adding a window to the active workspace's scrolling space.
+//
+// Conceptual flow — the real ScrollingSpace API folds the project + diff
+// steps into each mutation method: mutations return Option<AppliedLayout>
+// (the pixel-accurate result) and also cache it for `actual_layout()`.
+use crate::workspace::ScrollingSpace;
 use crate::common::types::WindowId;
 
-fn handle_window_created(engine: &mut LayoutEngine, wid: WindowId) {
-    engine.add_window(wid);           // Mutate virtual layout
-    let actual = engine.project();    // Virtual → Actual coordinates
-    let moves = engine.diff(&previous, &actual); // Diff → Vec<WindowMove>
-    // Apply moves via animation system
+fn handle_window_created(space: &mut ScrollingSpace, wid: WindowId) {
+    // Mutate virtual layout; projection + diff run internally.
+    if let Some(applied) = space.add_window(wid) {
+        // `applied` carries the pixel-accurate rects; feed it to the
+        // animation system. The cached layout is also available via
+        // `space.actual_layout()` for later reads.
+        let _ = applied; // animation hook goes here
+    }
 }
 ```
 

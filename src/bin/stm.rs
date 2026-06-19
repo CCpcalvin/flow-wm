@@ -20,6 +20,9 @@
 //! stm dispatch expandcolumn     Expand the focused column width by one step
 //! stm dispatch shrinkcolumn     Shrink the focused column width by one step
 //! stm dispatch closewindow      Close the currently focused window (gentle WM_CLOSE)
+//! stm dispatch switchworkspace <id>  Switch the active workspace (stub)
+//! stm dispatch swapworkspace <id>    Swap the active workspace with another (stub)
+//! stm dispatch movetoworkspace <id>  Move the focused window to another workspace (stub)
 //! ```
 //!
 //! # Configuration
@@ -189,6 +192,48 @@ enum DispatchCommands {
     /// automatically once Win32 reports its destruction.
     #[command(name = "closewindow")]
     CloseWindow,
+
+    // --- Workspace (niri-style virtual desktop) ---
+    //
+    // These three subcommands form the CLI surface for the upcoming
+    // vertical-scrolling workspace system. The daemon currently returns a
+    // "not yet implemented" error for each — the protocol shape is locked in
+    // now so keybindings and documentation can stabilise while the workspace
+    // animation design is finalised.
+    /// Switch the active workspace.
+    ///
+    /// Maps to [`SocketMessage::SwitchWorkspace`]. Sends
+    /// `stm dispatch switchworkspace <id>` to the daemon, which will
+    /// (eventually) slide the requested workspace into the viewport and
+    /// freeze the previously active one above or below it.
+    #[command(name = "switchworkspace")]
+    SwitchWorkspace {
+        /// Identifier of the workspace to switch to (niri-style `u32`).
+        workspace_id: u32,
+    },
+    /// Swap the active workspace with another workspace.
+    ///
+    /// Maps to [`SocketMessage::SwapWorkspace`]. Sends
+    /// `stm dispatch swapworkspace <id>` to the daemon, which will
+    /// (eventually) exchange the positions of the active workspace and the
+    /// target in the monitor's vertical workspace stack, with focus following
+    /// the originally active workspace.
+    #[command(name = "swapworkspace")]
+    SwapWorkspace {
+        /// Identifier of the workspace to swap with the active one.
+        workspace_id: u32,
+    },
+    /// Move the focused window to another workspace.
+    ///
+    /// Maps to [`SocketMessage::MoveToWorkspace`]. Sends
+    /// `stm dispatch movetoworkspace <id>` to the daemon, which will
+    /// (eventually) detach the focused window from the current
+    /// `ScrollingSpace` and re-insert it into the target workspace.
+    #[command(name = "movetoworkspace")]
+    MoveToWorkspace {
+        /// Identifier of the destination workspace.
+        workspace_id: u32,
+    },
 }
 
 /// Cardinal direction for `stm dispatch focus <dir>`.
@@ -438,6 +483,18 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
             send_command(SocketMessage::ShrinkColumn, "column shrunk")
         }
         DispatchCommands::CloseWindow => send_command(SocketMessage::CloseWindow, "window closed"),
+        DispatchCommands::SwitchWorkspace { workspace_id } => send_command(
+            SocketMessage::SwitchWorkspace { workspace_id },
+            "workspace switched",
+        ),
+        DispatchCommands::SwapWorkspace { workspace_id } => send_command(
+            SocketMessage::SwapWorkspace { workspace_id },
+            "workspace swapped",
+        ),
+        DispatchCommands::MoveToWorkspace { workspace_id } => send_command(
+            SocketMessage::MoveToWorkspace { workspace_id },
+            "window moved to workspace",
+        ),
     }
 }
 
@@ -1042,6 +1099,97 @@ mod tests {
         assert!(
             result.is_err(),
             "'stm dispatch shrinkcolumn' with multiple extra args should fail"
+        );
+    }
+
+    // --- switchworkspace / swapworkspace / movetoworkspace parsing ---
+
+    #[test]
+    fn parse_dispatch_switchworkspace() {
+        // Positive: `stm dispatch switchworkspace 3` parses with workspace_id = 3.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "switchworkspace", "3"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::SwitchWorkspace { workspace_id: 3 },
+            } => {}
+            other => panic!("expected Dispatch::SwitchWorkspace(3), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_switchworkspace_without_id_fails() {
+        // Negative: switchworkspace needs a workspace_id argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "switchworkspace"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch switchworkspace' without an id should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_switchworkspace_zero() {
+        // Positive: workspace_id = 0 is accepted by the parser (boundary value).
+        // The daemon decides whether 0 is a valid workspace; the CLI does not.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "switchworkspace", "0"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::SwitchWorkspace { workspace_id: 0 },
+            } => {}
+            other => panic!("expected Dispatch::SwitchWorkspace(0), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_swapworkspace() {
+        // Positive: `stm dispatch swapworkspace 7` parses with workspace_id = 7.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "swapworkspace", "7"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::SwapWorkspace { workspace_id: 7 },
+            } => {}
+            other => panic!("expected Dispatch::SwapWorkspace(7), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_swapworkspace_without_id_fails() {
+        // Negative: swapworkspace needs a workspace_id argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "swapworkspace"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch swapworkspace' without an id should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_movetoworkspace() {
+        // Positive: `stm dispatch movetoworkspace 11` parses with workspace_id = 11.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "movetoworkspace", "11"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::MoveToWorkspace { workspace_id: 11 },
+            } => {}
+            other => panic!("expected Dispatch::MoveToWorkspace(11), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_movetoworkspace_without_id_fails() {
+        // Negative: movetoworkspace needs a workspace_id argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "movetoworkspace"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch movetoworkspace' without an id should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_workspace_command_rejects_non_numeric_id() {
+        // Negative: workspace_id must be a u32; a non-numeric token is rejected.
+        let result = Cli::try_parse_from(["stm", "dispatch", "switchworkspace", "abc"]);
+        assert!(
+            result.is_err(),
+            "non-numeric workspace_id should be rejected"
         );
     }
 

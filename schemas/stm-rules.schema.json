@@ -93,10 +93,10 @@
       }
     },
     "WindowAction": {
-      "description": "Action to apply when a window rule matches.\n\n- `Tile` — managed by [`LayoutEngine`](crate::layout::LayoutEngine) - `Float` — free-floating, user-positioned, not tiled - `Ignore` — excluded from tiling entirely (e.g., fullscreen apps)",
+      "description": "Action to apply when a window rule matches.\n\n- `Tile` — managed by [`ScrollingSpace`](crate::workspace::ScrollingSpace) - `Float` — free-floating, user-positioned, not tiled - `Ignore` — excluded from tiling entirely (e.g., fullscreen apps)",
       "oneOf": [
         {
-          "description": "Managed by [`LayoutEngine`](crate::layout::LayoutEngine).",
+          "description": "Managed by [`ScrollingSpace`](crate::workspace::ScrollingSpace).",
           "type": "string",
           "enum": [
             "tile"

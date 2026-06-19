@@ -21,10 +21,10 @@
 
 ## Eval 2 — New layout algorithm
 
-**Trigger:** "Add a `spiral_layout` function to `src/layout/engine.rs` that tiles windows in a Fibonacci spiral"
+**Trigger:** "Add a `spiral_layout` function to `src/layout/mutations.rs` that tiles windows in a Fibonacci spiral"
 
 **Expected output:**
-- File: `src/layout/engine.rs` — new `pub fn spiral_layout(parent: Rect, count: usize, gap_px: i32) -> Vec<Rect>`
+- File: `src/layout/mutations.rs` — new `pub fn spiral_layout(parent: Rect, count: usize, gap_px: i32) -> Vec<Rect>`
 - Pure function: no `use windows`, no I/O
 - Uses integer arithmetic only (no `f32`/`f64`)
 - Has inline `#[cfg(test)]` unit tests covering count=0, count=1, count=4

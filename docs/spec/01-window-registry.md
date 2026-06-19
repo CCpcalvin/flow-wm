@@ -7,7 +7,7 @@
 - Hooks into the Windows OS event system to detect window creation, destruction, focus changes, minimize, restore, maximize, and fullscreen transitions
 - Classifies each window as `Tiling`, `Floating`, or `Ignored` based on config rules
 - Maintains per-window state in a `HashMap<HWND, Window>`
-- Emits typed `WindowEvent`s consumed by `LayoutEngine` and `InputInterceptor`
+- Emits typed `WindowEvent`s consumed by `ScrollingSpace` (via the daemon) and `InputInterceptor`
 - Writes and reads the **recovery snapshot** (`stm-recovery.json`)
 
 ---

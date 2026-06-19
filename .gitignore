@@ -1,12 +1,16 @@
 # Build Stuff
 /target
 
-# My Stuff
+# My Personal Stuff
 ref/
 .vscode
 .worktree
 .tmp/sessions
 .tmp/tasks
+state*.json
+shortcut.ahk
+TODO.md
+*.log
 
 # OS Stuff
 .DS_Store

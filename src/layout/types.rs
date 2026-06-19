@@ -274,7 +274,7 @@ pub struct Padding {
 
 /// Result of a layout mutation — the new layout state after applying a change.
 ///
-/// Produced by [`LayoutEngine`](crate::layout::engine::LayoutEngine) for each
+/// Produced by [`ScrollingSpace`](crate::workspace::ScrollingSpace) for each
 /// mutation. Contains the new [`VirtualLayout`] (infinite canvas state) and
 /// the new [`ActualLayout`] (pixel-accurate on-screen positions).
 ///

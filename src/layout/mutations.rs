@@ -80,7 +80,7 @@ pub struct NeighborLocation {
 /// # Width ladder (derived values)
 ///
 /// `max_n` and `abs_max_width` are computed once by the engine (see
-/// [`LayoutEngine::new`](crate::layout::engine::LayoutEngine::new)) from
+/// [`ScrollingSpace::new`](crate::workspace::ScrollingSpace::new)) from
 /// `column_width`, `monitor_width`, and `padding.window_gap`, then stored here
 /// so every mutation reuses the same ladder without recompute. The helper
 /// methods [`column_shift`](Self::column_shift) and

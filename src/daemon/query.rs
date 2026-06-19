@@ -14,7 +14,7 @@ impl ScrollTilingManager {
     /// The viewport offset from the virtual layout is included so clients
     /// can determine which windows are currently visible on screen.
     pub(super) fn query_windows_all(&self) -> SocketResponse {
-        let viewport_offset = self.layout.virtual_layout().viewport_offset;
+        let viewport_offset = self.active_scrolling().virtual_layout().viewport_offset;
         SocketResponse::Data {
             payload: self.registry.to_json_value(viewport_offset),
         }
@@ -26,7 +26,7 @@ impl ScrollTilingManager {
     /// horizontal canvas. Columns store pixel widths (`width_px`), not pixel
     /// positions (the projection layer derives positions via prefix-sum).
     pub(super) fn query_layout_virtual(&self) -> SocketResponse {
-        let vl = self.layout.virtual_layout();
+        let vl = self.active_scrolling().virtual_layout();
         let columns_json: Vec<serde_json::Value> = vl
             .columns
             .iter()
@@ -59,8 +59,8 @@ impl ScrollTilingManager {
     /// The actual layout contains pixel-level coordinates for each window
     /// after projection and padding have been applied.
     pub(super) fn query_layout_actual(&self) -> SocketResponse {
-        let vl = self.layout.virtual_layout();
-        let al = self.layout.actual_layout();
+        let vl = self.active_scrolling().virtual_layout();
+        let al = self.active_scrolling().actual_layout();
         let entries_json: Vec<serde_json::Value> = al
             .entries
             .iter()

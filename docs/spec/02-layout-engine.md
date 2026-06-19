@@ -1,8 +1,16 @@
-# LayoutEngine (`stm-layout`)
+# ScrollingSpace — the tiling engine (`src/workspace/scrolling_space.rs`)
+
+> **Renamed.** This type was previously called `LayoutEngine` and lived in
+> `src/layout/engine.rs`. As part of the workspace-hierarchy refactor (niri-style
+> virtual desktops), it has been renamed to `ScrollingSpace` and moved to
+> `src/workspace/scrolling_space.rs`, where it is owned by `Workspace`, which is
+> in turn owned by `Monitor`. The pure layout machinery (`mutations`, `projection`,
+> `diff`, layout `types`) remains in `src/layout/`. The conceptual content of
+> this spec — Virtual → Actual → Diff — is unchanged.
 
 ## Responsibility
 
-`LayoutEngine` combines what was previously called `LayoutManager` and `AnimationCoordinator` into one crate. It:
+`ScrollingSpace` is the tiling engine. It:
 
 - Owns the **Virtual Layout** — the full description of all tiling windows on the infinite canvas
 - Computes the **Actual Layout** — the pixel-mapped on-screen slice of the virtual canvas
@@ -124,7 +132,7 @@ pub struct OverlayWindow {
 
 ## Animation Diff
 
-After every mutation, `LayoutEngine` calls:
+After every mutation, `ScrollingSpace` calls:
 
 ```rust
 fn diff(prev: &ActualLayout, next: &ActualLayout) -> Vec<WindowMove>

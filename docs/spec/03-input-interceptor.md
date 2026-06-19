@@ -80,10 +80,10 @@ During the drag:
 On `LMB` release:
 1. `DragSession` ends
 2. `InputInterceptor` emits `InputEvent::DragEnd { hwnd, final_rect }`
-3. `LayoutEngine.move_snap(hwnd, final_rect)` is called
+3. `ScrollingSpace.move_snap(hwnd, final_rect)` is called
 4. The snap animation takes over — `window-animation` moves the window to its computed slot
 
-**Note**: `Super+LMB` over a **floating window** is also supported. Floating windows are moved freely; on release they stay at their dropped position (no snap). `LayoutEngine` is not involved.
+**Note**: `Super+LMB` over a **floating window** is also supported. Floating windows are moved freely; on release they stay at their dropped position (no snap). `ScrollingSpace` is not involved.
 
 ---
 
@@ -105,7 +105,7 @@ The resize direction is determined by the cursor's position relative to the wind
 During resize, the window size follows the cursor in real-time. On `RMB` release:
 1. `ResizeSession` ends
 2. `InputInterceptor` emits `InputEvent::ResizeEnd { hwnd, final_rect }`
-3. `LayoutEngine.resize_snap(hwnd, final_rect)` is called
+3. `ScrollingSpace.resize_snap(hwnd, final_rect)` is called
 4. Affected windows animate to snapped positions
 
 ---
@@ -118,5 +118,5 @@ During a `DragSession`, `InputInterceptor` can emit `InputEvent::DragPreview { t
 
 ## Native Titlebar Drag (Compatibility Path)
 
-`Super+LMB` is the primary drag path. However, `InputInterceptor` also listens to `EVENT_SYSTEM_MOVESIZEEND` from the OS (via `WindowRegistry`'s event feed) to handle cases where the user drags the native titlebar without Super held. This path calls the same `LayoutEngine.move_snap()` pipeline, but without real-time window-following. The window snaps only after the user releases.
+`Super+LMB` is the primary drag path. However, `InputInterceptor` also listens to `EVENT_SYSTEM_MOVESIZEEND` from the OS (via `WindowRegistry`'s event feed) to handle cases where the user drags the native titlebar without Super held. This path calls the same `ScrollingSpace.move_snap()` pipeline, but without real-time window-following. The window snaps only after the user releases.
 

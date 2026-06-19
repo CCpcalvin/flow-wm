@@ -132,6 +132,49 @@ pub enum SocketMessage {
     /// Close the focused window.
     CloseWindow,
 
+    // --- Workspace ---
+    //
+    // These three messages form the niri-style virtual-desktop surface. The
+    // daemon currently answers each with `unimplemented_command` — the
+    // protocol shape is locked in now so the CLI, keybindings, and docs can
+    // stabilise while the animation design for switching workspaces is decided.
+    //
+    // The `workspace_id` field carries a [`crate::workspace::WorkspaceId`]
+    // (a `u32` newtype over niri-style IDs). On the wire it serialises as a
+    // bare integer, matching `WorkspaceId`'s `#[serde(transparent)]` impl.
+    /// Switch the active monitor's focus to the given workspace.
+    ///
+    /// Mirrors `stm dispatch switchworkspace <id>`. The previously active
+    /// workspace is conceptually frozen in its packed position (above or
+    /// below the target, the vertical analogue of horizontal column packing
+    /// inside a `ScrollingSpace`) and the target slides into the viewport.
+    SwitchWorkspace {
+        /// Target workspace identifier (niri-style `u32`).
+        workspace_id: u32,
+    },
+    /// Swap the active workspace with the target workspace in the monitor's
+    /// workspace list.
+    ///
+    /// Mirrors `stm dispatch swapworkspace <id>`. The two workspaces exchange
+    /// positions in the packed vertical stack; focus follows the originally
+    /// active workspace to its new slot. This is the operation most other
+    /// tiling managers omit but that is essential for rearranging a long
+    /// workspace list without re-creating workspaces.
+    SwapWorkspace {
+        /// Target workspace identifier to swap with the active workspace.
+        workspace_id: u32,
+    },
+    /// Move the focused window to the target workspace.
+    ///
+    /// Mirrors `stm dispatch movetoworkspace <id>`. The window is detached
+    /// from the current `ScrollingSpace`, re-inserted into the target
+    /// workspace's `ScrollingSpace`, and (in the eventual implementation)
+    /// focus either follows it or stays put according to config.
+    MoveToWorkspace {
+        /// Destination workspace identifier.
+        workspace_id: u32,
+    },
+
     // --- Queries ---
     /// Query all managed windows.
     QueryWindowsAll,
@@ -401,6 +444,55 @@ mod tests {
         assert_eq!(parsed, msg);
     }
 
+    // Positive: round-trip SwitchWorkspace (struct variant carrying workspace_id)
+    #[test]
+    fn roundtrip_switch_workspace() {
+        let msg = SocketMessage::SwitchWorkspace { workspace_id: 3 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"switch_workspace","workspace_id":3}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketMessage::SwitchWorkspace { workspace_id: 3 });
+    }
+
+    // Positive: round-trip SwapWorkspace
+    #[test]
+    fn roundtrip_swap_workspace() {
+        let msg = SocketMessage::SwapWorkspace { workspace_id: 7 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"swap_workspace","workspace_id":7}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketMessage::SwapWorkspace { workspace_id: 7 });
+    }
+
+    // Positive: round-trip MoveToWorkspace
+    #[test]
+    fn roundtrip_move_to_workspace() {
+        let msg = SocketMessage::MoveToWorkspace { workspace_id: 11 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"move_to_workspace","workspace_id":11}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketMessage::MoveToWorkspace { workspace_id: 11 });
+    }
+
+    // Positive: workspace_id of 0 round-trips (boundary value)
+    #[test]
+    fn roundtrip_workspace_id_zero() {
+        // WorkspaceId(0) is a valid construction; ensure the wire protocol
+        // does not implicitly reject or mangle zero.
+        for msg in [
+            SocketMessage::SwitchWorkspace { workspace_id: 0 },
+            SocketMessage::SwapWorkspace { workspace_id: 0 },
+            SocketMessage::MoveToWorkspace { workspace_id: 0 },
+        ] {
+            let wire = encode_message(&msg).unwrap();
+            let parsed: Option<SocketMessage> = decode_message(&wire);
+            assert_eq!(parsed.as_ref(), Some(&msg), "zero id failed: {wire}");
+        }
+    }
+
     // Positive: wire format roundtrip covers FocusLeft via encode+decode
     #[test]
     fn wire_format_roundtrip_set_column_width() {
@@ -488,6 +580,9 @@ mod tests {
                 exe: "explorer.exe".into(),
             },
             SocketMessage::ForgetAllApps,
+            SocketMessage::SwitchWorkspace { workspace_id: 1 },
+            SocketMessage::SwapWorkspace { workspace_id: 2 },
+            SocketMessage::MoveToWorkspace { workspace_id: 3 },
         ];
 
         for msg in &all_variants {

@@ -8,11 +8,10 @@ use std::sync::mpsc::Receiver;
 
 use crate::animation::WindowAnimator;
 use crate::config::types::StmConfig;
-use crate::floating::FloatingManager;
 use crate::ipc::transport::PipeServer;
-use crate::layout::engine::LayoutEngine;
 use crate::registry::WindowRegistry;
 use crate::registry::hooks::{HookSignal, HookThreadHandle};
+use crate::workspace::{Monitor, ScrollingSpace, Workspace};
 
 /// Intermediate struct holding layout engine parameters derived from
 /// [`StmConfig`]. Used during construction to keep the parameter list
@@ -49,12 +48,13 @@ pub(super) struct LayoutConfig {
 /// │                                                                      │
 /// │  Owns:                                                               │
 /// │  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-/// │  │ WindowRegistry │  │ LayoutEngine │  │ WindowAnimator           │  │
-/// │  │ (window state) │  │ (layout math)│  │ (src/animation/)         │  │
-/// │  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
-/// │  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-/// │  │ PipeServer     │  │ AppConfig    │  │ FloatingManager (stub)   │  │
-/// │  │ (IPC transport)│  │ (loaded once)│  │ (placeholder)            │  │
+/// │  │ WindowRegistry │  │ Vec<Monitor> │  │ WindowAnimator           │  │
+/// │  │ (window state) │  │ (workspaces: │  │ (src/animation/)         │  │
+/// │  └────────────────┘  │  Scrolling + │  └──────────────────────────┘  │
+/// │                      │  Floating)   │                                 │
+/// │  ┌────────────────┐  └──────────────┘  ┌──────────────────────────┐  │
+/// │  │ PipeServer     │  ┌──────────────┐  │ (FloatingManager now     │  │
+/// │  │ (IPC transport)│  │ AppConfig    │  │  lives inside Workspace) │  │
 /// │  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
 /// │                                                                      │
 /// │  Routes:                                                             │
@@ -76,8 +76,8 @@ pub(super) struct LayoutConfig {
 ///
 /// The hook thread never touches any STM field. It only sends [`HookEvent`]
 /// through the `mpsc` channel. The IPC thread reads the channel and calls
-/// methods on `registry`, `layout`, and `animator` directly — **no mutex,
-/// no locking, no deadlocks**.
+/// methods on `registry`, the active workspace's scrolling space, and the
+/// `animator` directly — **no mutex, no locking, no deadlocks**.
 ///
 /// Since all subsystem methods take `&mut self`, the borrow checker enforces
 /// exclusive access at compile time. This is strictly safer than `Mutex`
@@ -86,15 +86,22 @@ pub struct ScrollTilingManager {
     /// Window registry — authoritative source of truth for all tracked windows.
     pub(super) registry: WindowRegistry,
 
-    /// Layout engine — pure layout math, no Win32 knowledge.
-    pub(super) layout: LayoutEngine,
+    /// The monitor stack — one [`Monitor`] per physical display, each owning
+    /// its own vertical stack of [`Workspace`]s.
+    ///
+    /// The daemon currently initialises exactly one monitor (the primary
+    /// display) with one workspace; multi-monitor and multi-workspace support
+    /// will grow this vector. Use [`active_monitor`](Self::active_monitor) to
+    /// reach the monitor that currently owns keyboard focus.
+    pub(super) monitors: Vec<Monitor>,
+
+    /// Index into [`monitors`](Self::monitors) of the monitor that currently
+    /// owns keyboard focus. Always a valid index — the daemon keeps at least
+    /// one monitor for the lifetime of the process.
+    pub(super) active_monitor: usize,
 
     /// Window animator — background-threaded rect animation for smooth moves.
     pub(super) animator: WindowAnimator,
-
-    /// Floating window manager — stub for future implementation.
-    #[allow(dead_code)] // Stored for future floating window management.
-    pub(super) floating: FloatingManager,
 
     /// IPC named pipe server — accepts commands from the `stm` CLI.
     pub(super) server: PipeServer,
@@ -153,4 +160,70 @@ pub struct ScrollTilingManager {
     /// on `WaitForMultipleObjects` instead of `INFINITE`. This ensures
     /// pending windows are retried even if no new hook events arrive.
     pub(super) pending_creations: Vec<(isize, u8)>,
+}
+
+impl ScrollTilingManager {
+    /// The index of the monitor that currently owns keyboard focus.
+    #[must_use]
+    #[allow(dead_code)] // API surface for the upcoming multi-monitor / workspace commands.
+    pub(super) fn active_monitor_index(&self) -> usize {
+        self.active_monitor
+    }
+
+    /// Borrow the active monitor (the one that owns keyboard focus).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `monitors` is empty. The daemon always keeps at least one
+    /// monitor, so this never fires in practice.
+    #[must_use]
+    pub(super) fn active_monitor(&self) -> &Monitor {
+        &self.monitors[self.active_monitor]
+    }
+
+    /// Mutably borrow the active monitor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `monitors` is empty — see [`active_monitor`](Self::active_monitor).
+    #[must_use]
+    pub(super) fn active_monitor_mut(&mut self) -> &mut Monitor {
+        &mut self.monitors[self.active_monitor]
+    }
+
+    /// Borrow the active workspace (the one currently on screen) of the
+    /// active monitor.
+    ///
+    /// This is the workspace every IPC command and hook event operates on
+    /// today. Once workspace-switching is implemented, commands will be able
+    /// to target other workspaces explicitly.
+    #[must_use]
+    #[allow(dead_code)] // API surface for the upcoming workspace-switch commands.
+    pub(super) fn active_workspace(&self) -> &Workspace {
+        self.active_monitor().active_workspace()
+    }
+
+    /// Mutably borrow the active workspace of the active monitor.
+    #[must_use]
+    #[allow(dead_code)] // API surface for the upcoming workspace-switch commands.
+    pub(super) fn active_workspace_mut(&mut self) -> &mut Workspace {
+        self.active_monitor_mut().active_workspace_mut()
+    }
+
+    /// Borrow the scrolling space of the active workspace.
+    ///
+    /// This is the primary accessor the daemon's hook and dispatch handlers
+    /// use to reach the (formerly `LayoutEngine`) tiling state. Every
+    /// `self.layout.X(...)` call site was migrated to
+    /// `self.active_scrolling[_mut]().X(...)` during the workspace refactor.
+    #[must_use]
+    pub(super) fn active_scrolling(&self) -> &ScrollingSpace {
+        self.active_monitor().active_scrolling()
+    }
+
+    /// Mutably borrow the scrolling space of the active workspace.
+    #[must_use]
+    pub(super) fn active_scrolling_mut(&mut self) -> &mut ScrollingSpace {
+        self.active_monitor_mut().active_scrolling_mut()
+    }
 }

@@ -29,7 +29,7 @@
 //! │                 │ WindowId + state                              │
 //! │                 ▼                                               │
 //! │  ┌──────────────────────────────────────┐                       │
-//! │  │ LayoutEngine (pure layout math)      │                       │
+//! │  │ ScrollingSpace (pure layout math)    │                       │
 //! │  │ • no Win32 knowledge                 │                       │
 //! │  │ • operates on WindowId, not HWND     │                       │
 //! │  └──────────────────────────────────────┘                        │

@@ -28,8 +28,8 @@
 //! │         └──────────┬───────┘                             │
 //! │                    ▼                                     │
 //! │           ┌──────────────┐    ┌──────────────────────┐   │
-//! │           │ LayoutEngine │◄──►│ WindowRegistry       │   │
-//! │           │ (src/layout) │    │ (src/registry)       │   │
+//! │           │ ScrollingSpace│◄──►│ WindowRegistry       │   │
+//! │           │ (src/workspace)│   │ (src/registry)       │   │
 //! │           └──────┬───────┘    └──────────────────────┘   │
 //! │                  ▼                                       │
 //! │          ┌──────────────┐                                │
@@ -64,8 +64,10 @@
 //!
 //! # Ownership Model
 //!
-//! - **[`layout::engine::LayoutEngine`]** owns the *layout logic*: virtual layout, focus state,
-//!   column widths, viewport offset. It never touches Win32.
+//! - **[`workspace::ScrollingSpace`]** owns the *layout logic*: virtual layout, focus state,
+//!   column widths, viewport offset. It never touches Win32. It lives inside a
+//!   [`workspace::Workspace`] (one workspace per virtual desktop), which in turn
+//!   lives inside a [`workspace::Monitor`]. The daemon owns `Vec<Monitor>`.
 //!
 //! - **`WindowRegistry`** (not yet implemented) will own the *window metadata*:
 //!   HWND ↔ [`common::types::WindowId`] mapping, window titles/classes, tile/float/ignore
@@ -95,8 +97,8 @@ pub mod animation;
 pub mod common;
 pub mod config;
 pub mod daemon;
-pub mod floating;
 pub mod ipc;
 pub mod layout;
 pub mod logging;
 pub mod registry;
+pub mod workspace;

@@ -6,7 +6,7 @@
 //! 2. Scans existing windows (populates registry before hooks start).
 //! 3. Queries monitor work area via Win32.
 //! 4. Derives layout parameters from the [`StmConfig`].
-//! 5. Creates [`LayoutEngine`] with those parameters.
+//! 5. Creates [`ScrollingSpace`] with those parameters.
 //! 6. Batch-initializes layout from existing tiling windows (sorted by x
 //!    coordinate for deterministic column assignment; viewport centered
 //!    on the focused column).
@@ -27,11 +27,10 @@ use crate::animation::WindowAnimator;
 use crate::animation::backend::win32::Win32Backend;
 use crate::common::WindowId;
 use crate::config::types::{StmConfig, WindowRulesConfig};
-use crate::floating::FloatingManager;
 use crate::ipc::transport::PipeServer;
-use crate::layout::engine::LayoutEngine;
 use crate::layout::types::MonitorInfo;
 use crate::registry::{WindowRegistry, hooks, win32 as registry_win32};
+use crate::workspace::{Monitor, ScrollingSpace, Workspace, WorkspaceId};
 
 use super::animation::animate_layout_raw;
 use super::config_derive;
@@ -90,8 +89,8 @@ impl ScrollTilingManager {
         // 4. Derive layout parameters from the app config.
         let layout_config = config_derive::derive_layout_config(&app_config, &monitor);
 
-        // 5. Create layout engine.
-        let mut layout = LayoutEngine::new(
+        // 5. Create scrolling space (the tiling half of the workspace).
+        let mut scrolling = ScrollingSpace::new(
             monitor,
             layout_config.column_width,
             layout_config.min_column_width_px,
@@ -113,7 +112,7 @@ impl ScrollTilingManager {
                 tiling_ids.iter().position(|&id| id == wid)
             });
             log::debug!("init: focus_col = {focus_col:?} (foreground window lookup)");
-            let diff = layout.initialize_windows(tiling_ids, focus_col);
+            let diff = scrolling.initialize_windows(tiling_ids, focus_col);
             for entry in &diff.actual_layout.entries {
                 log::trace!(
                     "init target: {:?} rect ({},{},{},{})",
@@ -173,9 +172,13 @@ impl ScrollTilingManager {
 
         Ok(Self {
             registry,
-            layout,
+            monitors: vec![Monitor::new(
+                monitor.work_area,
+                vec![Workspace::new(WorkspaceId(1), scrolling)],
+                0,
+            )],
+            active_monitor: 0,
             animator,
-            floating: FloatingManager::new(),
             server,
             config: app_config,
             config_dir,

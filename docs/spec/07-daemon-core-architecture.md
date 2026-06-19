@@ -4,6 +4,26 @@
 > **Status**: Draft — for review before implementation
 > **Depends on**: `00-overview`, `01-window-registry`, `02-layout-engine`, `06-implementation-roadmap`
 
+> **⚠ Architectural evolution (post-implementation).** This spec documents the
+> original daemon refactor that *introduced* `ScrollTilingManager`. That refactor
+> has since itself been refactored to support a niri-style virtual-desktop model:
+>
+> - `LayoutEngine` → **`ScrollingSpace`**, now living in `src/workspace/scrolling_space.rs`
+>   (not `src/layout/engine.rs`).
+> - `FloatingManager` → **`FloatingSpace`**, now a field on `Workspace` in
+>   `src/workspace/floating_space.rs` (not a top-level field on the daemon).
+> - `ScrollTilingManager.layout: ScrollingSpace` + `.floating: FloatingManager`
+>   → **`ScrollTilingManager.monitors: Vec<Monitor>` + `.active_monitor: usize`**.
+>   Each `Monitor` owns `Vec<Workspace>`; each `Workspace` owns a `ScrollingSpace`
+>   and a `FloatingSpace`. Access the active scrolling space via
+>   `self.active_scrolling()` / `self.active_scrolling_mut()`.
+>
+> The prose, call-site pseudocode, and startup sequence below have been updated
+> to the current shape. The historical "Files Changed" tables (§14, §15) describe
+> the *original* refactor as implemented and are left intact for archaeology —
+> the `tiling/` module listed there was never built. For the current source of
+> truth, read `src/workspace/mod.rs` and `src/daemon/types.rs`.
+
 ---
 
 ## 1. Motivation
@@ -20,8 +40,8 @@ This works for Phase 1 (registry + IPC skeleton) but breaks down when we need to
 route events **between** subsystems:
 
 ```
-Win32 hook: window created → registry classifies it → if tiling, add to LayoutEngine → animate
-IPC command: stm move left → LayoutEngine.swap_column() → animate
+Win32 hook: window created → registry classifies it → if tiling, add to ScrollingSpace → animate
+IPC command: stm move left → ScrollingSpace.swap_column() → animate
 IPC command: stm stop → save recovery snapshot → shutdown
 ```
 
@@ -45,18 +65,20 @@ subsystem — they only expose methods that take inputs and return outputs.
 │                                                                      │
 │  Owns:                                                               │
 │  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ WindowRegistry │  │ LayoutEngine │  │ WindowAnimator           │  │
-│  │ (window state) │  │ (layout math)│  │ (src/animation/)         │  │
+│  │ WindowRegistry │  │ Vec<Monitor> │  │ WindowAnimator           │  │
+│  │ (window state) │  │  └ Workspace │  │ (src/animation/)         │  │
+│  │                │  │     ├ ScrollingSpace (layout math)         │  │
+│  │                │  │     └ FloatingSpace (stub)                 │  │
 │  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
-│  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ PipeServer     │  │ AppConfig    │  │ FloatingManager (stub)   │  │
-│  │ (IPC transport)│  │ (loaded once)│  │ (placeholder)            │  │
-│  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
+│  ┌────────────────┐  ┌──────────────┐                                │
+│  │ PipeServer     │  │ AppConfig    │                                │
+│  │ (IPC transport)│  │ (loaded once)│                                │
+│  └────────────────┘  └──────────────┘                                │
 │                                                                      │
 │  Routes:                                                             │
-│  • Hook events  → registry mutation → layout engine → animator       │
-│  • IPC commands → layout engine / registry query → animator          │
-│  • Config reload → update MutationConfig in LayoutEngine             │
+│  • Hook events  → registry mutation → active ScrollingSpace → animator │
+│  • IPC commands → active ScrollingSpace / registry query → animator   │
+│  • Config reload → update MutationConfig in active ScrollingSpace     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -78,9 +100,9 @@ The name `ScrollTilingManager` was chosen over `DaemonCore` because:
 pub struct ScrollTilingManager {
     // --- Subsystems ---
     registry: WindowRegistry,
-    layout: LayoutEngine,
+    monitors: Vec<Monitor>,       // workspace hierarchy (workspace::Monitor)
+    active_monitor: usize,        // index into `monitors`
     animator: animation::WindowAnimator,
-    floating: FloatingManager,  // stub for now
 
     // --- IPC ---
     server: PipeServer,
@@ -97,6 +119,11 @@ pub struct ScrollTilingManager {
     shutting_down: bool,
 }
 ```
+
+Each `Monitor` owns `Vec<Workspace>`; each `Workspace` owns a `ScrollingSpace`
+(the tiling engine, formerly known as `LayoutEngine`) plus a `FloatingSpace`
+stub. The active workspace's scrolling space is reached via the
+`active_scrolling()` / `active_scrolling_mut()` accessors.
 
 ### 2.4 Key Design Property: No `Arc<Mutex<>>`
 
@@ -115,7 +142,7 @@ Hook Thread (background):          IPC Thread (main):
 
 **The hook thread never touches any STM field.** It only sends `HookEvent`
 through the `mpsc` channel. The IPC thread reads the channel and calls methods
-on `registry`, `layout`, and `animator` directly — no mutex, no locking,
+on `registry`, the active workspace's `scrolling` space, and `animator` directly — no mutex, no locking,
 no deadlocks.
 
 Since all subsystem methods take `&mut self`, the borrow checker enforces
@@ -156,7 +183,7 @@ Created { hwnd } → ScrollTilingManager::on_window_created(hwnd)
     ├── If None → done (no layout change needed)
     │
     └── If Some(window_id) →
-            layout.add_window(window_id) → LayoutDiff
+            scrolling.add_window(window_id) → LayoutDiff
             self.animate_diff(diff)
 ```
 
@@ -172,7 +199,7 @@ ScrollTilingManager::on_window_destroyed(hwnd)
     ├── Check if window was in tiling state
     │       │
     │       ├── If tiling →
-    │       │     layout.remove_window(WindowId(hwnd)) → LayoutDiff
+    │       │     scrolling.remove_window(WindowId(hwnd)) → LayoutDiff
     │       │     self.animate_diff(diff)
     │       │
     │       └── If floating/ignored → no layout change
@@ -191,7 +218,7 @@ ScrollTilingManager::on_window_minimized(hwnd)
     ├── registry.minimize_window(hwnd)
     │
     └── If window was tiling-active →
-            layout.remove_window(WindowId(hwnd)) → LayoutDiff
+            scrolling.remove_window(WindowId(hwnd)) → LayoutDiff
             self.animate_diff(diff)
 ```
 
@@ -206,7 +233,7 @@ ScrollTilingManager::on_window_restored(hwnd)
     ├── registry.restore_window(hwnd)
     │
     └── If window is now Tiling::Active →
-            layout.add_window(WindowId(hwnd)) → LayoutDiff
+            scrolling.add_window(WindowId(hwnd)) → LayoutDiff
             self.animate_diff(diff)
 ```
 
@@ -221,7 +248,7 @@ ScrollTilingManager::on_focus_changed(hwnd)
     ├── registry.set_focused(hwnd)
     │
     └── If window is tiling →
-            layout.set_focus(WindowId(hwnd)) → LayoutDiff
+            scrolling.set_focus(WindowId(hwnd)) → LayoutDiff
             self.animate_diff(diff)
 ```
 
@@ -240,7 +267,7 @@ Named Pipe → PipeServer.read_message()
 ScrollTilingManager::dispatch(msg) → SocketResponse
     │
     ├── match SocketMessage::SwapLeft →
-    │       layout.swap_column(Direction::Left) → Option<LayoutDiff>
+    │       self.active_scrolling_mut().swap_column(Direction::Left) → Option<LayoutDiff>
     │       if Some(diff) → self.animate_diff(diff)
     │       SocketResponse::Ok
     │
@@ -290,11 +317,11 @@ fn animate_diff(&mut self, diff: LayoutDiff) {
 ```text
 src/
 ├── main.rs                  # Thin: args → ScrollTilingManager::new(args).run()
-├── lib.rs                   # pub mod animation; pub mod tiling; pub mod floating; pub mod daemon;
+├── lib.rs                   # pub mod animation; pub mod workspace; pub mod daemon;
 ├── common/                  # Unchanged
 ├── config/                  # Unchanged
 ├── registry/                # Refactored (see §5.1)
-├── layout/                  # Extended (see §5.2)
+├── layout/                  # Extended (see §5.2) — pure layout math (mutations, projection, diff)
 ├── ipc/                     # Refactored (see §5.3)
 ├── animation/               # NEW — embedded window-animation crate
 │   ├── mod.rs               #   Re-exports (was lib.rs)
@@ -309,10 +336,11 @@ src/
 │   ├── batch.rs
 │   ├── metrics.rs
 │   └── types.rs
-├── tiling/                  # NEW — thin TilingManager wrapper (optional, see §6)
-│   └── mod.rs
-├── floating/                # NEW — stub
-│   └── mod.rs
+├── workspace/               # NEW — workspace hierarchy
+│   ├── mod.rs               #   WorkspaceId, Workspace
+│   ├── scrolling_space.rs   #   ScrollingSpace (was layout/engine.rs — the tiling engine)
+│   ├── floating_space.rs    #   FloatingSpace stub
+│   └── monitor.rs           #   Monitor (owns Vec<Workspace>)
 └── daemon/                  # NEW — ScrollTilingManager
     └── mod.rs
 ```
@@ -324,11 +352,10 @@ pub mod animation;   // Embedded window-animation crate
 pub mod common;
 pub mod config;
 pub mod daemon;      // ScrollTilingManager orchestrator
-pub mod floating;    // FloatingManager stub
 pub mod ipc;
 pub mod layout;
 pub mod registry;
-pub mod tiling;      // Optional TilingManager wrapper
+pub mod workspace;   // ScrollingSpace + FloatingSpace + Workspace + Monitor
 ```
 
 ---
@@ -429,7 +456,13 @@ pub fn is_tiling(&self, hwnd_val: isize) -> bool {
 | `set_focused()` | Unchanged |
 | `to_json_value()` | Unchanged |
 
-### 5.2 LayoutEngine Changes
+### 5.2 ScrollingSpace Changes
+
+> **Historical.** This subsection documents the original daemon refactor's
+> addition of the `initialize_windows()` batch operation to the then-named
+> `LayoutEngine`. The method still exists with the same signature on
+> `ScrollingSpace` (`src/workspace/scrolling_space.rs`); only the type name and
+> file path have changed. The narrative below is preserved as history.
 
 #### 5.2.1 Add `initialize_windows()` Batch Operation
 
@@ -480,7 +513,7 @@ pub fn initialize_windows(
 }
 ```
 
-#### 5.2.2 Summary of LayoutEngine Changes
+#### 5.2.2 Summary of ScrollingSpace Changes
 
 | Method | Change |
 |--------|--------|
@@ -534,7 +567,7 @@ impl ScrollTilingManager {
     }
 
     fn dispatch_focus(&mut self, dir: Direction) -> SocketResponse {
-        match self.layout.focus(dir) {
+        match self.active_scrolling_mut().focus(dir) {
             Some(focused) => {
                 // LayoutDiff is produced internally if viewport scrolled
                 SocketResponse::Ok
@@ -546,7 +579,7 @@ impl ScrollTilingManager {
     }
 
     fn dispatch_swap(&mut self, dir: Direction) -> SocketResponse {
-        match self.layout.swap_column(dir) {
+        match self.active_scrolling_mut().swap_column(dir) {
             Some(diff) => {
                 self.animate_diff(diff);
                 SocketResponse::Ok
@@ -612,7 +645,7 @@ fn run(args: Args) -> Result<(), String> {
 ## 6. TilingManager Wrapper (Optional Layer)
 
 The session notes mention a "thin TilingManager wrapper" between
-`ScrollTilingManager` and `LayoutEngine + WindowAnimator`. This layer
+`ScrollTilingManager` and `ScrollingSpace + WindowAnimator`. This layer
 is optional and can be introduced later if the coordination logic in
 `ScrollTilingManager` becomes too complex. For the initial implementation,
 the methods live directly on `ScrollTilingManager`:
@@ -627,7 +660,7 @@ Option A (simpler, recommended for now):
 Option B (if STM grows too large):
     ScrollTilingManager
         └── TilingManager
-              ├── layout: LayoutEngine
+              ├── layout: ScrollingSpace
               ├── animator: WindowAnimator
               └── add_and_animate(id)  // coordinates layout + animation
 ```
@@ -722,22 +755,22 @@ windows = { version = "0.62.2", features = [
 
 ---
 
-## 8. FloatingManager Stub
+## 8. FloatingSpace Stub
 
 Floating windows are tracked by the registry but not managed by the layout
-engine. For now, `FloatingManager` is an empty placeholder:
+engine. For now, `FloatingSpace` is an empty placeholder:
 
 ```rust
-// src/floating/mod.rs
+// src/workspace/floating_space.rs
 
 /// Manager for floating (non-tiled) windows.
 ///
 /// Currently a stub — floating windows are tracked by WindowRegistry
 /// but their positioning is left to the OS. Future work may add
 /// floating window stacking, smart placement, etc.
-pub struct FloatingManager;
+pub struct FloatingSpace;
 
-impl FloatingManager {
+impl FloatingSpace {
     /// Create a new floating manager.
     pub fn new() -> Self {
         Self
@@ -754,14 +787,15 @@ The full initialization order in `ScrollTilingManager::new()`:
 ```text
 1. Create WindowRegistry (from user_rules + default_rules)
 2. registry.scan_existing_windows()
-3. Create LayoutEngine (from AppConfig → MonitorInfo, column_width, padding)
-4. Get tiling_window_ids from registry
-5. layout.initialize_windows(tiling_window_ids)  // batch init
-6. Create WindowAnimator (from AnimatorConfig + Win32Backend)
-7. animate_diff(initial_diff)  // animate windows to their initial positions
-8. start_hook_thread() → (hook_receiver, _hook_handle)
-9. Create PipeServer
-10. Return ScrollTilingManager
+3. Create ScrollingSpace (from AppConfig → MonitorInfo, column_width, padding)
+4. Wrap it: Workspace::new(WorkspaceId(1), scrolling) → Monitor::new(work_area, vec![workspace], 0)
+5. Get tiling_window_ids from registry
+6. active_scrolling_mut().initialize_windows(tiling_window_ids)  // batch init
+7. Create WindowAnimator (from AnimatorConfig + Win32Backend)
+8. animate_diff(initial_diff)  // animate windows to their initial positions
+9. start_hook_thread() → (hook_receiver, _hook_handle)
+10. Create PipeServer
+11. Return ScrollTilingManager { monitors: vec![monitor], active_monitor: 0, ... }
 ```
 
 After construction, `stm.run()` enters the IPC loop (see §10).
@@ -866,12 +900,12 @@ impl ScrollTilingManager {
         let mut registry = WindowRegistry::new(&user_rules, &default_rules);
         registry.scan_existing_windows()?;
 
-        // 2. Layout engine — derive params from AppConfig.
+        // 2. ScrollingSpace — derive params from AppConfig.
         let monitor = MonitorInfo {
             work_area: registry_win32::get_primary_monitor_work_area()?,
         };
         let layout_config = Self::derive_layout_config(&app_config, &monitor);
-        let mut layout = LayoutEngine::new(
+        let mut scrolling = ScrollingSpace::new(
             monitor,
             layout_config.column_width,
             layout_config.min_column_width_px,
@@ -879,15 +913,15 @@ impl ScrollTilingManager {
             layout_config.columns_per_screen,
         );
 
-        // 3. Batch-initialize layout from existing tiling windows.
+        // 3. Batch-initialize the scrolling space from existing tiling windows.
         let tiling_ids = registry.tiling_window_ids();
         if !tiling_ids.is_empty() {
-            let diff = layout.initialize_windows(tiling_ids);
+            let diff = scrolling.initialize_windows(tiling_ids);
             // Diff will be animated after animator is created below.
             // Store the diff temporarily.
-            var initial_diff = Some(diff);
+            let initial_diff = Some(diff);
         } else {
-            var initial_diff = None;
+            let initial_diff = None;
         }
 
         // 4. Animator.
@@ -909,11 +943,17 @@ impl ScrollTilingManager {
         let server = PipeServer::create()
             .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
 
+        // 8. Wrap the scrolling space in a Workspace, then a Monitor.
+        //    Skeleton invariant: exactly one monitor, one workspace (id 1).
+        //    Future work: niri-style multi-workspace with vertical scrolling.
+        let workspace = Workspace::new(WorkspaceId(1), scrolling);
+        let monitor = Monitor::new(monitor.work_area, vec![workspace], 0);
+
         Ok(Self {
             registry,
-            layout,
+            monitors: vec![monitor],
+            active_monitor: 0,
             animator,
-            floating: FloatingManager::new(),
             server,
             config: app_config,
             config_dir,
@@ -1028,18 +1068,20 @@ windows = { version = "0.62.2", features = [
 | `src/animation/backend/mod.rs` | Copied from window-animation |
 | `src/animation/backend/win32.rs` | Copied from window-animation |
 | `src/animation/backend/mock.rs` | Copied from window-animation |
-| `src/floating/mod.rs` | `FloatingManager` stub |
-| `src/tiling/mod.rs` | Optional — `TilingManager` wrapper (if needed) |
+| `src/workspace/mod.rs` | `WorkspaceId`, `Workspace` (id + scrolling + floating) |
+| `src/workspace/scrolling_space.rs` | `ScrollingSpace` — the tiling engine (moved from `layout/`) |
+| `src/workspace/floating_space.rs` | `FloatingSpace` stub |
+| `src/workspace/monitor.rs` | `Monitor` — owns `Vec<Workspace>` + active index |
 
 ### 14.2 Modified Files
 
 | File | Change |
 |------|--------|
 | `src/main.rs` | Simplify to thin `ScrollTilingManager::new().run()` |
-| `src/lib.rs` | Add `pub mod animation;`, `pub mod daemon;`, `pub mod floating;`, `pub mod tiling;` |
+| `src/lib.rs` | Add `pub mod animation;`, `pub mod daemon;`, `pub mod workspace;` |
 | `src/registry/core.rs` | Remove `process_pending_events()`, make `handle_created()` public with `Option<WindowId>` return, add `tiling_window_ids()`, add `is_tiling()` |
 | `src/registry/win32.rs` | Add `get_primary_monitor_work_area()` |
-| `src/layout/engine.rs` | Add `initialize_windows()` method |
+| `src/workspace/scrolling_space.rs` | Add `initialize_windows()` method |
 | `src/layout/mutations.rs` | Add `initialize_windows()` pure function |
 | `src/ipc/dispatch.rs` | Remove `dispatch_with_registry()`, keep `dispatch()` as fallback |
 | `Cargo.toml` | Add `crossbeam-channel = "0.5"`, add `"Win32_Graphics_Dwm"` feature |
@@ -1085,14 +1127,14 @@ windows = { version = "0.62.2", features = [
 3. Add `tiling_window_ids()` and `is_tiling()` to registry
 4. Remove `process_pending_events()` from registry (keep tests updated)
 5. Add `mutations::initialize_windows()` pure function
-6. Add `LayoutEngine::initialize_windows()` method
+6. Add `ScrollingSpace::initialize_windows()` method
 7. `cargo test` — all existing tests must still pass
 
 ### Phase 2 — ScrollTilingManager Core
 
-**Files**: `src/daemon/mod.rs`, `src/floating/mod.rs`, `src/main.rs`, `src/ipc/dispatch.rs`, `src/lib.rs`
+**Files**: `src/daemon/mod.rs`, `src/workspace/floating_space.rs`, `src/main.rs`, `src/ipc/dispatch.rs`, `src/lib.rs`
 
-1. Create `src/floating/mod.rs` stub
+1. Create `src/workspace/floating_space.rs` stub
 2. Create `src/daemon/mod.rs` with `ScrollTilingManager` struct
 3. Implement `new()` constructor with full startup sequence
 4. Implement `run()` main loop
@@ -1100,7 +1142,7 @@ windows = { version = "0.62.2", features = [
 6. Implement `dispatch()` with all IPC command routing
 7. Implement `animate_diff()` bridge method
 8. Simplify `main.rs` to thin wrapper
-9. Add `pub mod daemon;`, `pub mod floating;` to `lib.rs`
+9. Add `pub mod daemon;`, `pub mod workspace;` to `lib.rs`
 10. `cargo build` — must compile
 11. `cargo test` — all tests pass
 
@@ -1172,7 +1214,7 @@ function for the constructor, and the `&mut self` method for the runtime loop.
 ### 17.2 New Unit Tests Needed
 
 - `mutations::initialize_windows()` — empty list, single window, multiple windows
-- `LayoutEngine::initialize_windows()` — verify LayoutDiff has correct entries
+- `ScrollingSpace::initialize_windows()` — verify LayoutDiff has correct entries
 - `ScrollTilingManager::animate_diff()` — verify conversion from LayoutDiff to WindowTarget
 - `WindowRegistry::tiling_window_ids()` — mixed tiling/floating/ignored windows
 - `WindowRegistry::is_tiling()` — all states

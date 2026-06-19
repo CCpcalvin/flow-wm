@@ -79,6 +79,17 @@ impl ScrollTilingManager {
             SocketMessage::SetConfigValue { .. } => unimplemented_command("set_config_value"),
             SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
             SocketMessage::ForgetAllApps => unimplemented_command("forget_all_apps"),
+
+            // --- Workspace ---
+            //
+            // Stubs only: the protocol surface is locked in so the CLI and
+            // keybindings can stabilise, but the animation design for
+            // switching workspaces (vertical analogue of horizontal column
+            // packing) is undecided. Each arm returns the standard
+            // `unimplemented_command` error until the workspace logic lands.
+            SocketMessage::SwitchWorkspace { .. } => unimplemented_command("switch_workspace"),
+            SocketMessage::SwapWorkspace { .. } => unimplemented_command("swap_workspace"),
+            SocketMessage::MoveToWorkspace { .. } => unimplemented_command("move_to_workspace"),
         }
     }
 
@@ -86,7 +97,7 @@ impl ScrollTilingManager {
     ///
     /// This is the complete focus pipeline:
     ///
-    /// 1. **Layout focus** — [`LayoutEngine::focus`] resolves the neighbor
+    /// 1. **Layout focus** — [`ScrollingSpace::focus`](crate::workspace::ScrollingSpace::focus) resolves the neighbor
     ///    [`WindowId`] and optionally shifts the viewport (producing a
     ///    [`AppliedLayout`] when the camera scrolls).
     /// 2. **OS foreground** — [`registry_win32::set_foreground_window`] moves
@@ -98,7 +109,7 @@ impl ScrollTilingManager {
     /// 4. **Animation** — if the viewport scrolled, [`animate_layout`](Self::animate_layout)
     ///    animates the camera shift so the focused window becomes visible.
     fn dispatch_focus(&mut self, dir: Direction) -> SocketResponse {
-        match self.layout.focus(dir) {
+        match self.active_scrolling_mut().focus(dir) {
             Some((focused_id, diff_opt)) => {
                 // 2. Apply OS-level foreground focus to the target window.
                 let target_hwnd = focused_id.0;
@@ -148,7 +159,7 @@ impl ScrollTilingManager {
     /// - `WM_CLOSE` could not be queued (the window vanished mid-call,
     ///   etc.) → error.
     fn dispatch_close_window(&mut self) -> SocketResponse {
-        let Some(focused) = self.layout.focused() else {
+        let Some(focused) = self.active_scrolling().focused() else {
             return SocketResponse::Error {
                 message: "no focused window to close".into(),
             };
@@ -166,13 +177,13 @@ impl ScrollTilingManager {
 
     /// Dispatch a **column** swap in the given direction.
     ///
-    /// Calls [`LayoutEngine::swap_column`] and animates the resulting layout
+    /// Calls [`ScrollingSpace::swap_column`](crate::workspace::ScrollingSpace::swap_column) and animates the resulting layout
     /// diff if the swap succeeded. The layout engine handles off-screen
     /// columns transparently — `swap_column` internally calls
     /// `ensure_column_visible`, so the viewport scrolls as part of the same
     /// diff and no separate "offscreen" message is needed.
     fn dispatch_swap_column(&mut self, dir: Direction) -> SocketResponse {
-        match self.layout.swap_column(dir) {
+        match self.active_scrolling_mut().swap_column(dir) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -185,11 +196,11 @@ impl ScrollTilingManager {
 
     /// Dispatch a **per-window** swap in the given direction.
     ///
-    /// Calls [`LayoutEngine::swap_window`], which exchanges the focused
+    /// Calls [`ScrollingSpace::swap_window`](crate::workspace::ScrollingSpace::swap_window), which exchanges the focused
     /// window with its neighbour: up/down moves it within the same column,
     /// left/right exchanges it with a window in the adjacent column.
     fn dispatch_swap_window(&mut self, dir: Direction) -> SocketResponse {
-        match self.layout.swap_window(dir) {
+        match self.active_scrolling_mut().swap_window(dir) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -226,7 +237,7 @@ impl ScrollTilingManager {
 
     /// Dispatch a scroll-left command.
     fn dispatch_scroll_left(&mut self) -> SocketResponse {
-        match self.layout.scroll_left() {
+        match self.active_scrolling_mut().scroll_left() {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -239,7 +250,7 @@ impl ScrollTilingManager {
 
     /// Dispatch a scroll-right command.
     fn dispatch_scroll_right(&mut self) -> SocketResponse {
-        match self.layout.scroll_right() {
+        match self.active_scrolling_mut().scroll_right() {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -252,7 +263,7 @@ impl ScrollTilingManager {
 
     /// Dispatch an expand-column command on the focused column.
     fn dispatch_expand(&mut self) -> SocketResponse {
-        match self.layout.expand_column() {
+        match self.active_scrolling_mut().expand_column() {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -265,7 +276,7 @@ impl ScrollTilingManager {
 
     /// Dispatch a shrink-column command on the focused column.
     fn dispatch_shrink(&mut self) -> SocketResponse {
-        match self.layout.shrink_column() {
+        match self.active_scrolling_mut().shrink_column() {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -283,7 +294,7 @@ impl ScrollTilingManager {
     /// delegated. This is the **free-form / drag-resize** path — the value is
     /// applied directly and is not snapped to the expand/shrink slot ladder.
     fn dispatch_set_column_width(&mut self, width_px: u32) -> SocketResponse {
-        let (min, max) = self.layout.column_width_bounds();
+        let (min, max) = self.active_scrolling().column_width_bounds();
         // `u32 → i32` can fail for absurd inputs (`> i32::MAX`). Reject with a
         // precise message instead of letting the cast wrap negative and report
         // a misleading value.
@@ -307,7 +318,7 @@ impl ScrollTilingManager {
                 message: format!("width_px must be <= {max}, got {target}"),
             };
         }
-        match self.layout.set_column_width(target) {
+        match self.active_scrolling_mut().set_column_width(target) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -320,7 +331,7 @@ impl ScrollTilingManager {
 
     /// Dispatch a monocle mode toggle on the focused column.
     fn dispatch_toggle_monocle(&mut self) -> SocketResponse {
-        match self.layout.toggle_monocle() {
+        match self.active_scrolling_mut().toggle_monocle() {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok

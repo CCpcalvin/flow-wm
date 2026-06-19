@@ -6,7 +6,7 @@
 
 /// Axis-parallel rectangle with integer pixel coordinates.
 ///
-/// This is the **frozen cross-layer contract** between [`LayoutEngine`](crate::layout::LayoutEngine)
+/// This is the **frozen cross-layer contract** between [`ScrollingSpace`](crate::workspace::ScrollingSpace)
 /// and the Win32 compositor. The field layout (`x`, `y`, `width`, `height`) must not change.
 ///
 /// After projection, every [`ActualEntry`](crate::layout::ActualEntry) carries a `Rect`
@@ -80,7 +80,7 @@ pub enum Direction {
 /// the HWND value. The actual Win32 conversion (`HWND` ↔ `WindowId`) happens
 /// only in the (future) `registry` module.
 ///
-/// This is the **bridge type** between [`LayoutEngine`](crate::layout::LayoutEngine)
+/// This is the **bridge type** between [`ScrollingSpace`](crate::workspace::ScrollingSpace)
 /// (which only knows `WindowId`) and `WindowRegistry` (which knows HWNDs).
 ///
 /// # Usage as map key
