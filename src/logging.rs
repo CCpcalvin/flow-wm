@@ -19,6 +19,11 @@
 //! 2. **stderr** — so that running `stmd` directly from a console (rather
 //!    than via `stm start`) still shows logs inline.
 //!
+//! The date-stamped file (target 1) can be overridden by passing
+//! `stmd --log-file PATH`, which redirects all logging to that exact path
+//! (truncated on each start) for a clean, isolated single-run debug log.
+//! See [`init`].
+//!
 //! ## Why `chrono` instead of the standard library
 //!
 //! [`std::time::SystemTime::now`] returns UTC, and the standard library has no
@@ -60,12 +65,23 @@ use env_logger::{Builder, Target};
 
 /// Initialize the global logger.
 ///
-/// Configures [`env_logger`] to write every record to both the date-stamped
-/// log file (`<config_dir>/logs/stmd-YYYY-MM-DD.log`, append mode) and stderr.
+/// Configures [`env_logger`] to write every record to both a log file and
+/// stderr (via [`TeeWriter`]).
 ///
 /// This function must be called **exactly once** per process — it calls
 /// [`Builder::init`], which panics if a global logger is already installed.
 /// In the daemon this is the first thing `main()` does.
+///
+/// # Log file selection
+///
+/// - **`log_file_override = Some(path)`** (from `stmd --log-file PATH`):
+///   redirect ALL logging to that exact path, opened fresh
+///   (create-or-truncate). This yields a clean, isolated file for a single
+///   debugging run, separate from the shared daily log. Stderr is still
+///   echoed so a console-launched `stmd --log-file` stays visible.
+/// - **`log_file_override = None`** (default): the date-stamped daily log
+///   (`<config_dir>/logs/stmd-YYYY-MM-DD.log`) opened in append mode, so
+///   restarts on the same day accumulate into one file.
 ///
 /// # Level resolution
 ///
@@ -80,34 +96,40 @@ use env_logger::{Builder, Target};
 /// with a stderr-only target and a warning is emitted. This ensures the
 /// daemon can still run and produce diagnostic output even when the log
 /// directory is inaccessible.
-pub fn init() {
-    let date = today_local_date();
-    let config_dir = crate::config::dirs::resolve_config_dir(None);
-    let log_path = crate::config::dirs::log_file_path_in(&config_dir, &date);
-
+pub fn init(log_file_override: Option<&Path>) {
     let default_filter = if cfg!(debug_assertions) {
         "debug"
     } else {
         "info"
     };
+    let env = env_logger::Env::default().default_filter_or(default_filter);
 
-    match open_log_file(&log_path) {
+    // Resolve the log file path and open mode from the override (if any).
+    let (log_path, append) = match log_file_override {
+        Some(path) => {
+            // Explicit `--log-file`: a clean, isolated file for this run.
+            (std::path::PathBuf::from(path), false)
+        }
+        None => {
+            // Default: date-stamped daily log, appended to across restarts.
+            let date = today_local_date();
+            let config_dir = crate::config::dirs::resolve_config_dir(None);
+            let path = crate::config::dirs::log_file_path_in(&config_dir, &date);
+            (path, true)
+        }
+    };
+
+    match open_log_file(&log_path, append) {
         Ok(file) => {
             // Primary path: tee to both file and stderr.
-            let env = env_logger::Env::default().default_filter_or(default_filter);
             let mut builder = Builder::from_env(env);
             builder.target(Target::Pipe(Box::new(TeeWriter::new(file))));
             builder.init();
-            log::info!(
-                "stmd: logging to {} (local date={})",
-                log_path.display(),
-                date
-            );
+            log::info!("stmd: logging to {}", log_path.display());
         }
         Err(e) => {
             // Fallback: stderr-only. Initialize the logger BEFORE emitting the
             // warning so the warning is actually captured by the logger.
-            let env = env_logger::Env::default().default_filter_or(default_filter);
             Builder::from_env(env).init();
             log::warn!(
                 "stmd: could not open log file {}: {e}; falling back to stderr-only",
@@ -135,24 +157,38 @@ fn today_local_date() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
 
-/// Open (or create) the log file in append mode, creating parent dirs.
+/// Open (or create) the log file, creating parent dirs.
 ///
-/// The file is opened with `.append(true).create(true)`, which means:
-/// - If the file exists, new records are appended to the end.
-/// - If the file does not exist, it is created.
-/// - Existing contents are never truncated.
+/// The `append` flag selects the open mode:
 ///
-/// The parent directory (`<config_dir>/logs/`) is created if missing via
+/// - `append = true` — opened with `.append(true).create(true)`. If the file
+///   exists, new records are appended to the end; if not, it is created.
+///   Existing contents are never truncated. This is used for the default
+///   date-stamped daily log, where multiple daemon restarts on the same day
+///   accumulate into one file.
+/// - `append = false` — opened with `.write(true).create(true).truncate(true)`.
+///   If the file exists it is **truncated to zero length**; if not, it is
+///   created. This yields a fresh, isolated file for a single debugging run
+///   via `stmd --log-file PATH`.
+///
+/// The parent directory tree is created if missing via
 /// [`std::fs::create_dir_all`].
 ///
 /// # Errors
 ///
 /// Returns [`io::Error`] if directory creation or file opening fails.
-fn open_log_file(path: &Path) -> io::Result<File> {
+fn open_log_file(path: &Path, append: bool) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    OpenOptions::new().append(true).create(true).open(path)
+    let mut opts = OpenOptions::new();
+    opts.create(true).write(true);
+    if append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
+    opts.open(path)
 }
 
 /// A writer that duplicates every write to both a file and stderr.
@@ -275,7 +311,7 @@ mod tests {
         let nested = temp.path().join("a").join("b").join("logs");
         let file_path = nested.join("stmd-test.log");
 
-        let file = open_log_file(&file_path).expect("open_log_file failed");
+        let file = open_log_file(&file_path, true).expect("open_log_file failed");
         assert!(
             file_path.exists(),
             "log file should exist after open_log_file"
@@ -298,19 +334,47 @@ mod tests {
 
         // First open + write.
         {
-            let mut f = open_log_file(&path).expect("first open failed");
+            let mut f = open_log_file(&path, true).expect("first open failed");
             f.write_all(b"first line\n").expect("first write failed");
             f.flush().expect("first flush failed");
         }
 
         // Second open + write — must NOT destroy "first line".
         {
-            let mut f = open_log_file(&path).expect("second open failed");
+            let mut f = open_log_file(&path, true).expect("second open failed");
             f.write_all(b"second line\n").expect("second write failed");
             f.flush().expect("second flush failed");
         }
 
         let contents = std::fs::read_to_string(&path).expect("read back failed");
         assert_eq!(contents, "first line\nsecond line\n");
+    }
+
+    /// Positive: `open_log_file` with `append = false` truncates an existing
+    /// file to a clean slate.
+    ///
+    /// This is the `--log-file` override behaviour: each launch of
+    /// `stmd --log-file PATH` must start from an empty file so the captured
+    /// log contains only that single run's output.
+    #[test]
+    fn open_log_file_truncates_when_override() {
+        let temp = tempfile::tempdir().expect("tempdir creation failed");
+        let path = temp.path().join("override-test.log");
+
+        // Pre-create the file with stale content from a previous run.
+        std::fs::write(&path, "leftover from a previous debug run\n").expect("pre-write failed");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back failed"),
+            "leftover from a previous debug run\n"
+        );
+
+        // Open in override (truncate) mode — existing content must be wiped.
+        let _file = open_log_file(&path, false).expect("open in override mode failed");
+
+        let contents = std::fs::read_to_string(&path).expect("read back failed");
+        assert!(
+            contents.is_empty(),
+            "override mode should truncate the file to empty, got: {contents}"
+        );
     }
 }

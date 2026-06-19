@@ -5,7 +5,7 @@
 //! # Usage
 //!
 //! ```text
-//! stm start [--config <dir>]    Start the daemon (spawns stmd.exe in the background)
+//! stm start [--config <dir>] [--log-file <path>]    Start the daemon (spawns stmd.exe detached)
 //! stm stop                      Stop the running daemon
 //! stm config init               Create config dir + write default files
 //! stm config reload             Reload daemon configuration from disk
@@ -64,6 +64,15 @@ enum Commands {
         /// Config directory path. Overrides STM_CONFIG_DIR env var and default path.
         #[arg(long)]
         config: Option<String>,
+        /// Optional log file path.
+        ///
+        /// Forwarded to the spawned daemon as `--log-file`. When set, stmd
+        /// redirects all of its logging to this exact file (truncated on each
+        /// start) instead of the default date-stamped log — useful for
+        /// capturing a clean, isolated debug log for a single run. The log
+        /// level is still controlled by the `RUST_LOG` environment variable.
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<String>,
     },
     /// Stop the running stmd daemon.
     Stop,
@@ -202,7 +211,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Start { config } => cmd_start(config),
+        Commands::Start { config, log_file } => cmd_start(config, log_file),
         Commands::Stop => cmd_stop(),
         Commands::Config { command } => cmd_config(command),
         Commands::Query { command } => cmd_query(command),
@@ -222,6 +231,11 @@ fn main() {
 /// this variable on startup to locate its config files, so the override is
 /// propagated transparently through process inheritance.
 ///
+/// If a `--log-file <path>` override is provided, it is forwarded to the
+/// daemon as a `--log-file` CLI argument (see [`spawn_daemon`]). Unlike
+/// `--config`, this is passed explicitly on the command line rather than via
+/// an environment variable.
+///
 /// # Design Decision
 ///
 /// We use [`std::env::set_var`] rather than `Command::env()` because the
@@ -236,7 +250,10 @@ fn main() {
 /// - The daemon binary cannot be found.
 /// - The daemon fails to spawn.
 /// - The daemon does not become ready within [`DAEMON_START_TIMEOUT`].
-fn cmd_start(config_override: Option<String>) -> Result<(), String> {
+fn cmd_start(
+    config_override: Option<String>,
+    log_file_override: Option<String>,
+) -> Result<(), String> {
     // Set env var before any daemon interaction so the spawned child inherits it.
     if let Some(ref dir) = config_override {
         // SAFETY: This is called in the CLI process before spawning the daemon
@@ -249,7 +266,7 @@ fn cmd_start(config_override: Option<String>) -> Result<(), String> {
         return Err("daemon is already running".into());
     }
 
-    spawn_daemon()?;
+    spawn_daemon(log_file_override.as_deref())?;
     wait_for_daemon()?;
 
     println!("stm: daemon started");
@@ -517,17 +534,18 @@ fn resolve_editor() -> Result<String, String> {
 ///
 /// Falls back to a plain `spawn()` when the detached spawn fails (e.g., under
 /// WSL interop).
-fn spawn_daemon() -> Result<(), String> {
+fn spawn_daemon(log_file_override: Option<&str>) -> Result<(), String> {
     let exe = find_daemon_exe()?;
 
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     const DETACHED: u32 = 0x00000200 | 0x08000000;
 
     // Try detached spawn first (native Windows), fall back to plain spawn (WSL).
-    let child = Command::new(&exe)
+    // Both paths forward `--log-file` when provided.
+    let child = daemon_command(&exe, log_file_override)
         .creation_flags(DETACHED)
         .spawn()
-        .or_else(|_| Command::new(&exe).spawn())
+        .or_else(|_| daemon_command(&exe, log_file_override).spawn())
         .map_err(|e| format!("failed to spawn daemon ({}): {e}", exe.display()))?;
 
     // Explicitly drop the Child handle so we don't wait on the process.
@@ -535,6 +553,23 @@ fn spawn_daemon() -> Result<(), String> {
     drop(child);
 
     Ok(())
+}
+
+/// Build the daemon [`Command`] with any `--log-file` override applied.
+///
+/// Factored out so [`spawn_daemon`] can construct an identical command for
+/// both the native detached spawn and the WSL fallback spawn — the
+/// `--log-file` argument must be present on both paths for the override to
+/// take effect regardless of which spawn path succeeds.
+///
+/// The config directory is NOT passed here; it is propagated to the daemon
+/// via the inherited `STM_CONFIG_DIR` environment variable (see [`cmd_start`]).
+fn daemon_command(exe: &std::path::Path, log_file_override: Option<&str>) -> Command {
+    let mut cmd = Command::new(exe);
+    if let Some(path) = log_file_override {
+        cmd.arg("--log-file").arg(path);
+    }
+    cmd
 }
 
 /// Locate the `stmd.exe` binary next to the current executable.
@@ -583,7 +618,13 @@ mod tests {
     #[test]
     fn parse_start() {
         let cli = Cli::try_parse_from(["stm", "start"]).unwrap();
-        assert!(matches!(cli.command, Commands::Start { config: None }));
+        assert!(matches!(
+            cli.command,
+            Commands::Start {
+                config: None,
+                log_file: None
+            }
+        ));
     }
 
     #[test]
@@ -592,6 +633,7 @@ mod tests {
         match cli.command {
             Commands::Start {
                 config: Some(ref c),
+                ..
             } => {
                 assert_eq!(c, "C:\\custom\\stm");
             }
@@ -603,8 +645,46 @@ mod tests {
     fn parse_start_without_config_flag() {
         let cli = Cli::try_parse_from(["stm", "start"]).unwrap();
         match cli.command {
-            Commands::Start { config: None } => {}
+            Commands::Start { config: None, .. } => {}
             other => panic!("expected Start with no --config, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_start_with_log_file_flag() {
+        let cli =
+            Cli::try_parse_from(["stm", "start", "--log-file", "C:\\tmp\\debug.log"]).unwrap();
+        match cli.command {
+            Commands::Start {
+                log_file: Some(ref p),
+                ..
+            } => {
+                assert_eq!(p, "C:\\tmp\\debug.log");
+            }
+            other => panic!("expected Start with --log-file, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_start_with_config_and_log_file_flags() {
+        let cli = Cli::try_parse_from([
+            "stm",
+            "start",
+            "--config",
+            "C:\\custom\\stm",
+            "--log-file",
+            "C:\\tmp\\debug.log",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Start {
+                config: Some(ref c),
+                log_file: Some(ref p),
+            } => {
+                assert_eq!(c, "C:\\custom\\stm");
+                assert_eq!(p, "C:\\tmp\\debug.log");
+            }
+            other => panic!("expected Start with both flags, got: {other:?}"),
         }
     }
 

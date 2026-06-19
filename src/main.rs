@@ -33,6 +33,16 @@ struct Args {
     #[arg(long)]
     config: Option<String>,
 
+    /// Optional log file path. When set, ALL logging is redirected to this
+    /// exact file (truncated on each start) instead of the default
+    /// date-stamped daily log under `<config_dir>/logs/`. Intended for
+    /// capturing a clean, isolated log for a single debugging run — the
+    /// file starts empty each launch so only that run's output is recorded.
+    /// The log level is still controlled by `RUST_LOG` (defaulting to `debug`
+    /// in debug builds, `info` in release).
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<String>,
+
     /// Desktop name for test mode (opens and switches to this desktop).
     /// Only available in debug builds.
     #[cfg(debug_assertions)]
@@ -42,12 +52,14 @@ struct Args {
 
 /// Daemon entry point.
 fn main() {
-    // Initialize logging BEFORE anything else so that all subsequent
-    // initialization (config loading, window scanning, hook setup) is
-    // captured. This tees to both the date-stamped log file and stderr.
-    logging::init();
-
+    // Parse CLI arguments first so the `--log-file` override is available to
+    // the logger. Clap handles `--help`/`--version` and usage errors by
+    // printing to stderr and exiting, which needs no logger. All subsequent
+    // initialization — config loading, window scanning, hook setup — is still
+    // captured because `logging::init` runs before `run()`.
     let args = Args::parse();
+    logging::init(args.log_file.as_deref().map(Path::new));
+
     if let Err(e) = run(args) {
         log::error!("stmd: fatal error: {e}");
         std::process::exit(1);
