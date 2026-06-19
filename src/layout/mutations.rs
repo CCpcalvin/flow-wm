@@ -27,17 +27,35 @@
 //! └── Column 2
 //! ```
 //!
-//! - **Horizontal operations** (Left/Right): swap columns, resize `width_eighths`, scroll
+//! - **Horizontal operations** (Left/Right): swap columns, resize column widths, scroll
 //! - **Vertical operations** (Up/Down): swap rows within a column, focus between rows
 //!
 //! # Size Philosophy
 //!
 //! All size parameters come from [`MutationConfig`], which is derived from
-//! [`StmConfig`](crate::config::StmConfig). The mutation layer never hardcodes
-//! pixel values — it delegates to [`super::projection`] for all pixel math.
+//! [`StmConfig`](crate::config::StmConfig). The layout engine receives this
+//! (not the full config) to stay decoupled from config parsing details.
+//!
+//! # Width model (pixel-based, with a slot ladder)
+//!
+//! Column widths are stored directly in pixels
+//! ([`width_px`](crate::layout::types::Column::width_px)). Expand/shrink move
+//! along a discrete **slot ladder** so the `window_gap` is always preserved:
+//!
+//! - `column_shift = column_width + window_gap` (one slot step)
+//! - allowed expand/shrink widths =
+//!   `{ column_width + n * column_shift : n ∈ [0, max_n] } ∪ { abs_max_width }`
+//! - `max_n = floor((monitor_width − 2*gap − column_width) / column_shift)`
+//! - `abs_max_width = monitor_width − 2*gap` (the monocle / full-width value)
+//!
+//! The two-step top lets the widest regular slot (`slot_max`) jump to
+//! `abs_max_width`, which is generally not slot-aligned (the leftover pixels
+//! between `slot_max` and `abs_max_width` are smaller than one `column_shift`).
+//! Free-form widths (drag-resize, viewport offsets) are **not** snapped to the
+//! ladder — only bounded by `[min_column_width_px, abs_max_width]`.
 
 use crate::common::{Direction, WindowId};
-use crate::layout::projection::{column_eighths_to_pixels, column_step_width};
+use crate::layout::projection::{canvas_width, column_step_width};
 use crate::layout::types::{Column, Padding, VirtualLayout};
 
 /// Location of a neighboring window returned by [`find_neighbor_window`].
@@ -58,18 +76,36 @@ pub struct NeighborLocation {
 /// Extracted from [`StmConfig`](crate::config::StmConfig) by the daemon.
 /// The layout engine receives this (not the full config) to stay decoupled
 /// from config parsing details.
+///
+/// # Width ladder (derived values)
+///
+/// `max_n` and `abs_max_width` are computed once by the engine (see
+/// [`LayoutEngine::new`](crate::layout::engine::LayoutEngine::new)) from
+/// `column_width`, `monitor_width`, and `padding.window_gap`, then stored here
+/// so every mutation reuses the same ladder without recompute. The helper
+/// methods [`column_shift`](Self::column_shift) and
+/// [`slot_max`](Self::slot_max) express the two core ladder quantities.
 #[derive(Debug, Clone, Copy)]
 pub struct MutationConfig {
-    /// Monitor pixel width (used for visibility checks).
+    /// Monitor pixel width (used for visibility checks and `abs_max_width`).
     pub monitor_width: i32,
-    /// Default column width in pixels for new columns.
+    /// Base column width in pixels. New columns are created at this width, and
+    /// it is the `n = 0` rung of the expand/shrink slot ladder.
     pub column_width: u32,
-    /// Default column width in eighths (1–8) for new columns.
-    pub default_column_width_eighths: u8,
-    /// Minimum column width in eighths (computed from config `min_column_width_px`).
-    pub min_column_eighths: u8,
-    /// Maximum column width in eighths (computed from `monitor_width / column_width`).
-    pub max_column_eighths: u8,
+    /// Minimum allowed column width in pixels — the lower bound for free-form
+    /// drag-resize ([`set_column_width`]). Expand/shrink do not go below
+    /// `column_width` (ladder floor); values in
+    /// `[min_column_width_px, column_width)` are reachable only via drag-resize.
+    pub min_column_width_px: u32,
+    /// Number of slot steps in the expand/shrink ladder. The regular ladder
+    /// rungs are `column_width + n * column_shift` for `n ∈ [0, max_n]`.
+    pub max_n: u32,
+    /// Absolute maximum column width in pixels
+    /// (`= monitor_width − 2 * window_gap`). This is the monocle width and the
+    /// two-step top of the expand ladder (a jump beyond [`slot_max`]).
+    ///
+    /// [`slot_max`]: Self::slot_max
+    pub abs_max_width: i32,
     /// Padding settings.
     pub padding: Padding,
     /// Target number of columns per screen from config (`columns_per_screen`).
@@ -78,6 +114,25 @@ pub struct MutationConfig {
     /// fit on one screen (show everything) or scrolling is needed (focus
     /// column visible).
     pub columns_per_screen: u32,
+}
+
+impl MutationConfig {
+    /// One expand/shrink slot step: `column_width + window_gap`.
+    ///
+    /// This is the gap-aware step that the old eighths quantization discarded.
+    /// Expand grows by exactly this; shrink shrinks by exactly this.
+    #[must_use]
+    pub fn column_shift(&self) -> i32 {
+        self.column_width as i32 + self.padding.window_gap
+    }
+
+    /// Largest regular ladder rung below [`abs_max_width`](Self::abs_max_width):
+    /// `column_width + max_n * column_shift`. Expanding a column already at
+    /// `slot_max` jumps to `abs_max_width` (the two-step top).
+    #[must_use]
+    pub fn slot_max(&self) -> i32 {
+        self.column_width as i32 + self.max_n as i32 * self.column_shift()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,20 +383,6 @@ pub fn focus(
     }
 }
 
-/// Round `value` **down** to the largest multiple of `unit` that is `≤ value`.
-///
-/// Both `value` and `unit` must be non-negative, and `unit` must be nonzero.
-fn floor_to_multiple(value: i32, unit: i32) -> i32 {
-    (value / unit) * unit
-}
-
-/// Round `value` **up** to the smallest multiple of `unit` that is `≥ value`.
-///
-/// Both `value` and `unit` must be non-negative, and `unit` must be nonzero.
-fn ceil_to_multiple(value: i32, unit: i32) -> i32 {
-    ((value + unit - 1) / unit) * unit
-}
-
 /// Shift the camera so the given column becomes visible.
 ///
 /// This is the core "camera shift" operation. It checks whether the target
@@ -357,33 +398,22 @@ fn ceil_to_multiple(value: i32, unit: i32) -> i32 {
 /// This is used by focus, swap, resize, and other operations that need
 /// to ensure a specific column is on-screen.
 ///
-/// # Slot Model
+/// # Slot model & free-form offset (Ripple #1)
 ///
-/// Columns are laid out in slots: `slot_width = col_width + window_gap`.
-/// The canvas starts at `window_gap` (left-edge gap). Each column `i`
-/// is at canvas position `window_gap + i * slot_width`.
+/// Column x-positions are a prefix sum of each column's
+/// [`width_px`](crate::layout::types::Column::width_px) plus `window_gap`. The
+/// resulting `viewport_offset` is **free-form** — it is *not* snapped to the
+/// `column_shift` grid. Snapping was only valid when every column had the
+/// uniform base `column_width`; with variable widths (drag-resize, expand/
+/// shrink) the grid would jump over the exact fit, so we place the camera at
+/// the minimal scroll that reveals the target column with a one-gap margin.
+/// Each branch scrolls the **minimum** amount in its direction:
 ///
-/// # Quantized Camera Shifts
-///
-/// The `viewport_offset` is always quantized to a multiple of
-/// `column_shift = column_width + window_gap` (the standard slot width).
-/// This guarantees that after any scroll, columns appear at the *same*
-/// screen position they would occupy at the initial viewport — giving a
-/// consistent, "stepped" visual appearance rather than arbitrary offsets.
-///
-/// For uniform-width columns this means every column's left edge lands at
-/// exactly `window_gap` pixels from the screen's left edge, regardless of
-/// which scroll direction revealed it.
-///
-/// ## Direction-specific rounding
-///
-/// - **Left scroll**: we need `viewport_offset ≤ col_left − gap` (so the
-///   gap is visible). We floor to the largest multiple of `column_shift`
-///   satisfying that constraint, ensuring we never *undershoot*.
-/// - **Right scroll**: we need `viewport_offset ≥ col_right + gap −
-///   monitor_width` (so the gap is visible). We ceil to the smallest
-///   multiple of `column_shift` satisfying that constraint, ensuring we
-///   never *overshoot*.
+/// - **Left scroll**: `viewport_offset = col_left − gap` (column's left edge
+///   lands `gap` pixels from the screen's left edge), clamped to `≥ 0`.
+/// - **Right scroll**: `viewport_offset = col_right + gap − monitor_width`
+///   (column's right edge lands `gap` pixels from the screen's right edge),
+///   clamped to `≥ 0`.
 #[must_use]
 pub(crate) fn ensure_column_visible(
     layout: &VirtualLayout,
@@ -391,10 +421,9 @@ pub(crate) fn ensure_column_visible(
     config: &MutationConfig,
 ) -> VirtualLayout {
     let gap = config.padding.window_gap;
-    let column_shift = config.column_width as i32 + gap;
     let mut canvas_x: i32 = gap;
     for (i, col) in layout.columns.iter().enumerate() {
-        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
+        let col_px = col.width_px;
         if i == col_idx {
             let col_left = canvas_x;
             let col_right = canvas_x + col_px;
@@ -402,24 +431,22 @@ pub(crate) fn ensure_column_visible(
             let vp_right = vp_left + config.monitor_width;
 
             if col_left < vp_left {
-                // Column is off-screen left — scroll left.
-                // We want a `gap` between the screen's left edge and the
-                // column's left edge, then snap to the column-shift grid.
-                let ideal_vp = col_left - gap;
-                let quantized = floor_to_multiple(ideal_vp, column_shift).max(0);
+                // Column is off-screen left — scroll left by the minimum amount
+                // that reveals it with a `gap` margin on the left. Free-form
+                // offset (no column_shift grid snapping — see Ripple #1).
+                let ideal_vp = (col_left - gap).max(0);
                 return VirtualLayout {
-                    viewport_offset: quantized,
+                    viewport_offset: ideal_vp,
                     ..layout.clone()
                 };
             }
             if col_right > vp_right {
-                // Column is off-screen right — scroll right.
-                // We want a `gap` between the screen's right edge and the
-                // column's right edge, then snap to the column-shift grid.
-                let ideal_vp = col_right + gap - config.monitor_width;
-                let quantized = ceil_to_multiple(ideal_vp, column_shift).max(0);
+                // Column is off-screen right — scroll right by the minimum amount
+                // that reveals it with a `gap` margin on the right. Free-form
+                // offset (no column_shift grid snapping — see Ripple #1).
+                let ideal_vp = (col_right + gap - config.monitor_width).max(0);
                 return VirtualLayout {
-                    viewport_offset: quantized,
+                    viewport_offset: ideal_vp,
                     ..layout.clone()
                 };
             }
@@ -552,25 +579,15 @@ fn swap_columns(layout: &VirtualLayout, col_a: usize, col_b: usize) -> Option<Vi
 // Resize mutations (independent — no neighbor compensation)
 // ---------------------------------------------------------------------------
 
-/// Convert a pixel width to the nearest eighths value.
+/// Set the focused column width to an explicit pixel value (free-form).
 ///
-/// Uses rounding: `(px * 4 + column_width / 2) / column_width`.
-/// Result is clamped to `[1, 255]`.
-fn pixels_to_eighths(px: i32, column_width: u32) -> u8 {
-    let cw = column_width as i32;
-    ((px * 4 + cw / 2) / cw).clamp(1, 255) as u8
-}
-
-/// Set the focused column width to an explicit pixel value.
+/// This is the **drag-resize primitive** — the target is applied directly
+/// (not snapped to the expand/shrink slot ladder), bounded only by
+/// `[min_column_width_px, abs_max_width]`. After applying, the column is kept
+/// visible via [`ensure_column_visible`].
 ///
-/// This is the **core resize primitive** — all other resize functions
-/// delegate here. The target pixel width is snapped to the nearest
-/// eighth, validated against `[min_column_eighths, max_column_eighths]`,
-/// applied to the column, and followed by [`ensure_column_visible`]
-/// to guarantee the resized column is in view.
-///
-/// Returns `None` if the focused window is not found, the target snaps
-/// to the same width as current, or the target is out of bounds.
+/// Returns `None` if the focused window is not found, the target equals the
+/// current width, or the target is out of bounds.
 #[must_use]
 pub fn set_column_width(
     layout: &VirtualLayout,
@@ -580,29 +597,29 @@ pub fn set_column_width(
 ) -> Option<VirtualLayout> {
     let (col, _) = layout.find_window(focused)?;
 
-    let target_eighths = pixels_to_eighths(target_px, config.column_width);
-
-    // Validate bounds
-    if target_eighths < config.min_column_eighths || target_eighths > config.max_column_eighths {
+    // Free-form bounds: drag-resize may land anywhere in this range.
+    let min = config.min_column_width_px as i32;
+    let max = config.abs_max_width;
+    if target_px < min || target_px > max {
         return None;
     }
 
     // No change — nothing to do
-    if target_eighths == layout.columns[col].width_eighths {
+    if target_px == layout.columns[col].width_px {
         return None;
     }
 
     let mut new_layout = layout.clone();
-    new_layout.columns[col].width_eighths = target_eighths;
+    new_layout.columns[col].width_px = target_px;
 
     Some(ensure_column_visible(&new_layout, col, config))
 }
 
-/// Resize the focused column by a pixel delta.
+/// Resize the focused column by a pixel delta (free-form).
 ///
 /// Computes `target_px = current_px + delta_px` and delegates to
 /// [`set_column_width`]. Positive delta grows the column, negative
-/// shrinks it.
+/// shrinks it. The result is bounded (not ladder-snapped).
 ///
 /// Returns `None` if the resulting width is out of bounds.
 #[must_use]
@@ -613,21 +630,30 @@ pub fn resize_column(
     config: &MutationConfig,
 ) -> Option<VirtualLayout> {
     let (col, _) = layout.find_window(focused)?;
-    let current_px =
-        column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
+    let current_px = layout.columns[col].width_px;
     let target_px = current_px + delta_px;
     set_column_width(layout, focused, target_px, config)
 }
 
-/// Expand the focused column by one `column_shift`.
+/// Expand the focused column by one slot on the width ladder (F4).
 ///
-/// The step is `column_shift = column_width + window_gap`, matching the slot
-/// grid used by the camera/scroll model (see `column_step_width` in
-/// projection). The column's width is increased by this delta; the resulting
-/// pixel value is then quantized to eighths by [`set_column_width`], which
-/// rejects values outside `[min_column_eighths, max_column_eighths]`.
+/// The ladder is
+/// `{ column_width + n * column_shift : n ∈ [0, max_n] } ∪ { abs_max_width }`
+/// where `column_shift = column_width + window_gap`. **Crucially, the gap is
+/// part of the step** — this is the bug fix: under the old eighths model the
+/// gap was smaller than one eighth and was rounded away, so an expand step
+/// moved by exactly `column_width` instead of `column_width + window_gap`.
 ///
-/// Returns `None` if the expansion would exceed `max_column_eighths`.
+/// Behaviour from a column of width `W`:
+/// - `W ≥ abs_max_width` → `None` (no-op; already at the absolute top).
+/// - `W ≥ slot_max` → jump to `abs_max_width` (the two-step top; the leftover
+///   pixels between `slot_max` and `abs_max_width` are too small for a full
+///   `column_shift`).
+/// - otherwise → advance one rung: `target = column_width + (n+1) * column_shift`
+///   where `n = floor((W − column_width) / column_shift)`.
+///
+/// Returns `None` if the focused window is not found or the column is already
+/// at `abs_max_width`.
 #[must_use]
 pub fn expand_column(
     layout: &VirtualLayout,
@@ -635,29 +661,44 @@ pub fn expand_column(
     config: &MutationConfig,
 ) -> Option<VirtualLayout> {
     let (col, _) = layout.find_window(focused)?;
-    let current_px =
-        column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
-    let cw = config.column_width as i32;
-    let column_shift = cw + config.padding.window_gap;
+    let w = layout.columns[col].width_px;
+    let base = config.column_width as i32;
+    let shift = config.column_shift();
+    let abs_max = config.abs_max_width;
 
-    // Delta: grow by one column_shift (column_width + window_gap).
-    let target_px = current_px + column_shift;
+    // Already at (or beyond) the absolute top — no-op.
+    if w >= abs_max {
+        return None;
+    }
+    // Two-step top: from the top regular slot (or the free-form gap just below
+    // abs_max), jump straight to abs_max_width.
+    if w >= config.slot_max() {
+        return set_column_width(layout, focused, abs_max, config);
+    }
 
-    // set_column_width quantizes to eighths and validates against
-    // [min_column_eighths, max_column_eighths]. A raw target that
-    // transiently exceeds monitor_width may still quantize to a valid
-    // eighths value, so we delegate the bounds check entirely.
+    // Advance one rung. floor handles columns sitting between rungs (e.g. a
+    // free-form drag-resize width) by snapping up to the next boundary.
+    let n = (w - base).div_euclid(shift);
+    let target_n = (n + 1).min(config.max_n as i32);
+    let target_px = base + target_n * shift;
     set_column_width(layout, focused, target_px, config)
 }
 
-/// Shrink the focused column by one `column_shift`.
+/// Shrink the focused column by one slot on the width ladder (F4).
 ///
-/// The step is `column_shift = column_width + window_gap`, matching the slot
-/// grid. The column's width is decreased by this delta; the resulting pixel
-/// value is quantized to eighths by [`set_column_width`], which rejects
-/// values outside `[min_column_eighths, max_column_eighths]`.
+/// The mirror of [`expand_column`]. Behaviour from a column of width `W`:
+/// - `W ≤ column_width` → `None` (no-op; already at the ladder floor).
+/// - `W ≥ abs_max_width` → drop to `slot_max` (reverse of the two-step top).
+/// - otherwise → descend one rung: `target = column_width + (n−1) * column_shift`
+///   where `n = ceil((W − column_width) / column_shift)`. `ceil` snaps a
+///   between-rung width down to the next boundary.
 ///
-/// Returns `None` if the shrink would go below `min_column_eighths`.
+/// Note: shrink never goes below `column_width` (the ladder floor). Widths in
+/// `[min_column_width_px, column_width)` are reachable only via drag-resize
+/// ([`set_column_width`]).
+///
+/// Returns `None` if the focused window is not found or the column is already
+/// at `column_width`.
 #[must_use]
 pub fn shrink_column(
     layout: &VirtualLayout,
@@ -665,18 +706,25 @@ pub fn shrink_column(
     config: &MutationConfig,
 ) -> Option<VirtualLayout> {
     let (col, _) = layout.find_window(focused)?;
-    let current_px =
-        column_eighths_to_pixels(layout.columns[col].width_eighths, config.column_width);
-    let cw = config.column_width as i32;
-    let column_shift = cw + config.padding.window_gap;
+    let w = layout.columns[col].width_px;
+    let base = config.column_width as i32;
+    let shift = config.column_shift();
+    let abs_max = config.abs_max_width;
 
-    // Delta: shrink by one column_shift (column_width + window_gap).
-    let target_px = current_px - column_shift;
+    // At or below the ladder floor — no-op.
+    if w <= base {
+        return None;
+    }
+    // Reverse of the two-step top: monocle → top regular slot.
+    if w >= abs_max {
+        return set_column_width(layout, focused, config.slot_max(), config);
+    }
 
-    // set_column_width quantizes to eighths and validates against
-    // [min_column_eighths, max_column_eighths]. We delegate the bounds
-    // check entirely — the raw target can go negative or below min,
-    // but pixels_to_eighths clamps and set_column_width rejects it.
+    // Descend one rung. ceil snaps a between-rung width down to the boundary
+    // just below it.
+    let n = ((w - base) + shift - 1).div_euclid(shift);
+    let target_n = (n - 1).max(0);
+    let target_px = base + target_n * shift;
     set_column_width(layout, focused, target_px, config)
 }
 
@@ -684,29 +732,37 @@ pub fn shrink_column(
 // Monocle toggle
 // ---------------------------------------------------------------------------
 
-/// Toggle monocle mode — expand the focused window's column to full width.
+/// Toggle monocle mode — expand the focused window's column to `abs_max_width`.
 ///
-/// Returns the new layout and whether monocle is now active.
+/// Entering monocle sets the column to
+/// [`abs_max_width`](MutationConfig::abs_max_width) (`monitor_width − 2*gap`)
+/// and saves the previous width so it can be restored. Exiting monocle
+/// restores the saved width (falling back to the base `column_width`).
+///
+/// Returns the new layout and the new saved-width state:
+/// - On enter: `Some((layout, Some(previous_width)))`.
+/// - On exit: `Some((layout, None))`.
 #[must_use]
 pub fn toggle_monocle(
     layout: &VirtualLayout,
     focused: WindowId,
-    saved_width: Option<u8>,
-) -> Option<(VirtualLayout, Option<u8>)> {
+    saved_width: Option<i32>,
+    config: &MutationConfig,
+) -> Option<(VirtualLayout, Option<i32>)> {
     let (col, _) = layout.find_window(focused)?;
-    let current_width = layout.columns[col].width_eighths;
+    let current = layout.columns[col].width_px;
 
-    if current_width == 8 {
-        // Already monocle — restore previous width
-        let restored = saved_width.unwrap_or(4);
+    if current == config.abs_max_width {
+        // Already monocle — restore previous width (default: base column_width).
+        let restored = saved_width.unwrap_or(config.column_width as i32);
         let mut new_layout = layout.clone();
-        new_layout.columns[col].width_eighths = restored;
+        new_layout.columns[col].width_px = restored;
         Some((new_layout, None))
     } else {
-        // Enter monocle
+        // Enter monocle.
         let mut new_layout = layout.clone();
-        new_layout.columns[col].width_eighths = 8;
-        Some((new_layout, Some(current_width)))
+        new_layout.columns[col].width_px = config.abs_max_width;
+        Some((new_layout, Some(current)))
     }
 }
 
@@ -766,9 +822,9 @@ pub fn toggle_monocle(
 ///
 /// # Slot model
 ///
-/// All initialization columns have equal width (`default_column_width_eighths`),
-/// so `col_px = column_eighths_to_pixels(eighths, column_width)` and
-/// `slot = col_px + gap`. Column `i` occupies canvas range
+/// All initialization columns have the equal base width
+/// ([`column_width`](MutationConfig::column_width)), so
+/// `slot = column_width + gap`. Column `i` occupies canvas range
 /// `[i*slot + gap, (i+1)*slot]`.
 ///
 /// # Tie-breaking
@@ -804,7 +860,7 @@ pub fn compute_initial_viewport(
     );
 
     let gap = config.padding.window_gap;
-    let col_px = column_eighths_to_pixels(config.default_column_width_eighths, config.column_width);
+    let col_px = config.column_width as i32;
     let slot = col_px + gap;
     let monitor_width = config.monitor_width;
     let n = num_columns as i32;
@@ -928,8 +984,8 @@ pub fn compute_initial_viewport(
 ///
 /// # Returns
 ///
-/// A [`VirtualLayout`] with one column per window ID, each at the default
-/// width from `config.default_column_width_eighths`.
+/// A [`VirtualLayout`] with one column per window ID, each at the base
+/// [`column_width`](MutationConfig::column_width).
 ///
 /// # Example
 ///
@@ -940,9 +996,9 @@ pub fn compute_initial_viewport(
 /// let config = MutationConfig {
 ///     monitor_width: 1920,
 ///     column_width: 960,
-///     default_column_width_eighths: 4,
-///     min_column_eighths: 2,
-///     max_column_eighths: 8,
+///     min_column_width_px: 480,
+///     max_n: 0,
+///     abs_max_width: 1912,
 ///     padding: Padding { window_gap: 4, up: 0, down: 0 },
 ///     columns_per_screen: 4,
 /// };
@@ -961,7 +1017,7 @@ pub fn initialize_windows(
 ) -> VirtualLayout {
     let columns: Vec<Column> = ids
         .iter()
-        .map(|&id| Column::new(config.default_column_width_eighths, id))
+        .map(|&id| Column::new(config.column_width as i32, id))
         .collect();
 
     let viewport_offset = match focus_col_idx {
@@ -985,7 +1041,7 @@ pub fn add_window(
     let mut new_layout = layout.clone();
     new_layout
         .columns
-        .push(Column::new(config.default_column_width_eighths, window));
+        .push(Column::new(config.column_width as i32, window));
     new_layout
 }
 
@@ -1033,7 +1089,7 @@ pub fn insert_window_after_focused(
     config: &MutationConfig,
 ) -> VirtualLayout {
     let mut new_layout = layout.clone();
-    let new_column = Column::new(config.default_column_width_eighths, window);
+    let new_column = Column::new(config.column_width as i32, window);
 
     // Determine the insertion index: immediately after the focused column.
     // Falls back to the end when there is no focus or the focused window is
@@ -1102,37 +1158,23 @@ fn first_visible_step(layout: &VirtualLayout, config: &MutationConfig) -> Option
     let mut canvas_x: i32 = gap;
     let vp_right = layout.viewport_offset + config.monitor_width;
     for col in &layout.columns {
-        let col_px = column_eighths_to_pixels(col.width_eighths, config.column_width);
+        let col_px = col.width_px;
         let col_left = canvas_x;
         let col_right = canvas_x + col_px;
         if col_right > layout.viewport_offset && col_left < vp_right {
-            return Some(column_step_width(col, config.column_width, gap));
+            return Some(column_step_width(col, gap));
         }
         canvas_x += col_px + gap;
     }
     None
 }
 
-/// Total pixel span of all columns using the slot model.
+/// Total pixel span of all columns (the virtual canvas width).
 ///
-/// Canvas width = `window_gap` (leading) + `sum(col_width_i + window_gap)`.
-fn slot_based_canvas_width(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
-    if layout.columns.is_empty() {
-        return 0;
-    }
-    let gap = config.padding.window_gap;
-    let total_slots: i32 = layout
-        .columns
-        .iter()
-        .map(|c| column_eighths_to_pixels(c.width_eighths, config.column_width) + gap)
-        .sum();
-    gap + total_slots
-}
-
-/// Legacy alias for canvas width calculation used by `remove_window`.
-/// Uses the slot-based canvas model.
+/// Delegates to [`projection::canvas_width`] so the canvas model lives in
+/// exactly one place: `window_gap` (leading) + `sum(width_px + window_gap)`.
 fn total_column_span(layout: &VirtualLayout, config: &MutationConfig) -> i32 {
-    slot_based_canvas_width(layout, config)
+    canvas_width(layout, config.padding.window_gap)
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,15 +1187,18 @@ mod tests {
     use crate::common::WindowId;
     use crate::layout::types::Padding;
 
+    /// Standard test config: 1920×1080 monitor, 960px columns, 4px gap.
+    ///
+    /// Derived: abs_max=1912, shift=964, max_n=0, slot_max=960.
+    /// With max_n=0 the ladder has only the base rung (960) and the
+    /// abs_max top (1912) — expanding from base jumps straight to abs_max.
     fn test_config() -> MutationConfig {
         MutationConfig {
             monitor_width: 1920,
             column_width: 960,
-            default_column_width_eighths: 4,
-            // ceil((320 * 4) / 960) = 2 eighths
-            min_column_eighths: 2,
-            // (1920 * 4) / 960 = 8 eighths
-            max_column_eighths: 8,
+            min_column_width_px: 480,
+            max_n: 0,
+            abs_max_width: 1912,
             padding: Padding {
                 window_gap: 4,
                 up: 0,
@@ -1166,9 +1211,9 @@ mod tests {
     fn three_column_layout() -> VirtualLayout {
         VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             0,
         )
@@ -1200,7 +1245,7 @@ mod tests {
     #[test]
     fn next_available_only_window_returns_none() {
         // Single column [W1]; removing W1 (col 0) → no neighbours → None.
-        let layout = VirtualLayout::with_columns(vec![Column::new(4, WindowId(1))], 0);
+        let layout = VirtualLayout::with_columns(vec![Column::new(960, WindowId(1))], 0);
         assert_eq!(next_available_window(&layout, 0, 0), None);
     }
 
@@ -1211,8 +1256,8 @@ mod tests {
         // the closest row clamps to 0 → W1.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3)]),
+                Column::new(960, WindowId(1)),
+                Column::with_equal_rows(960, vec![WindowId(2), WindowId(3)]),
             ],
             0,
         );
@@ -1225,8 +1270,8 @@ mod tests {
         // Removing (col 1, row 2): left col 0, closest row clamps 2 → 1 → W4.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(4, vec![WindowId(1), WindowId(4)]),
-                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(5)]),
+                Column::with_equal_rows(960, vec![WindowId(1), WindowId(4)]),
+                Column::with_equal_rows(960, vec![WindowId(2), WindowId(3), WindowId(5)]),
             ],
             0,
         );
@@ -1241,7 +1286,7 @@ mod tests {
         // only" design decision documented in next_available_window's docstring.
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(
-                4,
+                960,
                 vec![WindowId(1), WindowId(2), WindowId(3)],
             )],
             0,
@@ -1280,73 +1325,43 @@ mod tests {
         assert_eq!(back.viewport_offset, 0);
     }
 
-    // --- ensure_column_visible: quantized shifts ---
+    // --- ensure_column_visible: free-form offsets (Ripple #1) ---
 
     #[test]
-    fn floor_to_multiple_basic() {
-        assert_eq!(floor_to_multiple(0, 964), 0);
-        assert_eq!(floor_to_multiple(1, 964), 0);
-        assert_eq!(floor_to_multiple(963, 964), 0);
-        assert_eq!(floor_to_multiple(964, 964), 964);
-        assert_eq!(floor_to_multiple(1927, 964), 964);
-        assert_eq!(floor_to_multiple(1928, 964), 1928);
-    }
-
-    #[test]
-    fn ceil_to_multiple_basic() {
-        assert_eq!(ceil_to_multiple(0, 964), 0);
-        assert_eq!(ceil_to_multiple(1, 964), 964);
-        assert_eq!(ceil_to_multiple(963, 964), 964);
-        assert_eq!(ceil_to_multiple(964, 964), 964);
-        assert_eq!(ceil_to_multiple(965, 964), 1928);
-    }
-
-    #[test]
-    fn ensure_column_visible_left_scroll_quantizes() {
+    fn ensure_column_visible_left_scroll() {
         // 3 uniform columns (960px each, gap=4).
         // column_shift = 960 + 4 = 964.
         // Column 0: left=4. Viewport far to the right.
         let config = test_config();
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             2000, // viewport well past column 0
         );
         let result = ensure_column_visible(&layout, 0, &config);
-        // ideal_vp = col_left - gap = 4 - 4 = 0; floor_to_multiple(0, 964) = 0
+        // Free-form (Ripple #1): ideal_vp = col_left - gap = 4 - 4 = 0.
         assert_eq!(result.viewport_offset, 0);
-        assert_eq!(
-            result.viewport_offset % (config.column_width as i32 + config.padding.window_gap),
-            0,
-            "viewport_offset must be a multiple of column_shift"
-        );
     }
 
     #[test]
-    fn ensure_column_visible_right_scroll_quantizes() {
+    fn ensure_column_visible_right_scroll() {
         // 3 uniform columns (960px each, gap=4, monitor=1920).
-        // column_shift = 964.
         // Column 2: left=1932, right=2892. Viewport at 0 → off-screen right.
         let config = test_config();
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
         let result = ensure_column_visible(&layout, 2, &config);
-        // ideal_vp = 2892 + 4 - 1920 = 976; ceil_to_multiple(976, 964) = 1928
-        assert_eq!(result.viewport_offset, 1928);
-        assert_eq!(
-            result.viewport_offset % (config.column_width as i32 + config.padding.window_gap),
-            0,
-            "viewport_offset must be a multiple of column_shift"
-        );
+        // Free-form (Ripple #1): ideal_vp = 2892 + 4 - 1920 = 976.
+        assert_eq!(result.viewport_offset, 976);
     }
 
     #[test]
@@ -1357,9 +1372,9 @@ mod tests {
         let gap = config.padding.window_gap;
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             2000,
         );
@@ -1381,9 +1396,9 @@ mod tests {
         let gap = config.padding.window_gap;
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
@@ -1408,9 +1423,9 @@ mod tests {
         let config = MutationConfig {
             monitor_width: 1920,
             column_width: 960,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 8,
+            min_column_width_px: 480,
+            max_n: 1,
+            abs_max_width: 1920,
             padding: Padding {
                 window_gap: 0,
                 up: 0,
@@ -1419,7 +1434,7 @@ mod tests {
             columns_per_screen: 4,
         };
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
         let result = ensure_column_visible(&layout, 1, &config);
@@ -1430,15 +1445,15 @@ mod tests {
     }
 
     #[test]
-    fn ensure_column_visible_zero_gap_preserves_alignment() {
-        // With gap=0, column_shift = column_width. Quantization should
-        // produce exact column-aligned offsets with no fractional remainder.
+    fn ensure_column_visible_zero_gap_exact_alignment() {
+        // With gap=0, column_shift = column_width. Two 960px columns fit exactly
+        // in 1920px viewport. Scrolling to show column 2 of 3.
         let config = MutationConfig {
             monitor_width: 1920,
             column_width: 960,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 8,
+            min_column_width_px: 480,
+            max_n: 1,
+            abs_max_width: 1920,
             padding: Padding {
                 window_gap: 0,
                 up: 0,
@@ -1448,38 +1463,36 @@ mod tests {
         };
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
-        // Scroll right to column 2.
         // col_right = 0 + 2*960 + 960 = 2880. ideal_vp = 2880 + 0 - 1920 = 960.
-        // ceil_to_multiple(960, 960) = 960.
         let result = ensure_column_visible(&layout, 2, &config);
         assert_eq!(result.viewport_offset, 960);
     }
 
     #[test]
-    fn ensure_column_visible_non_uniform_widths_quantizes() {
-        // Mixed column widths: col 0 = 2 eighths (480px), col 1 = 4 eighths (960px).
-        // column_shift = 960 + 4 = 964 (based on base column_width, not actual).
+    fn ensure_column_visible_non_uniform_widths() {
+        // Mixed column widths: col 0 = 480px, col 1 = 960px.
         // Col 0: canvas_x = 4, right = 4 + 480 = 484
         // Col 1: canvas_x = 4 + 480 + 4 = 488, right = 488 + 960 = 1448
         // Viewport at 2000 → both columns off-screen left.
         let config = test_config();
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(480, WindowId(1)), Column::new(960, WindowId(2))],
             2000,
         );
         let result = ensure_column_visible(&layout, 1, &config);
-        // ideal_vp = col_left - gap = 488 - 4 = 484
-        // floor_to_multiple(484, 964) = 0
-        assert_eq!(result.viewport_offset, 0);
-        // Column 1 is now visible: canvas [488, 1448] ⊂ viewport [0, 1920]
-        let column_shift = config.column_width as i32 + config.padding.window_gap;
-        assert_eq!(result.viewport_offset % column_shift, 0);
+        // Free-form (Ripple #1): ideal_vp = col_left - gap = 488 - 4 = 484.
+        assert_eq!(result.viewport_offset, 484);
+        // Column 1 is now visible: canvas [488, 1448] ⊂ viewport [484, 2404]
+        let col_left = config.padding.window_gap + 480 + config.padding.window_gap;
+        let col_right = col_left + 960;
+        assert!(col_right <= result.viewport_offset + config.monitor_width);
+        assert!(col_left >= result.viewport_offset);
     }
 
     // --- Focus ---
@@ -1502,7 +1515,7 @@ mod tests {
     fn focus_vertical_in_multirow_column() {
         let layout = VirtualLayout::with_columns(
             vec![Column::with_equal_rows(
-                8,
+                1920,
                 vec![WindowId(1), WindowId(2), WindowId(3)],
             )],
             0,
@@ -1516,13 +1529,13 @@ mod tests {
 
     #[test]
     fn focus_right_scrolls_if_column_offscreen() {
-        // 4 columns × 4 eighths each, viewport = 1920, only 2 visible at a time
+        // 4 columns × 960px each, viewport = 1920, only 2 visible at a time
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
-                Column::new(4, WindowId(4)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
+                Column::new(960, WindowId(4)),
             ],
             0,
         );
@@ -1543,8 +1556,8 @@ mod tests {
         // Focus right from W1 → picks closest row in col 1 (row 0) = W2
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(4)]),
+                Column::new(960, WindowId(1)),
+                Column::with_equal_rows(960, vec![WindowId(2), WindowId(3), WindowId(4)]),
             ],
             0,
         );
@@ -1569,7 +1582,10 @@ mod tests {
     fn swap_column_down_returns_none() {
         // Vertical directions are invalid for column-level swap
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(swap_column(&layout, WindowId(1), Direction::Down, &test_config()).is_none());
@@ -1579,7 +1595,10 @@ mod tests {
     fn swap_column_up_returns_none() {
         // Vertical directions are invalid for column-level swap
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(swap_column(&layout, WindowId(2), Direction::Up, &test_config()).is_none());
@@ -1596,9 +1615,9 @@ mod tests {
         let config = test_config(); // monitor_width=1920, column_width=960 → each col = 960px
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             960, // viewport past column 0
         );
@@ -1616,9 +1635,9 @@ mod tests {
         let config = MutationConfig {
             monitor_width: 1920,
             column_width: 960,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 8,
+            min_column_width_px: 480,
+            max_n: 1,            // (1920-960)/960 = 1
+            abs_max_width: 1920, // 1920 - 2*0
             padding: Padding {
                 window_gap: 0,
                 up: 0,
@@ -1627,7 +1646,7 @@ mod tests {
             columns_per_screen: 4,
         };
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
         let result = swap_column(&layout, WindowId(1), Direction::Right, &config).expect("swap");
@@ -1644,8 +1663,8 @@ mod tests {
         // [W1] [W2, W3] → swap_window right on W1 → [W2] [W1, W3]
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3)]),
+                Column::new(960, WindowId(1)),
+                Column::with_equal_rows(960, vec![WindowId(2), WindowId(3)]),
             ],
             0,
         );
@@ -1661,8 +1680,8 @@ mod tests {
         // W3 is at row 0 in col 1. Closest row in col 0 is row 0 = W1.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2)]),
-                Column::new(4, WindowId(3)),
+                Column::with_equal_rows(960, vec![WindowId(1), WindowId(2)]),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
@@ -1676,7 +1695,10 @@ mod tests {
     fn swap_window_down_same_column() {
         // [W1, W2] in same column → swap_window down on W1 → [W2, W1]
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         let result =
@@ -1692,8 +1714,8 @@ mod tests {
         // swap_window right on W2 → W2 goes to col 1 row 0, W3 goes to col 0 row 1.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2)]),
-                Column::new(4, WindowId(3)),
+                Column::with_equal_rows(960, vec![WindowId(1), WindowId(2)]),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
@@ -1718,7 +1740,10 @@ mod tests {
     #[test]
     fn swap_window_down_at_last_row_returns_none() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(swap_window(&layout, WindowId(2), Direction::Down, &test_config()).is_none());
@@ -1728,7 +1753,10 @@ mod tests {
     fn swap_window_up_same_column() {
         // [W1, W2] → swap_window up on W2 → [W2, W1]
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         let result =
@@ -1740,7 +1768,10 @@ mod tests {
     fn swap_window_up_at_first_row_returns_none() {
         // Negative: W1 at row 0, swap_window up → None
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(swap_window(&layout, WindowId(1), Direction::Up, &test_config()).is_none());
@@ -1751,9 +1782,9 @@ mod tests {
         let config = test_config();
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             960, // viewport past column 0
         );
@@ -1770,9 +1801,9 @@ mod tests {
         let config = MutationConfig {
             monitor_width: 1920,
             column_width: 960,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 8,
+            min_column_width_px: 480,
+            max_n: 1,            // (1920-960)/960 = 1
+            abs_max_width: 1920, // 1920 - 2*0
             padding: Padding {
                 window_gap: 0,
                 up: 0,
@@ -1781,7 +1812,7 @@ mod tests {
             columns_per_screen: 4,
         };
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
         let result = swap_window(&layout, WindowId(1), Direction::Right, &config).expect("swap");
@@ -1815,7 +1846,10 @@ mod tests {
     #[test]
     fn find_neighbor_up_returns_prev_row_same_column() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         let neighbor = find_neighbor_window(&layout, WindowId(2), Direction::Up).expect("up");
@@ -1825,7 +1859,10 @@ mod tests {
     #[test]
     fn find_neighbor_down_returns_next_row_same_column() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         let neighbor = find_neighbor_window(&layout, WindowId(1), Direction::Down).expect("down");
@@ -1838,8 +1875,8 @@ mod tests {
         // W3 is at row 2 in col 0. Right neighbor in col 1 → clamped to row 0.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2), WindowId(3)]),
-                Column::new(4, WindowId(4)),
+                Column::with_equal_rows(960, vec![WindowId(1), WindowId(2), WindowId(3)]),
+                Column::new(960, WindowId(4)),
             ],
             0,
         );
@@ -1862,7 +1899,10 @@ mod tests {
     #[test]
     fn find_neighbor_up_at_first_row_returns_none() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(find_neighbor_window(&layout, WindowId(1), Direction::Up).is_none());
@@ -1871,7 +1911,10 @@ mod tests {
     #[test]
     fn find_neighbor_down_at_last_row_returns_none() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(find_neighbor_window(&layout, WindowId(2), Direction::Down).is_none());
@@ -1889,8 +1932,8 @@ mod tests {
         // W1 at row 0 in col 0. Right neighbor in col 1 → closest_row(3, 0) = 0 → W2.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::with_equal_rows(4, vec![WindowId(2), WindowId(3), WindowId(4)]),
+                Column::new(960, WindowId(1)),
+                Column::with_equal_rows(960, vec![WindowId(2), WindowId(3), WindowId(4)]),
             ],
             0,
         );
@@ -1904,8 +1947,8 @@ mod tests {
         // Both columns have 3 rows. W5 at row 1 in col 0 → right neighbor = row 1 in col 1 = W8.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(4, vec![WindowId(1), WindowId(5), WindowId(9)]),
-                Column::with_equal_rows(4, vec![WindowId(2), WindowId(8), WindowId(6)]),
+                Column::with_equal_rows(960, vec![WindowId(1), WindowId(5), WindowId(9)]),
+                Column::with_equal_rows(960, vec![WindowId(2), WindowId(8), WindowId(6)]),
             ],
             0,
         );
@@ -1918,11 +1961,11 @@ mod tests {
 
     #[test]
     fn set_column_width_sets_target_in_px() {
-        // Positive: 1440px → pixels_to_eighths(1440, 960) = 6 → width set to 6 eighths
+        // Positive: 1440px → free-form width set directly (no eighths quantization)
         let layout = three_column_layout();
         let result =
             set_column_width(&layout, WindowId(1), 1440, &test_config()).expect("set width");
-        assert_eq!(result.columns[0].width_eighths, 6);
+        assert_eq!(result.columns[0].width_px, 1440);
     }
 
     #[test]
@@ -1931,32 +1974,32 @@ mod tests {
         let layout = three_column_layout();
         let result =
             set_column_width(&layout, WindowId(1), 1440, &test_config()).expect("set width");
-        assert_eq!(result.columns[0].width_eighths, 6);
+        assert_eq!(result.columns[0].width_px, 1440);
         // Other columns remain at 4 (no compensation)
-        assert_eq!(result.columns[1].width_eighths, 4);
-        assert_eq!(result.columns[2].width_eighths, 4);
+        assert_eq!(result.columns[1].width_px, 960);
+        assert_eq!(result.columns[2].width_px, 960);
     }
 
     #[test]
     fn set_column_width_returns_none_if_below_min() {
-        // Negative: target px snaps to eighths below min_column_eighths
-        // 320px → 1.33 → rounds to 1 eighth, but min is 2 → None
+        // Negative: target px below min_column_width_px (480)
+        // 320px < 480 → None
         let layout = three_column_layout();
         assert!(set_column_width(&layout, WindowId(1), 320, &test_config()).is_none());
     }
 
     #[test]
     fn set_column_width_returns_none_if_above_max() {
-        // Negative: target px exceeds monitor width
-        // 2400px → 10 eighths, max is 8 → None
+        // Negative: target px exceeds abs_max_width (1912)
+        // 2400px > 1912 → None
         let layout = three_column_layout();
         assert!(set_column_width(&layout, WindowId(1), 2400, &test_config()).is_none());
     }
 
     #[test]
     fn set_column_width_returns_none_if_same_as_current() {
-        // Negative: target matches current → no-op → None
-        // 960px → 4 eighths, current is 4 → None
+        // Negative: target matches current px → no-op → None
+        // 960px = current → None
         let layout = three_column_layout();
         assert!(set_column_width(&layout, WindowId(1), 960, &test_config()).is_none());
     }
@@ -1968,15 +2011,15 @@ mod tests {
         // 3 columns × 960px = 2880px total canvas. viewport at 3000 → all off-screen right.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             3000,
         );
-        // Resize column 2 (W3) from 960px to 1920px → ensure_column_visible shifts viewport
-        let result = set_column_width(&layout, WindowId(3), 1920, &config).expect("set width");
-        assert_eq!(result.columns[2].width_eighths, 8);
+        // Resize column 2 (W3) from 960px to 1500px → within bounds [480, 1912]
+        let result = set_column_width(&layout, WindowId(3), 1500, &config).expect("set width");
+        assert_eq!(result.columns[2].width_px, 1500);
         // ensure_column_visible should have shifted the viewport left
         assert!(
             result.viewport_offset < 3000,
@@ -1988,54 +2031,58 @@ mod tests {
 
     #[test]
     fn resize_column_positive_delta_grows() {
-        // Positive: +480px delta on 960px column → 1440px → 6 eighths
+        // Positive: +480px delta on 960px column → 1440px (free-form)
         let layout = three_column_layout();
         let result = resize_column(&layout, WindowId(1), 480, &test_config()).expect("resize +480");
-        assert_eq!(result.columns[0].width_eighths, 6);
+        assert_eq!(result.columns[0].width_px, 1440);
     }
 
     #[test]
     fn resize_column_negative_delta_shrinks() {
-        // Positive: -480px delta on 960px column → 480px → 2 eighths
+        // Positive: -480px delta on 960px column → 480px (free-form, clamped to min)
         let layout = three_column_layout();
         let result =
             resize_column(&layout, WindowId(1), -480, &test_config()).expect("resize -480");
-        assert_eq!(result.columns[0].width_eighths, 2);
+        assert_eq!(result.columns[0].width_px, 480);
     }
 
     #[test]
-    fn resize_column_delta_too_small_returns_none() {
-        // Negative: +100px on 960px → 1060px → rounds to 4 eighths (same) → None
+    fn resize_column_delta_out_of_bounds_returns_none() {
+        // Negative: +2000px delta on 960px column → 2960px > abs_max(1912) → None
         let layout = three_column_layout();
-        assert!(resize_column(&layout, WindowId(1), 100, &test_config()).is_none());
+        assert!(resize_column(&layout, WindowId(1), 2000, &test_config()).is_none());
     }
 
     // --- Resize: expand_column ---
 
     #[test]
     fn expand_column_from_default_width() {
-        // Delta: 960px (4 eighths) + column_shift(964) = 1924px → 8 eighths
-        let layout = three_column_layout(); // columns at 4 eighths = 960px
+        // expand: 960px (base) + column_shift(964) = 1924 → clamped to abs_max 1912px
+        let layout = three_column_layout(); // columns at base width 960px
         let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
-        assert_eq!(result.columns[0].width_eighths, 8);
+        assert_eq!(result.columns[0].width_px, 1912);
     }
 
     #[test]
     fn expand_column_from_sub_boundary() {
-        // Delta: 480px (2 eighths) + column_shift(964) = 1444px → 6 eighths
+        // Start at half base width (480px). With max_n=0, the only rung above
+        // base is abs_max. Expanding snaps up to base (960px).
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(480, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
         let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
-        assert_eq!(result.columns[0].width_eighths, 6);
+        assert_eq!(result.columns[0].width_px, 960);
     }
 
     #[test]
     fn expand_column_at_max_returns_none() {
-        // Delta: 1920px (8 eighths) + column_shift(964) = 2884px → 12 eighths > max(8) → None
+        // Column at abs_max (1912px) → expanding returns None.
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(1912, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
         assert!(expand_column(&layout, WindowId(1), &test_config()).is_none());
@@ -2046,46 +2093,54 @@ mod tests {
         // Positive: independent resize — neighbors unchanged
         let layout = three_column_layout();
         let result = expand_column(&layout, WindowId(1), &test_config()).expect("expand");
-        assert_eq!(result.columns[0].width_eighths, 8);
-        assert_eq!(result.columns[1].width_eighths, 4);
-        assert_eq!(result.columns[2].width_eighths, 4);
+        assert_eq!(result.columns[0].width_px, 1912);
+        assert_eq!(result.columns[1].width_px, 960);
+        assert_eq!(result.columns[2].width_px, 960);
     }
 
     // --- Resize: shrink_column ---
 
     #[test]
     fn shrink_column_from_max_width() {
-        // Delta: 1920px (8 eighths) - column_shift(964) = 956px → 4 eighths
+        // Column at abs_max (1912px) → shrink returns to slot_max (base 960px).
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(1912, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
         let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
-        assert_eq!(result.columns[0].width_eighths, 4);
+        assert_eq!(result.columns[0].width_px, 960);
     }
 
     #[test]
     fn shrink_column_from_mid_boundary() {
-        // Delta: 1200px (5 eighths) - column_shift(964) = 236px → 1 eighth < min(2) → None
+        // Column at 1200px (between rungs). With max_n=0, the only rung below
+        // base is not applicable; ceil snaps down to base (960px).
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(5, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(1200, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
-        assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
+        let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
+        assert_eq!(result.columns[0].width_px, 960);
     }
 
     #[test]
     fn shrink_column_at_boundary_returns_none() {
-        // Delta: 960px (4 eighths) - column_shift(964) = -4px → 1 eighth < min(2) → None
+        // 960px (base) - column_shift(964) = -4px → below base → None
         let layout = three_column_layout();
         assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
     }
 
     #[test]
-    fn shrink_column_at_min_eighths_returns_none() {
-        // Delta: 480px (2 eighths = min) - column_shift(964) = -484px → 1 eighth < min(2) → None
+    fn shrink_column_at_base_width_returns_none() {
+        // Column at 480px (below base 960). Shrink: w <= base → None.
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(480, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
         assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
@@ -2095,12 +2150,15 @@ mod tests {
     fn shrink_column_only_affects_target() {
         // Positive: independent resize — neighbors unchanged
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(1912, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
         let result = shrink_column(&layout, WindowId(1), &test_config()).expect("shrink");
-        assert_eq!(result.columns[0].width_eighths, 4);
-        assert_eq!(result.columns[1].width_eighths, 4);
+        assert_eq!(result.columns[0].width_px, 960);
+        assert_eq!(result.columns[1].width_px, 960);
     }
 
     // --- Monocle ---
@@ -2108,13 +2166,15 @@ mod tests {
     #[test]
     fn toggle_monocle_expands_to_full() {
         let layout = three_column_layout();
-        let (result, saved) = toggle_monocle(&layout, WindowId(1), None).expect("monocle on");
-        assert_eq!(result.columns[0].width_eighths, 8);
-        assert_eq!(saved, Some(4)); // saved original width
+        let (result, saved) =
+            toggle_monocle(&layout, WindowId(1), None, &test_config()).expect("monocle on");
+        assert_eq!(result.columns[0].width_px, 1912);
+        assert_eq!(saved, Some(960)); // saved original width
 
         // Toggle back
-        let (restored, saved2) = toggle_monocle(&result, WindowId(1), saved).expect("monocle off");
-        assert_eq!(restored.columns[0].width_eighths, 4);
+        let (restored, saved2) =
+            toggle_monocle(&result, WindowId(1), saved, &test_config()).expect("monocle off");
+        assert_eq!(restored.columns[0].width_px, 960);
         assert_eq!(saved2, None);
     }
 
@@ -2126,7 +2186,7 @@ mod tests {
         let result = add_window(&layout, WindowId(10), &test_config());
         assert_eq!(result.columns.len(), 4);
         assert_eq!(result.columns[3].rows[0], WindowId(10));
-        assert_eq!(result.columns[3].width_eighths, 4);
+        assert_eq!(result.columns[3].width_px, 960);
     }
 
     // --- insert_window_after_focused ---
@@ -2197,10 +2257,10 @@ mod tests {
         // Insert after col 1 → new col at index 2, which is off-screen right.
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
-                Column::new(4, WindowId(4)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
+                Column::new(960, WindowId(4)),
             ],
             0,
         );
@@ -2219,7 +2279,10 @@ mod tests {
     #[test]
     fn remove_window_from_column() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         let result = remove_window(&layout, WindowId(1), &test_config());
@@ -2248,7 +2311,7 @@ mod tests {
     #[test]
     fn add_window_to_column_appends_row() {
         // Positive: adding window to existing column creates multi-row
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
+        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
         let result = add_window_to_column(&layout, 0, WindowId(2));
         assert_eq!(result.columns[0].rows, vec![WindowId(1), WindowId(2)]);
     }
@@ -2256,7 +2319,7 @@ mod tests {
     #[test]
     fn add_window_to_invalid_column_is_noop() {
         // Negative: adding to non-existent column index
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
+        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
         let result = add_window_to_column(&layout, 5, WindowId(2));
         assert_eq!(result.columns.len(), 1);
         assert_eq!(result.columns[0].rows.len(), 1);
@@ -2265,9 +2328,9 @@ mod tests {
     #[test]
     fn scroll_right_at_max_offset_returns_none() {
         // Negative: can't scroll beyond rightmost column
-        // Slot model: single 8/8 column = 1920px. Canvas = 4 + (1920+4) = 1928
-        // max_offset = 1928 - 1920 = 8. But viewport_offset=0 + step=1924 > 8 → None
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
+        // Single column at abs_max (1912px). Canvas = 4 + (1912+4) = 1920.
+        // max_offset = 1920 - 1920 = 0. step = 1916. 0 + 1916 > 0 → None.
+        let layout = VirtualLayout::with_columns(vec![Column::new(1912, WindowId(1))], 0);
         let config = test_config();
         // Single column fills viewport — no scroll possible (step would exceed max)
         assert!(scroll_right(&layout, &config).is_none());
@@ -2284,7 +2347,10 @@ mod tests {
     fn focus_up_at_first_row_returns_none() {
         // Negative: focus up at top row → None
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(focus(&layout, WindowId(1), Direction::Up, &test_config()).is_none());
@@ -2299,21 +2365,22 @@ mod tests {
 
     #[test]
     fn shrink_at_minimum_width_returns_none() {
-        // Negative: can't shrink column below min_column_eighths
+        // Negative: can't shrink column below base width (ladder floor)
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(480, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
-        // 2 eighths = 480px → prev boundary = 0 → below min → None
+        // 480px <= base(960) → None
         assert!(shrink_column(&layout, WindowId(1), &test_config()).is_none());
     }
 
     #[test]
     fn toggle_monocle_without_saved_width_uses_default() {
-        // Positive: monocle off without saved width → defaults to 4
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
-        let (result, saved) = toggle_monocle(&layout, WindowId(1), None).expect("toggle");
-        assert_eq!(result.columns[0].width_eighths, 4); // restored to default 4
+        // Positive: monocle off without saved width → defaults to column_width (960)
+        let layout = VirtualLayout::with_columns(vec![Column::new(1912, WindowId(1))], 0);
+        let (result, saved) =
+            toggle_monocle(&layout, WindowId(1), None, &test_config()).expect("toggle");
+        assert_eq!(result.columns[0].width_px, 960); // restored to column_width
         assert_eq!(saved, None);
     }
 
@@ -2324,7 +2391,7 @@ mod tests {
         let result = add_window(&layout, WindowId(1), &test_config());
         assert_eq!(result.columns.len(), 1);
         assert_eq!(result.columns[0].rows[0], WindowId(1));
-        assert_eq!(result.columns[0].width_eighths, 4); // default
+        assert_eq!(result.columns[0].width_px, 960); // default
     }
 
     #[test]
@@ -2340,9 +2407,9 @@ mod tests {
 
     #[test]
     fn set_column_width_no_change_returns_none() {
-        // Negative: setting width to current px value → same eighths → None
+        // Negative: setting width to current px value → same → None
         let layout = three_column_layout();
-        // 4 eighths * 960 / 4 = 960px; setting 960px → 4 eighths = current → None
+        // 960px = current → None
         assert!(set_column_width(&layout, WindowId(1), 960, &test_config()).is_none());
     }
 
@@ -2350,7 +2417,10 @@ mod tests {
     fn swap_column_left_single_column_returns_none() {
         // Negative: single column, no left neighbour to swap with
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
         assert!(swap_column(&layout, WindowId(1), Direction::Left, &test_config()).is_none());
@@ -2379,7 +2449,7 @@ mod tests {
         let layout = initialize_windows(&[WindowId(1)], &test_config(), None);
         assert_eq!(layout.columns.len(), 1);
         assert_eq!(layout.columns[0].rows, vec![WindowId(1)]);
-        assert_eq!(layout.columns[0].width_eighths, 4); // default
+        assert_eq!(layout.columns[0].width_px, 960); // default
         assert_eq!(layout.viewport_offset, 0);
     }
 
@@ -2396,9 +2466,9 @@ mod tests {
         assert_eq!(layout.columns[1].rows, vec![WindowId(20)]);
         assert_eq!(layout.columns[2].rows, vec![WindowId(30)]);
         // All columns get default width
-        assert_eq!(layout.columns[0].width_eighths, 4);
-        assert_eq!(layout.columns[1].width_eighths, 4);
-        assert_eq!(layout.columns[2].width_eighths, 4);
+        assert_eq!(layout.columns[0].width_px, 960);
+        assert_eq!(layout.columns[1].width_px, 960);
+        assert_eq!(layout.columns[2].width_px, 960);
         assert_eq!(layout.viewport_offset, 0);
     }
 
@@ -2469,12 +2539,19 @@ mod tests {
         gap: i32,
         columns_per_screen: u32,
     ) -> MutationConfig {
+        let shift = column_width as i32 + gap;
+        let abs_max = monitor_width - 2 * gap;
+        let max_n = if shift > 0 && abs_max > column_width as i32 {
+            ((abs_max - column_width as i32) / shift) as u32
+        } else {
+            0
+        };
         MutationConfig {
             monitor_width,
             column_width,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 8,
+            min_column_width_px: column_width / 2,
+            max_n,
+            abs_max_width: abs_max,
             padding: Padding {
                 window_gap: gap,
                 up: 0,
@@ -2847,337 +2924,308 @@ mod tests {
     // -------------------------------------------------------------------
     // Bug 2 regression: expand/shrink column step must include window_gap.
     // column_shift = column_width + window_gap, NOT just column_width.
+    //
+    // The old eighths-based code lost the gap during re-quantization:
+    // pixels_to_eighths snapped to the column_width grid, discarding
+    // the gap term. The new px-based code preserves it exactly.
+    //
+    // Uses a realistic config (960/16 ratio) with max_n=1 so the
+    // two-step ladder (base → slot_max → abs_max) is exercised.
     // -------------------------------------------------------------------
 
-    /// Helper: build a MutationConfig with a specific window_gap for testing
-    /// that the gap is included in the expand/shrink step.
-    fn gap_config(gap: i32) -> MutationConfig {
+    /// Helper: build a realistic MutationConfig with a meaningful window_gap.
+    ///
+    /// - monitor=2560, column_width=960, gap=16
+    /// - abs_max = 2560 - 2*16 = 2528
+    /// - column_shift = 960 + 16 = 976
+    /// - max_n = floor((2528 - 960) / 976) = 1
+    /// - slot_max = 960 + 1*976 = 1936
+    ///
+    /// The gap term (16) is small relative to column_width (960), which is
+    /// exactly why the old eighths code hid it — re-quantization rounded it
+    /// away. The new px code preserves it, so expand from base yields
+    /// 1936 (with gap) not 1920 (without gap).
+    fn realistic_gap_config() -> MutationConfig {
         MutationConfig {
-            monitor_width: 1920,
+            monitor_width: 2560,
             column_width: 960,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 8,
+            min_column_width_px: 480,
+            max_n: 1,            // (2528-960)/976 = 1
+            abs_max_width: 2528, // 2560 - 2*16
             padding: Padding {
-                window_gap: gap,
+                window_gap: 16,
                 up: 0,
                 down: 0,
             },
-            columns_per_screen: 4,
+            columns_per_screen: 2,
         }
     }
 
     #[test]
-    fn expand_step_includes_gap_zero_gap_vs_large_gap() {
-        // Positive: verify that the expand step includes window_gap by comparing
-        // results with gap=0 vs gap=20. With gap=0, column_shift = 960.
-        // With gap=20, column_shift = 980. The resulting eighths must differ.
-        //
-        // gap=0: 960 + 960 = 1920 → 8 eighths (exactly monocle width)
-        // gap=20: 960 + 980 = 1940 → pixels_to_eighths(1940, 960) = 8 eighths (same)
-        // So for this specific case they converge. Let's use 3 eighths start:
-        //
-        // 3 eighths = 720px.
-        // gap=0: 720 + 960 = 1680 → pixels_to_eighths(1680, 960) = 7 eighths
-        // gap=20: 720 + 980 = 1700 → pixels_to_eighths(1700, 960) = 7 eighths
-        // Still same. Let's verify with smaller column_width to see the gap matter:
-        // Use column_width=500, so column_shift matters more.
-        let config_zero = MutationConfig {
-            monitor_width: 1920,
-            column_width: 500,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            // max: (1920 * 4) / 500 = 15
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 0,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-        let config_gap = MutationConfig {
-            monitor_width: 1920,
-            column_width: 500,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 20,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-
+    fn expand_preserves_window_gap_in_ladder() {
+        // Bug 2: expand must move by column_width + window_gap (=976), not just column_width (960).
+        // Old eighths code gave 1920 (gap lost). New px code gives 1936 (gap preserved).
+        let config = realistic_gap_config(); // base=960, shift=976, slot_max=1936, abs_max=2528
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
-
-        // gap=0: column_shift = 500. 500px + 500 = 1000 → eighths(1000,500)=8
-        let _r_zero = expand_column(&layout, WindowId(1), &config_zero).expect("expand zero gap");
-        // gap=20: column_shift = 520. 500px + 520 = 1020 → eighths(1020,500)=8
-        let r_gap = expand_column(&layout, WindowId(1), &config_gap).expect("expand 20 gap");
-
-        // Both hit 8 eighths from 4 — but the *intermediate pixel target* differed.
-        // Verify by checking with a starting width where the gap produces a different
-        // eighth boundary. 3 eighths = 375px.
-        let layout3 = VirtualLayout::with_columns(
-            vec![Column::new(3, WindowId(1)), Column::new(4, WindowId(2))],
-            0,
-        );
-        // gap=0: 375 + 500 = 875 → eighths(875, 500) = 7
-        let r3_zero = expand_column(&layout3, WindowId(1), &config_zero).expect("expand3 zero");
-        // gap=20: 375 + 520 = 895 → eighths(895, 500) = 7
-        assert_eq!(r3_zero.columns[0].width_eighths, 7);
-        assert_eq!(r_gap.columns[0].width_eighths, 8);
-        assert_eq!(r3_zero.columns[0].width_eighths, 7);
-    }
-
-    #[test]
-    fn expand_with_large_gap_advances_further_than_zero_gap() {
-        // Positive: with a large gap, the expand step pushes further, so expanding
-        // from a low width can skip an eighth boundary that gap=0 would not.
-        // column_width=500. Start at 2 eighths = 250px.
-        // gap=0: 250 + 500 = 750 → eighths(750, 500) = 6
-        // gap=60: 250 + 560 = 810 → eighths(810, 500) = 6
-        // gap=0 and gap=60 both round to 6. Let's try gap=200:
-        // gap=200: 250 + 700 = 950 → eighths(950, 500) = 8
-        let config_small = MutationConfig {
-            monitor_width: 1920,
-            column_width: 500,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 0,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-        let config_large = MutationConfig {
-            monitor_width: 1920,
-            column_width: 500,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 200,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-
-        let layout = VirtualLayout::with_columns(
-            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
-            0,
-        );
-
-        // gap=0: 250 + 500 = 750 → 6 eighths
-        let r_small = expand_column(&layout, WindowId(1), &config_small).expect("expand small gap");
+        let result = expand_column(&layout, WindowId(1), &config).expect("expand from base");
         assert_eq!(
-            r_small.columns[0].width_eighths, 6,
-            "gap=0 expand from 2→6 eighths"
-        );
-
-        // gap=200: 250 + 700 = 950 → 8 eighths
-        let r_large = expand_column(&layout, WindowId(1), &config_large).expect("expand large gap");
-        assert_eq!(
-            r_large.columns[0].width_eighths, 8,
-            "gap=200 expand from 2→8 eighths (larger step skips more eighth boundaries)"
-        );
-
-        // Verify the gap is what causes the difference
-        assert_ne!(
-            r_small.columns[0].width_eighths, r_large.columns[0].width_eighths,
-            "different gaps must produce different expand results when starting from same width"
+            result.columns[0].width_px, 1936,
+            "expand must include window_gap (960+976, not 960+960)"
         );
     }
 
     #[test]
-    fn shrink_with_large_gap_reduces_more_than_zero_gap() {
-        // Positive: with a large gap, shrink removes more, so it can drop below
-        // what gap=0 would reach.
-        // column_width=500. Start at 6 eighths = 750px.
-        // gap=0: 750 - 500 = 250 → eighths(250, 500) = 2
-        // gap=200: 750 - 700 = 50 → eighths(50, 500) = 0 → clamped to 1 < min(2) → None
-        let config_small = MutationConfig {
-            monitor_width: 1920,
-            column_width: 500,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 0,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-        let config_large = MutationConfig {
-            monitor_width: 1920,
-            column_width: 500,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 200,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-
+    fn expand_two_step_abs_max_then_noop() {
+        // F4 abs_max two-step ladder: slot_max → abs_max jump; abs_max → no-op.
+        let config = realistic_gap_config();
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(6, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(1936, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
+        let result =
+            expand_column(&layout, WindowId(1), &config).expect("expand slot_max -> abs_max");
+        assert_eq!(result.columns[0].width_px, 2528);
+        // at abs_max -> None
+        assert!(expand_column(&result, WindowId(1), &config).is_none());
+    }
 
-        // gap=0: 750 - 500 = 250 → 2 eighths (at min, should succeed)
-        let r_small = shrink_column(&layout, WindowId(1), &config_small).expect("shrink small gap");
-        assert_eq!(r_small.columns[0].width_eighths, 2);
-
-        // gap=200: 750 - 700 = 50 → 0 → 1 eighth < min(2) → None
+    #[test]
+    fn shrink_reverse_ladder() {
+        let config = realistic_gap_config();
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::new(2528, WindowId(1)),
+                Column::new(960, WindowId(2)),
+            ],
+            0,
+        );
+        let r1 = shrink_column(&layout, WindowId(1), &config).expect("shrink abs_max -> slot_max");
+        assert_eq!(r1.columns[0].width_px, 1936);
+        let r2 = shrink_column(&r1, WindowId(1), &config).expect("shrink slot_max -> base");
+        assert_eq!(r2.columns[0].width_px, 960);
         assert!(
-            shrink_column(&layout, WindowId(1), &config_large).is_none(),
-            "gap=200 shrink from 6 eighths drops below min → None"
+            shrink_column(&r2, WindowId(1), &config).is_none(),
+            "shrink at base -> None"
         );
     }
 
     #[test]
     fn expand_shrink_roundtrip_with_gap() {
-        // Positive: expand then shrink with non-zero gap returns to same width.
-        // 4 eighths (960px), gap=16. column_shift = 976.
-        // expand: 960 + 976 = 1936 → 8 eighths
-        // shrink: 1920 - 976 = 944 → 4 eighths
-        let config = gap_config(16);
+        let config = realistic_gap_config();
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
-
         let expanded = expand_column(&layout, WindowId(1), &config).expect("expand");
-        assert_eq!(expanded.columns[0].width_eighths, 8);
-
+        assert_eq!(expanded.columns[0].width_px, 1936);
         let shrunk = shrink_column(&expanded, WindowId(1), &config).expect("shrink");
+        assert_eq!(shrunk.columns[0].width_px, 960);
+    }
+
+    // -------------------------------------------------------------------
+    // Multi-step ladder: max_n >= 2 exercises intermediate rungs (Area 3).
+    // -------------------------------------------------------------------
+
+    /// Helper: build a config with max_n=2 for multi-step ladder tests.
+    ///
+    /// - monitor=3840, column_width=960, gap=16
+    /// - abs_max = 3840 − 2×16 = 3808
+    /// - column_shift = 960 + 16 = 976
+    /// - max_n = ⌊(3808 − 960) / 976⌋ = ⌊2848 / 976⌋ = 2
+    /// - slot_max = 960 + 2×976 = 2912
+    fn multi_step_config() -> MutationConfig {
+        MutationConfig {
+            monitor_width: 3840,
+            column_width: 960,
+            min_column_width_px: 480,
+            max_n: 2,
+            abs_max_width: 3808,
+            padding: Padding {
+                window_gap: 16,
+                up: 0,
+                down: 0,
+            },
+            columns_per_screen: 3,
+        }
+    }
+
+    #[test]
+    fn expand_multi_step_ladder_advances_one_rung_at_a_time() {
+        // Area 3: max_n=2, expand advances through each rung:
+        // base(960) → n=1(1936) → n=2/slot_max(2912) → abs_max(3808) → None.
+        let config = multi_step_config();
+        let layout = VirtualLayout::with_columns(
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
+            0,
+        );
+        // Step 1: base (960) → n=1 (960 + 976 = 1936)
+        let r1 = expand_column(&layout, WindowId(1), &config).expect("expand base → n=1");
         assert_eq!(
-            shrunk.columns[0].width_eighths, 4,
-            "expand→shrink roundtrip must return to original width with gap=16"
+            r1.columns[0].width_px, 1936,
+            "first rung: base + column_shift"
+        );
+        // Step 2: n=1 (1936) → n=2 (960 + 2×976 = 2912 = slot_max)
+        let r2 = expand_column(&r1, WindowId(1), &config).expect("expand n=1 → n=2");
+        assert_eq!(r2.columns[0].width_px, 2912, "second rung: slot_max");
+        // Step 3: slot_max (2912) → abs_max (3808) — two-step top
+        let r3 = expand_column(&r2, WindowId(1), &config).expect("expand slot_max → abs_max");
+        assert_eq!(
+            r3.columns[0].width_px, 3808,
+            "two-step top: slot_max → abs_max"
+        );
+        // Step 4: abs_max → no-op
+        assert!(
+            expand_column(&r3, WindowId(1), &config).is_none(),
+            "abs_max → None"
         );
     }
 
     #[test]
-    fn expand_at_max_with_large_gap_returns_none() {
-        // Negative: even with a large gap, expanding at max_eighths → None.
-        // The step doesn't matter — bounds validation catches it.
-        let config = gap_config(100);
+    fn shrink_multi_step_ladder_descends_one_rung_at_a_time() {
+        // Area 3: max_n=2, shrink descends:
+        // abs_max(3808) → slot_max(2912) → n=1(1936) → base(960) → None.
+        let config = multi_step_config();
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(3808, WindowId(1)), // abs_max
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
+        let r1 = shrink_column(&layout, WindowId(1), &config).expect("shrink abs_max → slot_max");
+        assert_eq!(
+            r1.columns[0].width_px, 2912,
+            "reverse two-step: abs_max → slot_max"
+        );
+        let r2 = shrink_column(&r1, WindowId(1), &config).expect("shrink n=2 → n=1");
+        assert_eq!(r2.columns[0].width_px, 1936, "slot_max → n=1");
+        let r3 = shrink_column(&r2, WindowId(1), &config).expect("shrink n=1 → base");
+        assert_eq!(r3.columns[0].width_px, 960, "n=1 → base");
         assert!(
-            expand_column(&layout, WindowId(1), &config).is_none(),
-            "expand at max_eighths must return None regardless of gap size"
+            shrink_column(&r3, WindowId(1), &config).is_none(),
+            "base → None"
+        );
+    }
+
+    // --- Area 5: Small free-form deltas ---
+
+    #[test]
+    fn resize_column_small_delta_succeeds() {
+        // Area 5: small non-eighth-aligned deltas now succeed (free-form).
+        // Old eighths code: pixels_to_eighths(1060, 960) = (1060×4 + 480) / 960
+        //   = (4240 + 480) / 960 = 4720 / 960 = 4 (unchanged — delta lost).
+        // New px code: 960 + 100 = 1060, within [480, 1912] → succeeds.
+        let layout = three_column_layout();
+        let result = resize_column(&layout, WindowId(1), 100, &test_config()).expect("resize +100");
+        assert_eq!(
+            result.columns[0].width_px, 1060,
+            "small +100 delta must succeed as free-form"
         );
     }
 
     #[test]
-    fn shrink_at_min_with_large_gap_returns_none() {
-        // Negative: even with a large gap, shrinking at min_eighths → None.
-        let config = gap_config(100);
+    fn resize_column_negative_small_delta_succeeds() {
+        // Area 5: negative small delta shrinks freely (free-form, not eighths-snapped).
+        let layout = three_column_layout();
+        let result =
+            resize_column(&layout, WindowId(1), -100, &test_config()).expect("resize -100");
+        assert_eq!(
+            result.columns[0].width_px, 860,
+            "small -100 delta must succeed as free-form"
+        );
+    }
+
+    #[test]
+    fn resize_column_negative_delta_below_min_returns_none() {
+        // Area 5: negative delta that would push below min_column_width_px → None.
+        // 960 − 600 = 360 < 480 (min) → None.
+        let layout = three_column_layout();
+        assert!(
+            resize_column(&layout, WindowId(1), -600, &test_config()).is_none(),
+            "resize below min must return None"
+        );
+    }
+
+    // --- Area 6: toggle_monocle with non-base saved width ---
+
+    #[test]
+    fn toggle_monocle_saves_and_restores_expanded_width() {
+        // Area 6: column at slot_max (not base) when entering monocle → saved
+        // width is slot_max, not base. Toggling off restores to slot_max.
+        let config = realistic_gap_config(); // base=960, slot_max=1936, abs_max=2528
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(2, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![
+                Column::new(1936, WindowId(1)), // at slot_max
+                Column::new(960, WindowId(2)),
+            ],
             0,
         );
-        assert!(
-            shrink_column(&layout, WindowId(1), &config).is_none(),
-            "shrink at min_eighths must return None regardless of gap size"
+        // Enter monocle: save 1936, set to abs_max (2528)
+        let (r1, saved) = toggle_monocle(&layout, WindowId(1), None, &config).expect("monocle on");
+        assert_eq!(r1.columns[0].width_px, 2528);
+        assert_eq!(
+            saved,
+            Some(1936),
+            "saved width should be the pre-monocle expanded width"
         );
+        // Exit monocle: restore to 1936 (not base 960)
+        let (r2, saved2) = toggle_monocle(&r1, WindowId(1), saved, &config).expect("monocle off");
+        assert_eq!(
+            r2.columns[0].width_px, 1936,
+            "restored to slot_max, not base"
+        );
+        assert_eq!(saved2, None);
+    }
+
+    // --- Area 8: column_shift() / slot_max() direct unit tests ---
+
+    #[test]
+    fn mutation_config_column_shift_includes_gap() {
+        // Area 8: column_shift = column_width + window_gap.
+        let config = realistic_gap_config(); // column_width=960, gap=16
+        assert_eq!(config.column_shift(), 976, "column_shift = 960 + 16");
     }
 
     #[test]
-    fn expand_step_uses_column_shift_not_column_width() {
-        // Positive: direct verification that the expand step is column_width + gap,
-        // not just column_width. We verify by computing the expected pixel target
-        // and checking it matches the function's behavior.
-        //
-        // column_width=960, gap=4, column_shift=964.
-        // Start: 4 eighths = 960px.
-        // Expected target: 960 + 964 = 1924px → 8 eighths.
-        //
-        // If the bug were present (using column_width=960 instead of column_shift=964):
-        // target would be 960 + 960 = 1920 → 8 eighths (happens to match in this case).
-        //
-        // Use a case where the difference matters: start at 3 eighths = 720px.
-        // Correct: 720 + 964 = 1684 → eighths(1684, 960) = (1684*4 + 480)/960 = 7
-        // Buggy:  720 + 960 = 1680 → eighths(1680, 960) = 7 (still same)
-        //
-        // Try 5 eighths = 1200px.
-        // Correct: 1200 + 964 = 2164 → eighths(2164, 960) = (2164*4+480)/960 = 9
-        // Buggy:  1200 + 960 = 2160 → eighths(2160, 960) = 9 (still same)
-        //
-        // The rounding makes it hard to see the difference with these sizes.
-        // Use column_width=250, gap=50, column_shift=300. Start at 4 eighths=250px.
-        // Correct: 250 + 300 = 550 → eighths(550, 250) = (550*4+125)/250 = 2325/250 = 9
-        // Buggy:  250 + 250 = 500 → eighths(500, 250) = (500*4+125)/250 = 2125/250 = 8
+    fn mutation_config_column_shift_and_slot_max_zero_gap() {
+        // Area 8: with gap=0, column_shift = column_width, slot_max = base + max_n*base.
         let config = MutationConfig {
             monitor_width: 1920,
-            column_width: 250,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
+            column_width: 960,
+            min_column_width_px: 480,
+            max_n: 1,
+            abs_max_width: 1920,
             padding: Padding {
-                window_gap: 50,
+                window_gap: 0,
                 up: 0,
                 down: 0,
             },
             columns_per_screen: 4,
         };
-        let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
-            0,
-        );
-
-        let result = expand_column(&layout, WindowId(1), &config).expect("expand");
         assert_eq!(
-            result.columns[0].width_eighths, 9,
-            "expand with column_width=250, gap=50 must use column_shift=300, \
-             not column_width=250. Expected 9 eighths (correct) vs 8 (buggy)."
+            config.column_shift(),
+            960,
+            "column_shift = column_width when gap=0"
         );
+        assert_eq!(config.slot_max(), 1920, "slot_max = 960 + 1×960 = 1920");
     }
 
     #[test]
-    fn shrink_step_uses_column_shift_not_column_width() {
-        // Positive: same verification as expand but for shrink.
-        // column_width=250, gap=50, column_shift=300. Start at 8 eighths=500px.
-        // Correct: 500 - 300 = 200 → eighths(200, 250) = (200*4+125)/250 = 925/250 = 3
-        // Buggy:  500 - 250 = 250 → eighths(250, 250) = (250*4+125)/250 = 1125/250 = 4
-        let config = MutationConfig {
-            monitor_width: 1920,
-            column_width: 250,
-            default_column_width_eighths: 4,
-            min_column_eighths: 2,
-            max_column_eighths: 15,
-            padding: Padding {
-                window_gap: 50,
-                up: 0,
-                down: 0,
-            },
-            columns_per_screen: 4,
-        };
-        let layout = VirtualLayout::with_columns(
-            vec![Column::new(8, WindowId(1)), Column::new(4, WindowId(2))],
-            0,
-        );
-
-        let result = shrink_column(&layout, WindowId(1), &config).expect("shrink");
+    fn mutation_config_slot_max_equals_base_when_max_n_zero() {
+        // Area 8: when max_n=0 (column_width close to abs_max), slot_max = base.
+        // This is the degenerate case where expand from base jumps straight to
+        // abs_max (no intermediate rungs).
+        let config = test_config(); // max_n=0, column_width=960
         assert_eq!(
-            result.columns[0].width_eighths, 3,
-            "shrink with column_width=250, gap=50 must use column_shift=300, \
-             not column_width=250. Expected 3 eighths (correct) vs 4 (buggy)."
+            config.slot_max(),
+            960,
+            "slot_max = column_width when max_n=0"
         );
     }
 }

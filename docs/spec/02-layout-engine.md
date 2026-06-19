@@ -24,9 +24,8 @@ pub struct VirtualLayout {
 }
 
 pub struct Column {
-    pub width_eighths: u8,      // 1–8, proportional to monitor width
-    pub rows: Vec<HWND>,        // top-to-bottom order within this column
-    pub row_ratios: Vec<f32>,   // height ratios summing to 1.0 (default: equal)
+    pub width_px: i32,          // pixel width on the virtual canvas (> 0)
+    pub rows: Vec<WindowId>,    // top-to-bottom order within this column
 }
 
 /// The on-screen projection of the virtual layout
@@ -40,7 +39,13 @@ pub struct ActualEntry {
 }
 ```
 
-The `width_eighths` field encodes the snap grid: 1 = 1/8 monitor width, 4 = half, 8 = full. Columns are stored in virtual left-to-right order. The viewport clips this sequence by `viewport_offset`.
+Columns store their width directly in pixels (`width_px`). Position is **not stored** — it is derived via prefix-sum: column `i`'s left edge is the sum of all preceding columns' `width_px + window_gap`. This keeps the model lightweight (only the delta that matters) and makes reordering (swap) a simple `Vec::swap` with no coordinate arithmetic.
+
+The `width_px` field is bounded by mutation-layer config (`[min_column_width_px, abs_max_width]`), not enforced by the `Column` type itself — the layout types are config-agnostic.
+
+### Why pixel widths (not proportional units)
+
+Earlier revisions stored widths as eighths of the base `column_width` to stay resolution-independent. This quantization caused a subtle bug: `expand_column`/`shrink_column` computed the correct pixel target (`column_width + window_gap`), then `pixels_to_eighths` re-quantized onto the `column_width` grid, **discarding the gap** (it was smaller than one eighth and rounded away). So each expand step grew by exactly `column_width` instead of `column_width + window_gap`. Pixel widths make the gap observable at every step and fix the bug. The cost — dependence on `column_width` and monitor resolution — is accepted; the `window_gap` is already pixel-based everywhere else.
 
 ---
 
@@ -48,13 +53,12 @@ The `width_eighths` field encodes the snap grid: 1 = 1/8 monitor width, 4 = half
 
 Given `VirtualLayout`, projection works as follows:
 
-1. Compute the pixel width of each column: `col_px = (width_eighths / 8.0) * monitor_width`
-2. Compute cumulative left edges for each column on the infinite canvas
-3. Find all columns whose pixel range overlaps `[viewport_offset, viewport_offset + monitor_width]`
-4. For each overlapping column, compute its rows' `Rect`s by dividing monitor height using `row_ratios`
-5. Translate canvas-relative X coordinates to screen coordinates: `screen_x = canvas_x - viewport_offset + monitor_left`
+1. Each column already carries its pixel width (`width_px`). Compute cumulative left edges via prefix-sum: `col_left(0) = window_gap; col_left(i) = col_right(i−1) + window_gap`.
+2. Find all columns whose pixel range overlaps `[viewport_offset, viewport_offset + monitor_width]`
+3. For each overlapping column, compute its rows' `Rect`s by dividing monitor height equally among rows.
+4. Translate canvas-relative X coordinates to screen coordinates: `screen_x = canvas_x - viewport_offset + monitor_left`
 
-Off-screen columns (no overlap with viewport) produce parked positions: `screen_x = monitor_left - 10000`.
+Off-screen columns (no overlap with viewport) are **parked** just beyond the nearest viewport edge (one column-width beyond), rather than at far-off coordinates — this keeps OS window management well-behaved and produces smooth scroll-in animations.
 
 ---
 
@@ -66,24 +70,27 @@ All mutations take the current `VirtualLayout`, compute a new one, re-project to
 
 | Command | Description |
 |---|---|
-| `ScrollLeft` / `ScrollRight` | Shift `viewport_offset` by one column width. Windows animate on/off screen. |
-| `FocusLeft` / `FocusRight` / `FocusUp` / `FocusDown` | Move focus. If focus would leave viewport, implicitly scroll. |
+| `ScrollLeft` / `ScrollRight` | Shift `viewport_offset` by one column step (free-form pixel offset, not snapped to a grid). Windows animate on/off screen. |
+| `FocusLeft` / `FocusRight` / `FocusUp` / `FocusDown` | Move focus. If focus would leave viewport, `ensure_column_visible` shifts the camera with a free-form offset to reveal the target column. |
 | `SwapLeft` / `SwapRight` | Swap focused window with its neighbour in the adjacent column. |
 | `SwapUp` / `SwapDown` | Swap focused window with the sibling row in the same column. |
 | `SwapColumn <direction>` | Swap the focused **column** with its neighbour. The viewport scrolls automatically via `ensure_column_visible` so the focused window stays visible — no separate "offscreen" command is needed. |
 | `MoveWindow <direction>` | Semantic "move" — the daemon translates the intent by window state (tiled left/right = column swap; floating = pixel nudge once supported). |
-| `ExpandColumn` / `ShrinkColumn` | Increase/decrease focused column's `width_eighths` by 1. Adjacent column adjusts to compensate. |
-| `SetColumnWidth <eighths>` | Set focused column width explicitly. |
-| `ResizeSnap <new_rect>` | Called after a mouse resize gesture. Snaps to nearest eighths width, adjusts neighbor. |
+| `ExpandColumn` / `ShrinkColumn` | Expand/shrink the focused column by one slot on the **F4 ladder**: `column_shift = column_width + window_gap`. At `slot_max` the next expand jumps to `abs_max_width` (`monitor_width − 2*gap`); at `abs_max_width` it is a no-op. Shrink reverses. Monocle = `abs_max_width`. Independent — no neighbor compensation. |
+| `SetColumnWidth <px>` | Set focused column width to an explicit pixel value (free-form). Validated against `[min_column_width_px, abs_max_width]`. No quantization to any grid. |
+| `ResizeSnap <new_rect>` | Called after a mouse resize gesture. Computes pixel delta and delegates to `set_column_width` (free-form px, bounded by min/max). |
 | `MoveSnap <new_rect>` | Called after a mouse move gesture. Determines target slot (insert into column), updates virtual layout. |
+
 | `Promote <hwnd>` | Move a window from above-layout (overlay) layer back into tiling. |
 
 ### Column swap & viewport scrolling
 
 `SwapColumn <direction>` swaps the focused column with its immediate neighbour.
 After the swap, `ensure_column_visible` shifts `viewport_offset` if the focused
-window's new column would be off-screen, so the swap and the camera scroll
-produce a single `LayoutDiff`:
+window's new column would be off-screen. The offset is **free-form** — it is
+computed as the minimum scroll that reveals the target column with a
+`window_gap` margin, clamped to ≥ 0. It is not snapped to any column-width
+grid. This means the swap and camera scroll produce a single `LayoutDiff`:
 
 ```
 Before:                       After swap-column right:

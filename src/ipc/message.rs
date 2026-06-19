@@ -110,10 +110,14 @@ pub enum SocketMessage {
     ExpandColumn,
     /// Shrink the focused column width.
     ShrinkColumn,
-    /// Set focused column width to a specific value in eighths of the monitor.
+    /// Set focused column width to an explicit pixel value.
+    ///
+    /// The width is free-form (not snapped to the expand/shrink slot ladder)
+    /// and is validated by the daemon against the engine's current bounds
+    /// (`[min_column_width_px, abs_max_width]`).
     SetColumnWidth {
-        /// Width in eighths (1–8).
-        eighths: u8,
+        /// Target column width in pixels.
+        width_px: u32,
     },
 
     // --- Window state ---
@@ -215,12 +219,12 @@ mod tests {
     // Positive: round-trip SetColumnWidth
     #[test]
     fn roundtrip_set_column_width() {
-        let msg = SocketMessage::SetColumnWidth { eighths: 4 };
+        let msg = SocketMessage::SetColumnWidth { width_px: 960 };
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"type":"set_column_width","eighths":4}"#);
+        assert_eq!(json, r#"{"type":"set_column_width","width_px":960}"#);
 
         let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, SocketMessage::SetColumnWidth { eighths: 4 });
+        assert_eq!(parsed, SocketMessage::SetColumnWidth { width_px: 960 });
     }
 
     // Positive: round-trip SwapColumn
@@ -400,11 +404,14 @@ mod tests {
     // Positive: wire format roundtrip covers FocusLeft via encode+decode
     #[test]
     fn wire_format_roundtrip_set_column_width() {
-        // Positive: set_column_width with max eighths round-trips through wire
-        let msg = SocketMessage::SetColumnWidth { eighths: 8 };
+        // Positive: set_column_width with an explicit pixel value round-trips
+        let msg = SocketMessage::SetColumnWidth { width_px: 1280 };
         let wire = encode_message(&msg).unwrap();
         let parsed: Option<SocketMessage> = decode_message(&wire);
-        assert_eq!(parsed, Some(SocketMessage::SetColumnWidth { eighths: 8 }));
+        assert_eq!(
+            parsed,
+            Some(SocketMessage::SetColumnWidth { width_px: 1280 })
+        );
     }
 
     // --- encode_message error path ---
@@ -463,7 +470,7 @@ mod tests {
             SocketMessage::ScrollRight,
             SocketMessage::ExpandColumn,
             SocketMessage::ShrinkColumn,
-            SocketMessage::SetColumnWidth { eighths: 3 },
+            SocketMessage::SetColumnWidth { width_px: 800 },
             SocketMessage::ToggleFloat,
             SocketMessage::ToggleMonocle,
             SocketMessage::PlaceAbove,

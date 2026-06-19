@@ -794,7 +794,7 @@ action = "ignore"
 [[rules]]
 match = { class = "Chrome_WidgetWin_1" }
 action = "tile"
-initial_width_eighths = 4
+initial_width_px = 960
 "#;
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(toml_content.as_bytes()).unwrap();
@@ -803,7 +803,7 @@ initial_width_eighths = 4
         assert_eq!(config.default_action, WindowAction::Float);
         assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].action, WindowAction::Ignore);
-        assert_eq!(config.rules[1].initial_width_eighths, Some(4));
+        assert_eq!(config.rules[1].initial_width_px, Some(960));
     }
 
     /// Negative: missing file returns default config (not panic, not error).
@@ -852,7 +852,7 @@ initial_width_eighths = 4
                     ..Default::default()
                 },
                 action: WindowAction::Tile,
-                initial_width_eighths: None,
+                initial_width_px: None,
                 override_persist: false,
             }],
         };

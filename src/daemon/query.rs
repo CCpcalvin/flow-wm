@@ -23,8 +23,8 @@ impl ScrollTilingManager {
     /// Return the virtual layout structure as JSON.
     ///
     /// The virtual layout represents the logical structure on an infinite
-    /// horizontal canvas. Columns store proportional widths (`width_eighths`),
-    /// not pixel positions.
+    /// horizontal canvas. Columns store pixel widths (`width_px`), not pixel
+    /// positions (the projection layer derives positions via prefix-sum).
     pub(super) fn query_layout_virtual(&self) -> SocketResponse {
         let vl = self.layout.virtual_layout();
         let columns_json: Vec<serde_json::Value> = vl
@@ -39,7 +39,7 @@ impl ScrollTilingManager {
                     .collect();
                 serde_json::json!({
                     "index": i,
-                    "width_eighths": col.width_eighths,
+                    "width_px": col.width_px,
                     "rows": rows,
                 })
             })

@@ -29,10 +29,6 @@ pub(super) struct LayoutConfig {
     /// `base_content_width = (monitor_width - (N+1) * window_gap) / N`
     pub(super) column_width: u32,
 
-    /// Default column width in eighths of the monitor (computed as 4 for
-    /// a 960px column on a 1920px monitor).
-    pub(super) default_column_width_eighths: u8,
-
     /// Minimum column width in pixels.
     pub(super) min_column_width_px: u32,
 
@@ -105,18 +101,10 @@ pub struct ScrollTilingManager {
 
     /// Application configuration loaded from `stm.toml`.
     ///
-    /// Stored for future config hot-reload support. Currently, only
-    /// [`resolved_column_width`](Self::resolved_column_width) is read at runtime.
+    /// Stored for future config hot-reload support. Not read at runtime today
+    /// — the layout engine owns all derived width/bounds state internally.
     #[allow(dead_code)] // Stored for future config reload functionality.
     pub(super) config: StmConfig,
-
-    /// Resolved column width in pixels — concrete value used by the layout engine.
-    ///
-    /// When `config.column_width` is `Some(v)`, this equals `v`. When `None`,
-    /// this is computed from `config.columns_per_screen`, monitor width, and
-    /// `config.padding.window_gap`. Stored separately so IPC handlers don't
-    /// need to recompute or hold a monitor reference.
-    pub(super) resolved_column_width: u32,
 
     /// Path to the configuration directory (for future reload support).
     #[allow(dead_code)] // Stored for future config reload functionality.

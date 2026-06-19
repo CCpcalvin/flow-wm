@@ -45,10 +45,10 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │  Layer 1: VirtualLayout (infinite canvas, no pixels)        │
+//! │  Layer 1: VirtualLayout (infinite canvas, pixel widths)     │
 //! │  ┌───────────────────────────────────────────────────────┐  │
-//! │  │ Column { width_eighths: 4, rows: [WinId(1), WinId(2)]}│  │
-//! │  │ Column { width_eighths: 6, rows: [WinId(3)]          }│  │
+//! │  │ Column { width_px: 960, rows: [WinId(1), WinId(2)]   }│  │
+//! │  │ Column { width_px: 1440, rows: [WinId(3)]            }│  │
 //! │  │ viewport_offset: 0  ← camera position                 │  │
 //! │  └───────────────────────────────────────────────────────┘  │
 //! │         │                                                   │

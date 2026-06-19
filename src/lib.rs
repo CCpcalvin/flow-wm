@@ -47,8 +47,8 @@
 //! Layout computation follows a functional, declarative pipeline:
 //!
 //! 1. **Virtual Layer** ([`layout::types::VirtualLayout`]) — logical structure on an infinite
-//!    horizontal canvas. Columns store proportional widths (`width_eighths`),
-//!    not pixel positions.
+//!    horizontal canvas. Columns store **pixel widths** (`width_px`),
+//!    not absolute x-positions.
 //!
 //! 2. **Projection** ([`layout::projection::project`]) — pure function that converts the
 //!    virtual layout into actual screen coordinates, applying all padding.

@@ -213,7 +213,7 @@ Rules:
 
 Layout computation follows a functional, declarative pipeline. Every mutation flows through: **mutate → project → diff**.
 
-1. **Virtual Layer** (`layout/types::VirtualLayout`) — logical structure on an infinite horizontal canvas. Columns store proportional widths (`width_eighths`), not pixel positions.
+1. **Virtual Layer** (`layout/types::VirtualLayout`) — logical structure on an infinite horizontal canvas. Columns store pixel widths (`width_px`); positions are derived via prefix-sum over column widths + gaps.
 
 2. **Projection** (`layout/projection::project`) — pure function that converts virtual layout into actual screen coordinates, applying all padding.
 

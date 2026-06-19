@@ -43,7 +43,7 @@ pub enum SocketMessage {
     MoveWindow { direction: Direction },
     ScrollLeft, ScrollRight,
     ExpandColumn, ShrinkColumn,
-    SetColumnWidth { eighths: u8 },
+    SetColumnWidth { width_px: u32 },
     ToggleFloat,
     ToggleMonocle,
     PlaceAbove,

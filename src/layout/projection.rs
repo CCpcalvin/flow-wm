@@ -71,21 +71,19 @@ use crate::layout::types::{
 ///
 /// # Slot Model
 ///
-/// Each column occupies a **slot** on the virtual canvas:
-/// `slot_width = col_width + window_gap`. The canvas starts at `window_gap`
-/// (left-edge gap). This means the visible x-position for column `i` is:
+/// Each column occupies a **slot** on the virtual canvas whose width is that
+/// column's own [`width_px`](crate::layout::types::Column::width_px) plus
+/// `window_gap`. The canvas starts at `window_gap` (left-edge gap). Column
+/// x-positions are therefore a **prefix sum**, not a uniform stride — the
+/// running `canvas_x` accumulator in [`project`] advances by
+/// `col.width_px + window_gap` per column.
 ///
-/// ```text
-/// canvas_x(i) = window_gap + i * slot_width
-/// ```
-///
-/// The window rect fills the full `col_width` (no horizontal inset); the gap
-/// between columns comes from the slot structure itself.
+/// The window rect fills the full `col.width_px` (no horizontal inset); the
+/// gap between columns comes from the slot structure itself.
 #[must_use]
 pub fn project(
     virtual_layout: &VirtualLayout,
     monitor: &MonitorInfo,
-    column_width: u32,
     padding: &Padding,
 ) -> ActualLayout {
     let monitor_rect = monitor.work_area;
@@ -98,7 +96,7 @@ pub fn project(
     let mut canvas_x: i32 = slot_gap;
 
     for column in &virtual_layout.columns {
-        let col_width = column_eighths_to_pixels(column.width_eighths, column_width);
+        let col_width = column.width_px;
         let canvas_col_left = canvas_x;
         let canvas_col_right = canvas_x + col_width;
 
@@ -242,31 +240,19 @@ fn compute_row_height(_index: usize, row_count: usize, usable_height: i32) -> i3
     usable_height / row_count as i32
 }
 
-/// Convert width eighths to pixel width based on `column_width`.
-///
-/// A column with `width_eighths = 4` equals `column_width` pixels.
-/// The formula is: `(eighths * column_width) / 4`.
-pub(crate) fn column_eighths_to_pixels(eighths: u8, column_width: u32) -> i32 {
-    ((eighths as i32) * (column_width as i32)) / 4
-}
-
 /// Compute the canvas width consumed by all columns using the slot model.
 ///
-/// Each column occupies a slot of `col_width + window_gap`, starting from
+/// Each column occupies a slot of `col.width_px + window_gap`, starting from
 /// `window_gap` (the initial left-edge gap). The total canvas width is:
-/// `window_gap + sum(slot_widths)`.
+/// `window_gap + sum(width_px_i + window_gap)`.
 ///
 /// When `window_gap = 0`, this degenerates to the packed model (sum of col widths).
 #[must_use]
-pub fn canvas_width(layout: &VirtualLayout, column_width: u32, window_gap: i32) -> i32 {
+pub fn canvas_width(layout: &VirtualLayout, window_gap: i32) -> i32 {
     if layout.columns.is_empty() {
         return 0;
     }
-    let total_slots: i32 = layout
-        .columns
-        .iter()
-        .map(|c| column_eighths_to_pixels(c.width_eighths, column_width) + window_gap)
-        .sum();
+    let total_slots: i32 = layout.columns.iter().map(|c| c.width_px + window_gap).sum();
     // Leading edge gap is the window_gap at the very start of the canvas.
     // But each slot already includes its trailing gap, and the first slot starts
     // at window_gap. So the total span from canvas_x=0 to the end of the last
@@ -275,11 +261,11 @@ pub fn canvas_width(layout: &VirtualLayout, column_width: u32, window_gap: i32) 
     window_gap + total_slots
 }
 
-/// Compute the pixel width of a single step (one slot = column width + window gap).
+/// Compute the pixel width of a single step (one slot = column's own width + window gap).
 /// Used by scroll operations to determine viewport offset changes.
 #[must_use]
-pub fn column_step_width(column: &Column, column_width: u32, window_gap: i32) -> i32 {
-    column_eighths_to_pixels(column.width_eighths, column_width) + window_gap
+pub fn column_step_width(column: &Column, window_gap: i32) -> i32 {
+    column.width_px + window_gap
 }
 
 #[cfg(test)]
@@ -298,8 +284,6 @@ mod tests {
         }
     }
 
-    const TEST_COLUMN_WIDTH: u32 = 960;
-
     fn test_padding() -> Padding {
         Padding {
             window_gap: 4,
@@ -310,14 +294,13 @@ mod tests {
 
     #[test]
     fn project_single_column_fills_monitor() {
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
-        let actual = project(&layout, &test_monitor(), 960, &test_padding());
+        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 1);
         let entry = &actual.entries[0];
         assert_eq!(entry.window_id, WindowId(1));
-        // width_eighths=8 with column_width=960 → 1920px column
-        // Slot model: canvas starts at window_gap=4, window fills full col_width
+        // width_px=1920; Slot model: canvas starts at window_gap=4, window fills full width
         // window x = 0 + (4 - 0) = 4
         // window width = 1920 (full column width, no horizontal inset)
         assert_eq!(entry.rect.x, 4);
@@ -329,14 +312,14 @@ mod tests {
     #[test]
     fn project_two_equal_columns() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 2);
 
-        let col_width = 960; // column_width for 4/8
+        let col_width = 960; // base column width (px)
         // Slot model: canvas starts at window_gap=4
         // Col 0: canvas_x = 4, screen_x = 0 + (4-0) = 4
         assert_eq!(actual.entries[0].rect.x, 4);
@@ -349,10 +332,13 @@ mod tests {
     #[test]
     fn project_column_with_two_rows() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 2);
         assert_eq!(actual.entries[0].rect.x, actual.entries[1].rect.x);
@@ -368,10 +354,10 @@ mod tests {
         // Slot model: col 0 at canvas_x=4, col 1 at canvas_x=4+960+4=968
         // viewport_offset = 968 means viewport starts at col 1's canvas position
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             968, // offset = start of col 1's slot
         );
-        let actual = project(&layout, &monitor, TEST_COLUMN_WIDTH, &padding);
+        let actual = project(&layout, &monitor, &padding);
 
         // First column parked at: monitor_left - col_width = -960
         assert_eq!(actual.entries[0].rect.x, -960);
@@ -388,13 +374,13 @@ mod tests {
         // Slot model: col 0 at canvas_x=4, col 1 at canvas_x=968, col 2 at canvas_x=1932
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)), // off-screen right
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)), // off-screen right
             ],
             0,
         );
-        let actual = project(&layout, &monitor, TEST_COLUMN_WIDTH, &padding);
+        let actual = project(&layout, &monitor, &padding);
 
         // Third column parked at: monitor_right = 1920
         assert_eq!(actual.entries[2].rect.x, 1920);
@@ -403,45 +389,45 @@ mod tests {
     #[test]
     fn canvas_width_empty() {
         let layout = VirtualLayout::new();
-        assert_eq!(canvas_width(&layout, TEST_COLUMN_WIDTH, 4), 0);
+        assert_eq!(canvas_width(&layout, 4), 0);
     }
 
     #[test]
     fn canvas_width_two_columns() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
         // Slot model: window_gap(4) + (960+4) + (960+4) = 4 + 964 + 964 = 1932
-        assert_eq!(canvas_width(&layout, TEST_COLUMN_WIDTH, 4), 1932);
+        assert_eq!(canvas_width(&layout, 4), 1932);
     }
 
     // --- Integration: Projection correctness ---
 
     #[test]
     fn project_three_varying_width_columns_exact_pixels() {
-        // Positive: 1/8 + 3/8 + 4/8 columns
+        // Positive: 240px + 720px + 960px columns
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(1, WindowId(1)),
-                Column::new(3, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(240, WindowId(1)),
+                Column::new(720, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
         assert_eq!(actual.entries.len(), 3);
 
         // Slot model: canvas starts at window_gap=4
-        // Column 1: 1/8 * 960/4 = 240px, canvas_x=4, screen_x = 0 + (4-0) = 4
+        // Column 1: 240px, canvas_x=4, screen_x = 0 + (4-0) = 4
         assert_eq!(actual.entries[0].rect.x, 4);
         assert_eq!(actual.entries[0].rect.width, 240);
 
-        // Column 2: 3/8 * 960/4 = 720px, canvas_x = 4 + 240 + 4 = 248, screen_x = 248
+        // Column 2: 720px, canvas_x = 4 + 240 + 4 = 248, screen_x = 248
         assert_eq!(actual.entries[1].rect.x, 248);
         assert_eq!(actual.entries[1].rect.width, 720);
 
-        // Column 3: 4/8 * 960/4 = 960px, canvas_x = 248 + 720 + 4 = 972, screen_x = 972
+        // Column 3: 960px, canvas_x = 248 + 720 + 4 = 972, screen_x = 972
         assert_eq!(actual.entries[2].rect.x, 972);
         assert_eq!(actual.entries[2].rect.width, 960);
     }
@@ -455,10 +441,10 @@ mod tests {
             down: 0,
         };
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(4, WindowId(1)), Column::new(4, WindowId(2))],
+            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
             0,
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &zero_padding);
+        let actual = project(&layout, &test_monitor(), &zero_padding);
         let total_width: i32 = actual.entries.iter().map(|e| e.rect.width).sum();
         assert_eq!(
             total_width, 1920,
@@ -475,15 +461,15 @@ mod tests {
         // viewport at 1932: visible [1932, 3852)
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
-                Column::new(4, WindowId(4)),
-                Column::new(4, WindowId(5)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
+                Column::new(960, WindowId(4)),
+                Column::new(960, WindowId(5)),
             ],
             1932, // offset: start of col 2's slot
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         // Col 0 (canvas 4–964): 964 <= 1932 → parked left at -960
         assert_eq!(actual.entries[0].rect.x, -960);
@@ -507,13 +493,13 @@ mod tests {
         // viewport at 968 shows col 1 and col 2
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             968, // offset past col 0
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         // Col 0 is parked left — must not overlap monitor area
         let parked_entry = &actual.entries[0];
@@ -530,13 +516,13 @@ mod tests {
         // Slot model: col 0 at canvas_x=4, col 1 at canvas_x=968, col 2 at canvas_x=1932
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
             ],
             500, // non-zero offset
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         // Col 0: canvas_x=4, screen_x = 0 + (4 - 500) = -496
         assert_eq!(actual.entries[0].rect.x, -496);
@@ -552,10 +538,13 @@ mod tests {
     fn project_two_rows_equal_height() {
         // Positive: two windows in one column are always equal height
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(8, vec![WindowId(1), WindowId(2)])],
+            vec![Column::with_equal_rows(
+                1920,
+                vec![WindowId(1), WindowId(2)],
+            )],
             0,
         );
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 2);
         // Each row = 1080 / 2 = 540, window height = 540 - 2*4 = 532
@@ -565,9 +554,9 @@ mod tests {
 
     #[test]
     fn project_single_column_narrow_width() {
-        // Positive: 1 eighth column with column_width=960 → 240px wide
-        let layout = VirtualLayout::with_columns(vec![Column::new(1, WindowId(1))], 0);
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        // Positive: narrow 240px column
+        let layout = VirtualLayout::with_columns(vec![Column::new(240, WindowId(1))], 0);
+        let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 1);
         // Slot model: full col_width, no horizontal inset
@@ -578,44 +567,32 @@ mod tests {
     fn project_empty_layout_yields_empty_actual() {
         // Positive: empty virtual layout → no entries
         let layout = VirtualLayout::new();
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &test_padding());
+        let actual = project(&layout, &test_monitor(), &test_padding());
         assert!(actual.entries.is_empty());
-    }
-
-    #[test]
-    fn column_eighths_to_pixels_boundary_cases() {
-        // Positive: 1 eighth → 240px (with column_width=960)
-        assert_eq!(column_eighths_to_pixels(1, 960), 240);
-        // Positive: 4 eighths = column_width
-        assert_eq!(column_eighths_to_pixels(4, 960), 960);
-        // Positive: 8 eighths = 2 * column_width
-        assert_eq!(column_eighths_to_pixels(8, 960), 1920);
-        // Edge: zero column_width
-        assert_eq!(column_eighths_to_pixels(4, 0), 0);
     }
 
     #[test]
     fn canvas_width_single_column() {
         // Positive: single column → window_gap + col_width + window_gap
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
+        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
         // 4 + (1920 + 4) = 1928
-        assert_eq!(canvas_width(&layout, TEST_COLUMN_WIDTH, 4), 1928);
+        assert_eq!(canvas_width(&layout, 4), 1928);
     }
 
     #[test]
     fn canvas_width_five_columns() {
-        // Positive: 5 × 4/8 columns → 4 + 5*(960+4) = 4 + 4820 = 4824
+        // Positive: 5 × 960px columns → 4 + 5*(960+4) = 4 + 4820 = 4824
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(4, WindowId(1)),
-                Column::new(4, WindowId(2)),
-                Column::new(4, WindowId(3)),
-                Column::new(4, WindowId(4)),
-                Column::new(4, WindowId(5)),
+                Column::new(960, WindowId(1)),
+                Column::new(960, WindowId(2)),
+                Column::new(960, WindowId(3)),
+                Column::new(960, WindowId(4)),
+                Column::new(960, WindowId(5)),
             ],
             0,
         );
-        assert_eq!(canvas_width(&layout, TEST_COLUMN_WIDTH, 4), 4824);
+        assert_eq!(canvas_width(&layout, 4), 4824);
     }
 
     #[test]
@@ -626,8 +603,8 @@ mod tests {
             up: 10,
             down: 40,
         };
-        let layout = VirtualLayout::with_columns(vec![Column::new(8, WindowId(1))], 0);
-        let actual = project(&layout, &test_monitor(), TEST_COLUMN_WIDTH, &padding);
+        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
+        let actual = project(&layout, &test_monitor(), &padding);
 
         assert_eq!(actual.entries.len(), 1);
         let entry = &actual.entries[0];

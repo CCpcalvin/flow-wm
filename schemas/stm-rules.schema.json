@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "WindowRulesConfig",
-  "description": "Window classification configuration, loaded from `stm-rules.yml`.\n\nThis is the user-facing window rules file. Rules are evaluated top-to-bottom, first match wins. If no rule matches, `default_action` is used.\n\nLoaded from `%USERPROFILE%\\.config\\stm\\stm-rules.yml` (see [`config::dirs`](crate::config::dirs) for overrides). If the file doesn't exist, defaults to an empty rule list with `default_action: tile`.\n\n# Example\n\n```yaml default_action: tile rules: - match: exe: \"explorer.exe\" title_contains: \"Open\" action: ignore - match: class: \"Chrome_WidgetWin_1\" action: tile initial_width_eighths: 4 ```",
+  "description": "Window classification configuration, loaded from `stm-rules.yml`.\n\nThis is the user-facing window rules file. Rules are evaluated top-to-bottom, first match wins. If no rule matches, `default_action` is used.\n\nLoaded from `%USERPROFILE%\\.config\\stm\\stm-rules.yml` (see [`config::dirs`](crate::config::dirs) for overrides). If the file doesn't exist, defaults to an empty rule list with `default_action: tile`.\n\n# Example\n\n```yaml default_action: tile rules: - match: exe: \"explorer.exe\" title_contains: \"Open\" action: ignore - match: class: \"Chrome_WidgetWin_1\" action: tile initial_width_px: 960 ```",
   "type": "object",
   "properties": {
     "default_action": {
@@ -134,13 +134,13 @@
             }
           ]
         },
-        "initial_width_eighths": {
-          "description": "Optional initial width in eighths (1–8).",
+        "initial_width_px": {
+          "description": "Optional initial column width in pixels.",
           "type": [
             "integer",
             "null"
           ],
-          "format": "uint8",
+          "format": "uint32",
           "minimum": 0.0
         },
         "match": {

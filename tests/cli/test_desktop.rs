@@ -320,7 +320,7 @@ pub fn query_windows(pipe: &str) -> Result<serde_json::Value, String> {
 ///
 /// Returns the virtual layout structure — `viewport_offset`, `column_count`,
 /// `window_count`, and a `columns` array where each entry has `index`,
-/// `width_eighths`, and `rows` (the window IDs in column order). This is the
+/// `width_px`, and `rows` (the window IDs in column order). This is the
 /// most direct way to verify that a column swap changed the layout.
 pub fn query_layout_virtual(pipe: &str) -> Result<serde_json::Value, String> {
     use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};

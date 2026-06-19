@@ -58,7 +58,7 @@ impl ScrollTilingManager {
             // --- Column resize ---
             SocketMessage::ExpandColumn => self.dispatch_expand(),
             SocketMessage::ShrinkColumn => self.dispatch_shrink(),
-            SocketMessage::SetColumnWidth { eighths } => self.dispatch_set_column_width(*eighths),
+            SocketMessage::SetColumnWidth { width_px } => self.dispatch_set_column_width(*width_px),
 
             // --- Window state ---
             SocketMessage::ToggleFloat => unimplemented_command("toggle_float"),
@@ -236,22 +236,30 @@ impl ScrollTilingManager {
 
     /// Dispatch an explicit column width setting.
     ///
-    /// Converts the `eighths` value (1–8) to pixel width based on
-    /// the resolved `column_width` and passes it to the layout engine.
-    fn dispatch_set_column_width(&mut self, eighths: u8) -> SocketResponse {
-        if !(1..=8).contains(&eighths) {
+    /// The width is in pixels and is validated against the layout engine's
+    /// current bounds (`[min_column_width_px, abs_max_width]`) before being
+    /// delegated. This is the **free-form / drag-resize** path — the value is
+    /// applied directly and is not snapped to the expand/shrink slot ladder.
+    fn dispatch_set_column_width(&mut self, width_px: u32) -> SocketResponse {
+        let (min, max) = self.layout.column_width_bounds();
+        let target = width_px as i32;
+        if target < min {
             return SocketResponse::Error {
-                message: format!("eighths must be 1–8, got {eighths}"),
+                message: format!("width_px must be >= {min}, got {target}"),
             };
         }
-        let target_px = self.resolved_column_width as i32 * eighths as i32 / 4;
-        match self.layout.set_column_width(target_px) {
+        if target > max {
+            return SocketResponse::Error {
+                message: format!("width_px must be <= {max}, got {target}"),
+            };
+        }
+        match self.layout.set_column_width(target) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
-                message: "no focused window".into(),
+                message: "cannot set column width (no focused window or no-op)".into(),
             },
         }
     }

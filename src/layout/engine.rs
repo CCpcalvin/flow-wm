@@ -94,38 +94,61 @@ pub struct LayoutEngine {
     monitor: MonitorInfo,
     /// Configuration derived from `StmConfig`.
     config: MutationConfig,
-    /// Saved column width before monocle mode (per column index).
-    monocle_saved_width: Option<(usize, u8)>,
+    /// Saved column width before monocle mode (per column index), in pixels.
+    monocle_saved_width: Option<(usize, i32)>,
 }
 
 impl LayoutEngine {
     /// Create a new layout engine for the given monitor.
+    ///
+    /// `column_width` is the base column width in pixels (the `n = 0` rung of
+    /// the expand/shrink slot ladder). `min_column_width_px` is the lower
+    /// bound for free-form drag-resize. The slot-ladder derived values
+    /// (`max_n`, `abs_max_width`) are computed here from `column_width`, the
+    /// monitor width, and `window_gap`, then stored in the engine's
+    /// [`MutationConfig`] — every mutation reuses the same ladder.
+    ///
+    /// # Ladder derivation
+    ///
+    /// - `abs_max_width = monitor_width − 2*window_gap` (the monocle width and
+    ///   the two-step top of the expand ladder).
+    /// - `column_shift = column_width + window_gap` (one slot step).
+    /// - `max_n = floor((abs_max_width − column_width) / column_shift)` — how
+    ///   many full slot steps fit between the base width and `abs_max_width`.
+    ///   Clamped to `≥ 0` for degenerate configs (column wider than monitor).
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         monitor: MonitorInfo,
         column_width: u32,
-        default_column_width_eighths: u8,
         min_column_width_px: u32,
         padding: Padding,
         columns_per_screen: u32,
     ) -> Self {
+        let gap = padding.window_gap;
+        let cw = column_width as i32;
+        let monitor_w = monitor.work_area.width;
+        // abs_max_width = monitor_width − 2*gap (monocle width / ladder top).
+        let abs_max_width = monitor_w - 2 * gap;
+        // column_shift = column_width + window_gap — one slot step.
+        let shift = cw + gap;
+        // max_n: full slot steps between base width and abs_max_width.
+        let max_n: u32 = if shift > 0 && abs_max_width > cw {
+            ((abs_max_width - cw) / shift) as u32
+        } else {
+            0
+        };
+
         let virtual_layout = VirtualLayout::new();
         let config = MutationConfig {
-            monitor_width: monitor.work_area.width,
+            monitor_width: monitor_w,
             column_width,
-            default_column_width_eighths,
-            min_column_eighths: Self::compute_min_eighths(min_column_width_px, column_width),
-            max_column_eighths: Self::compute_max_eighths(monitor.work_area.width, column_width),
+            min_column_width_px,
+            max_n,
+            abs_max_width,
             padding,
             columns_per_screen,
         };
-        let actual = projection::project(
-            &virtual_layout,
-            &monitor,
-            config.column_width,
-            &config.padding,
-        );
+        let actual = projection::project(&virtual_layout, &monitor, &config.padding);
 
         Self {
             virtual_layout,
@@ -135,18 +158,6 @@ impl LayoutEngine {
             config,
             monocle_saved_width: None,
         }
-    }
-
-    /// Compute minimum column width in eighths from pixel config.
-    fn compute_min_eighths(min_column_width_px: u32, column_width: u32) -> u8 {
-        (min_column_width_px * 4)
-            .div_ceil(column_width)
-            .clamp(1, 255) as u8
-    }
-
-    /// Compute maximum column width in eighths from monitor and column width.
-    fn compute_max_eighths(monitor_width: i32, column_width: u32) -> u8 {
-        ((monitor_width as u64 * 4) / column_width as u64).clamp(1, 255) as u8
     }
 
     /// Get a reference to the current virtual layout.
@@ -187,12 +198,7 @@ impl LayoutEngine {
     /// layer decide which windows to animate by comparing each target rect
     /// against the window's real on-screen position.
     fn apply_mutation(&mut self, new_layout: VirtualLayout) -> AppliedLayout {
-        let new_actual = projection::project(
-            &new_layout,
-            &self.monitor,
-            self.config.column_width,
-            &self.config.padding,
-        );
+        let new_actual = projection::project(&new_layout, &self.monitor, &self.config.padding);
 
         let result = AppliedLayout {
             actual_layout: new_actual.clone(),
@@ -328,6 +334,21 @@ impl LayoutEngine {
         Some(self.apply_mutation(new_layout))
     }
 
+    /// Return the inclusive `[min, max]` bounds (in pixels) that an explicit
+    /// column width must satisfy.
+    ///
+    /// This is the free-form range accepted by [`set_column_width`](Self::set_column_width)
+    /// and the drag-resize primitive. IPC handlers use it to validate incoming
+    /// width values *before* dispatching, so an out-of-range request gets a
+    /// precise error message rather than being silently rejected by the engine.
+    #[must_use]
+    pub fn column_width_bounds(&self) -> (i32, i32) {
+        (
+            self.config.min_column_width_px as i32,
+            self.config.abs_max_width,
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Monocle toggle
     // -----------------------------------------------------------------------
@@ -344,7 +365,7 @@ impl LayoutEngine {
             }
         });
         let (new_layout, new_saved) =
-            mutations::toggle_monocle(&self.virtual_layout, focused, saved)?;
+            mutations::toggle_monocle(&self.virtual_layout, focused, saved, &self.config)?;
 
         if let Some(w) = new_saved {
             let col = self.virtual_layout.find_window(focused).map(|(c, _)| c)?;
@@ -560,7 +581,7 @@ mod tests {
     }
 
     fn engine_with_three_columns() -> LayoutEngine {
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -597,9 +618,9 @@ mod tests {
     fn engine_expand_column() {
         let mut engine = engine_with_three_columns();
         let diff = engine.expand_column().expect("expand");
-        // 960px (4 eighths) + column_shift(964) = 1924px → 8 eighths
-        assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
-        assert_eq!(diff.virtual_layout.columns[1].width_eighths, 4); // unchanged
+        // 960px (base) + column_shift(964) = 1924px → clamped to abs_max 1912px
+        assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
+        assert_eq!(diff.virtual_layout.columns[1].width_px, 960); // unchanged
     }
 
     #[test]
@@ -626,15 +647,15 @@ mod tests {
     fn engine_monocle_toggle() {
         let mut engine = engine_with_three_columns();
         let diff_on = engine.toggle_monocle().expect("monocle on");
-        assert_eq!(diff_on.virtual_layout.columns[0].width_eighths, 8);
+        assert_eq!(diff_on.virtual_layout.columns[0].width_px, 1912);
 
         let diff_off = engine.toggle_monocle().expect("monocle off");
-        assert_eq!(diff_off.virtual_layout.columns[0].width_eighths, 4);
+        assert_eq!(diff_off.virtual_layout.columns[0].width_px, 960);
     }
 
     #[test]
     fn engine_add_remove_roundtrip() {
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         assert_eq!(engine.virtual_layout().window_count(), 2);
@@ -653,7 +674,7 @@ mod tests {
     #[test]
     fn engine_full_lifecycle() {
         // Positive: empty → add 3 → mutate → remove all → verify state at each step
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
 
         // Step 1: Add windows
         let d1 = engine.add_window(WindowId(1));
@@ -678,9 +699,9 @@ mod tests {
         // Step 3: Mutate — expand column (independent, no compensation)
         engine.set_focus(WindowId(1));
         let d_expand = engine.expand_column().expect("expand");
-        // 960px + column_shift(964) → 8 eighths, other columns unchanged
-        assert_eq!(d_expand.virtual_layout.columns[1].width_eighths, 8);
-        assert_eq!(d_expand.virtual_layout.columns[0].width_eighths, 4);
+        // 960px + column_shift(964) = 1924 → clamped to abs_max 1912px, other columns unchanged
+        assert_eq!(d_expand.virtual_layout.columns[1].width_px, 1912);
+        assert_eq!(d_expand.virtual_layout.columns[0].width_px, 960);
 
         // Step 4: Remove windows one by one
         let _ = engine.remove_window(WindowId(1));
@@ -697,11 +718,11 @@ mod tests {
     #[test]
     fn engine_focus_triggers_viewport_scroll() {
         // Positive: focus into off-screen column triggers viewport scroll
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
-        engine.add_window(WindowId(4)); // 4 columns × 4/8 each = 2× viewport width
+        engine.add_window(WindowId(4)); // 4 columns × 960px each = 2× viewport width
         engine.set_focus(WindowId(1));
 
         // Focus right twice: col1→col2 (visible), col2→col3 (triggers scroll)
@@ -722,7 +743,7 @@ mod tests {
     #[test]
     fn engine_single_window_all_operations() {
         // Positive: single window — swap, expand/shrink return None appropriately
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
 
         // Swap column left → None (no column to left)
@@ -734,13 +755,14 @@ mod tests {
         // Swap column down → None (vertical direction invalid for column swap)
         assert!(engine.swap_column(Direction::Down).is_none());
 
-        // Expand/shrink — single column at 4 eighths (960px)
-        // Expand: 960 + column_shift(964) = 1924 → 8 eighths
+        // Expand/shrink — single column at base width (960px)
+        // Expand: 960 + column_shift(964) = 1924 → clamped to abs_max 1912px
         let diff = engine.expand_column().expect("expand single");
-        assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
-        // Shrink: 1920 - column_shift(964) = 956 → 4 eighths
+        assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
+        // Shrink: abs_max(1912) → slot_max(960px)
+
         let diff2 = engine.shrink_column().expect("shrink single");
-        assert_eq!(diff2.virtual_layout.columns[0].width_eighths, 4);
+        assert_eq!(diff2.virtual_layout.columns[0].width_px, 960);
 
         // Focus vertical — only one row
         assert!(engine.focus(Direction::Up).is_none());
@@ -748,13 +770,13 @@ mod tests {
 
         // Monocle still works (single column)
         let diff = engine.toggle_monocle().expect("monocle");
-        assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
+        assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
     }
 
     #[test]
     fn engine_empty_operations_return_none() {
         // Negative: all operations on empty engine return None or produce empty diffs
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
 
         assert!(engine.scroll_left().is_none());
         assert!(engine.scroll_right().is_none());
@@ -768,7 +790,7 @@ mod tests {
     #[test]
     fn engine_add_window_to_focused_column() {
         // Positive: add window as row to focused column
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         let diff = engine
             .add_window_to_focused_column(WindowId(2))
@@ -782,7 +804,7 @@ mod tests {
     #[test]
     fn engine_add_to_focused_column_no_focus_returns_none() {
         // Negative: no focus → can't add to focused column
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         assert!(engine.add_window_to_focused_column(WindowId(1)).is_none());
     }
 
@@ -791,7 +813,7 @@ mod tests {
     #[test]
     fn engine_insert_window_into_empty_layout() {
         // Positive: first window in empty layout → sole column, focused.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.insert_window(WindowId(1));
         assert_eq!(engine.virtual_layout().columns.len(), 1);
         assert_eq!(engine.focused(), Some(WindowId(1)));
@@ -844,7 +866,7 @@ mod tests {
     fn engine_insert_window_scrolls_when_new_column_offscreen() {
         // Positive: many columns, insert creates a column off-screen right →
         // viewport scrolls to reveal it.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -860,7 +882,7 @@ mod tests {
     fn engine_insert_window_after_remove_falls_back() {
         // Negative/edge: after removing the focused window, focus falls back
         // to the first column. Inserting then uses that focus as the anchor.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         // Remove focused (W2) → focus falls back to W1 (first column).
@@ -874,11 +896,11 @@ mod tests {
     #[test]
     fn engine_monocle_then_add_window() {
         // Positive: monocle on, add window (new column), toggle off on same column
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
 
         let d_on = engine.toggle_monocle().expect("monocle on");
-        assert_eq!(d_on.virtual_layout.columns[0].width_eighths, 8);
+        assert_eq!(d_on.virtual_layout.columns[0].width_px, 1912);
 
         // Add window → new column, focus moves to new window
         engine.add_window(WindowId(2));
@@ -887,17 +909,17 @@ mod tests {
         // Focus back to column 0 and toggle monocle off
         engine.set_focus(WindowId(1));
         let d_off = engine.toggle_monocle().expect("monocle off");
-        assert_eq!(d_off.virtual_layout.columns[0].width_eighths, 4);
+        assert_eq!(d_off.virtual_layout.columns[0].width_px, 960);
     }
 
     #[test]
     fn engine_expand_shrink_produces_pixel_diffs() {
         // Positive: expand → actual layout has different pixel sizes
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
 
-        // Focus WindowId(1) in column 0, expand (960 + column_shift(964) → 8 eighths)
+        // Focus WindowId(1) in column 0, expand (960 + column_shift(964) → abs_max 1912px)
         engine.set_focus(WindowId(1));
         let diff = engine.expand_column().expect("expand");
         // The layout must have entries (windows with new pixel positions)
@@ -905,14 +927,14 @@ mod tests {
             !diff.actual_layout.entries.is_empty(),
             "expand should produce layout entries"
         );
-        assert_eq!(diff.virtual_layout.columns[0].width_eighths, 8);
-        assert_eq!(diff.virtual_layout.columns[1].width_eighths, 4); // unchanged
+        assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
+        assert_eq!(diff.virtual_layout.columns[1].width_px, 960); // unchanged
     }
 
     #[test]
     fn engine_swap_shifts_camera_when_target_offscreen() {
         // Positive: swap with adjacent column that is off-screen shifts the camera
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -941,8 +963,8 @@ mod tests {
     #[test]
     fn engine_scroll_right_at_boundary() {
         // Negative: can't scroll past rightmost column
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
-        engine.add_window(WindowId(1)); // single 4/8 column
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
+        engine.add_window(WindowId(1)); // single 960px column
 
         assert!(engine.scroll_right().is_none());
     }
@@ -950,22 +972,22 @@ mod tests {
     #[test]
     fn engine_set_column_width() {
         // Positive: explicit column width setting
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
 
-        // Focus WindowId(1) in column 0, set width to 1440px → 6 eighths (independent)
+        // Focus WindowId(1) in column 0, set width to 1440px (free-form, independent)
         engine.set_focus(WindowId(1));
         let diff = engine.set_column_width(1440).expect("set width");
-        assert_eq!(diff.virtual_layout.columns[0].width_eighths, 6);
+        assert_eq!(diff.virtual_layout.columns[0].width_px, 1440);
         // Neighbor is unchanged (no compensation)
-        assert_eq!(diff.virtual_layout.columns[1].width_eighths, 4);
+        assert_eq!(diff.virtual_layout.columns[1].width_px, 960);
     }
 
     #[test]
     fn engine_remove_focused_window_focus_falls_back() {
         // Positive: removing a focused middle window falls back to the LEFT column.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -980,7 +1002,7 @@ mod tests {
     fn engine_remove_focused_leftmost_falls_to_right() {
         // Removing the focused leftmost window has no left column, so focus
         // falls back to the RIGHT column's window.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -993,7 +1015,7 @@ mod tests {
     #[test]
     fn engine_remove_focused_rightmost_falls_to_left() {
         // Removing the focused rightmost window falls back to the LEFT column.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1006,7 +1028,7 @@ mod tests {
     #[test]
     fn engine_remove_only_window_clears_focus() {
         // Removing the only window leaves focus as None.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
 
         let _ = engine.remove_window(WindowId(1));
@@ -1017,7 +1039,7 @@ mod tests {
     #[test]
     fn engine_remove_nonfocused_keeps_focus() {
         // Removing a non-focused window must not change focus.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1052,7 +1074,7 @@ mod tests {
     fn engine_remove_from_multirow_column_preserves_column() {
         // Positive: removing a window from a multi-row column removes only the
         // row — the column persists with the remaining window.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         // Layout: [W1, W2] in one column. Focus on W2.
@@ -1078,7 +1100,7 @@ mod tests {
         // The viewport should still show the focused window correctly.
         // Layout: [W1][W2][W3], focus W3 (col 2). Remove W1 (col 0).
         // After removal: [W2][W3], W3 is now at col 1.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1102,7 +1124,7 @@ mod tests {
         // visible, so viewport doesn't scroll. Then test a case where successor
         // IS off-screen: focus col 3, scroll viewport so col 0 is visible only,
         // then remove col 3 → successor col 2 is off-screen → viewport adjusts.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1150,7 +1172,7 @@ mod tests {
                 height: 1080,
             },
         };
-        let mut engine = LayoutEngine::new(monitor, 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(monitor, 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1169,11 +1191,11 @@ mod tests {
     fn engine_focus_returns_some_diff_when_viewport_scrolls() {
         // Positive: focus into off-screen column → diff is Some with non-empty moves.
         // This is the core Fix 1 behavior: the caller receives the AppliedLayout to animate.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
-        engine.add_window(WindowId(4)); // 4 columns × 4/8 each = 2× viewport width
+        engine.add_window(WindowId(4)); // 4 columns × 960px each = 2× viewport width
         engine.set_focus(WindowId(1));
 
         // Focus right twice: first stays visible, second triggers scroll
@@ -1198,7 +1220,7 @@ mod tests {
     fn engine_focus_vertical_never_produces_diff() {
         // Positive: vertical focus (Up/Down) never scrolls viewport, so diff is always None.
         // Even when the window has rows, vertical focus just changes the focused WindowId.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(1));
@@ -1214,10 +1236,10 @@ mod tests {
     #[test]
     fn engine_focus_no_change_in_layout_when_visible() {
         // Positive: focus within fully visible area → no viewport scroll needed.
-        // With a single full-width column (8/8), focus has nowhere to go horizontally,
+        // With a single multi-row column, focus has nowhere to go horizontally,
         // but vertical focus doesn't trigger scroll. This test verifies vertical focus
         // doesn't change the viewport offset.
-        let mut engine = LayoutEngine::new(test_monitor(), 1920, 8, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(1));
@@ -1233,7 +1255,7 @@ mod tests {
     #[test]
     fn engine_swap_window_cross_column() {
         // Positive: engine swap_window moves individual windows between columns
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(5));
         engine.add_window(WindowId(2));
@@ -1252,7 +1274,7 @@ mod tests {
     #[test]
     fn engine_swap_window_same_column_vertical() {
         // Positive: engine swap_window Up/Down within column
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(2));
@@ -1268,11 +1290,11 @@ mod tests {
     #[test]
     fn engine_swap_window_none_when_no_focus() {
         // Negative: engine swap_window without focus → None
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         // Focus is already on WindowId(1) from add_window. Clear it.
         // We can't clear focus directly, so test with empty engine instead.
-        let mut empty_engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut empty_engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         assert!(empty_engine.swap_window(Direction::Right).is_none());
         assert!(empty_engine.swap_window(Direction::Up).is_none());
         assert!(empty_engine.swap_window(Direction::Down).is_none());
@@ -1281,7 +1303,7 @@ mod tests {
     #[test]
     fn engine_swap_window_none_at_boundary() {
         // Negative: engine swap_window at layout boundary → None
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
@@ -1296,7 +1318,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_empty() {
         // Positive: empty vec → empty layout, no focus
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         let diff = engine.initialize_windows(vec![], None);
         assert!(diff.virtual_layout.columns.is_empty());
         assert!(engine.focused().is_none());
@@ -1305,7 +1327,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_single() {
         // Positive: single window → single column, focused
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         let diff = engine.initialize_windows(vec![WindowId(1)], None);
         assert_eq!(diff.virtual_layout.columns.len(), 1);
         assert_eq!(engine.focused(), Some(WindowId(1)));
@@ -1316,7 +1338,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_multiple() {
         // Positive: multiple windows → multiple columns, focus on last
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         let diff = engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], None);
         assert_eq!(diff.virtual_layout.columns.len(), 3);
         assert_eq!(diff.virtual_layout.columns[0].rows[0], WindowId(10));
@@ -1331,7 +1353,7 @@ mod tests {
         // NOT the last window. This tests the viewport-init fix: the engine
         // now respects the focus column from the foreground window lookup
         // instead of blindly picking the last column.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         let diff =
             engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], Some(0));
         assert_eq!(diff.virtual_layout.columns.len(), 3);
@@ -1345,7 +1367,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_focus_middle_column() {
         // Positive: focus_col_idx=Some(1) → focused should be the second window.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], Some(1));
         assert_eq!(
             engine.focused(),
@@ -1357,7 +1379,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_none_focus_falls_back_to_last() {
         // Positive: focus_col_idx=None → fallback to last window (existing behavior).
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], None);
         assert_eq!(
             engine.focused(),
@@ -1371,7 +1393,7 @@ mod tests {
         // Positive: 4 cols, columns_per_screen=2 → scroll mode.
         // Focus on column 2 → viewport_offset should be non-zero,
         // and focused should be the window at column 2.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 2);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 2);
         let diff = engine.initialize_windows(
             vec![WindowId(1), WindowId(2), WindowId(3), WindowId(4)],
             Some(2),
@@ -1501,7 +1523,7 @@ mod tests {
         // actual_layout.entries. The projection parks them off-screen with
         // deterministic rects — they must not be omitted.
         // Use 5 columns: only ~2 visible at a time on a 1920px monitor.
-        let mut engine = LayoutEngine::new(test_monitor(), 960, 4, 320, test_padding(), 4);
+        let mut engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1545,5 +1567,39 @@ mod tests {
             total_windows,
             "Scroll must return ALL windows in actual_layout.entries (visible + parked)"
         );
+    }
+
+    // --- column_width_bounds (Area 10) ---
+
+    #[test]
+    fn engine_column_width_bounds_returns_config_range() {
+        // Area 10: column_width_bounds() returns (min_column_width_px, abs_max_width).
+        // test_monitor: 1920×1080, test_padding: gap=4.
+        // Engine created with min_column_width_px=320.
+        // abs_max = 1920 − 2×4 = 1912.
+        let engine = LayoutEngine::new(test_monitor(), 960, 320, test_padding(), 4);
+        let (min, max) = engine.column_width_bounds();
+        assert_eq!(min, 320, "min should equal min_column_width_px");
+        assert_eq!(max, 1912, "max should equal monitor_width − 2×gap");
+    }
+
+    #[test]
+    fn engine_column_width_bounds_with_different_config() {
+        // Area 10: verify bounds change with different min_column_width_px and gap.
+        // gap=8 → abs_max = 1920 − 2×8 = 1904.
+        let engine = LayoutEngine::new(
+            test_monitor(),
+            960,
+            500, // min_column_width_px
+            Padding {
+                window_gap: 8,
+                up: 0,
+                down: 0,
+            },
+            4,
+        );
+        let (min, max) = engine.column_width_bounds();
+        assert_eq!(min, 500);
+        assert_eq!(max, 1904);
     }
 }

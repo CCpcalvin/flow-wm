@@ -470,7 +470,7 @@ pub fn initialize_windows(
     config: &MutationConfig,
 ) -> VirtualLayout {
     let columns: Vec<Column> = ids.iter()
-        .map(|&id| Column::new(config.default_column_width_eighths, id))
+        .map(|&id| Column::new(config.column_width as i32, id))
         .collect();
 
     VirtualLayout {
@@ -874,9 +874,9 @@ impl ScrollTilingManager {
         let mut layout = LayoutEngine::new(
             monitor,
             layout_config.column_width,
-            layout_config.default_column_width_eighths,
             layout_config.min_column_width_px,
             layout_config.padding,
+            layout_config.columns_per_screen,
         );
 
         // 3. Batch-initialize layout from existing tiling windows.

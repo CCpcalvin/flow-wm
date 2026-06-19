@@ -94,7 +94,6 @@ impl ScrollTilingManager {
         let mut layout = LayoutEngine::new(
             monitor,
             layout_config.column_width,
-            layout_config.default_column_width_eighths,
             layout_config.min_column_width_px,
             layout_config.padding,
             app_config.columns_per_screen,
@@ -179,7 +178,6 @@ impl ScrollTilingManager {
             floating: FloatingManager::new(),
             server,
             config: app_config,
-            resolved_column_width: layout_config.column_width,
             config_dir,
             hook_receiver,
             _hook_handle,

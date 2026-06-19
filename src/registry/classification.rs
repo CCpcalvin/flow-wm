@@ -618,7 +618,7 @@ mod tests {
         WindowRule {
             match_: match_rule,
             action,
-            initial_width_eighths: None,
+            initial_width_px: None,
             override_persist: false,
         }
     }

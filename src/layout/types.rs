@@ -2,22 +2,26 @@
 //!
 //! Core data types for the 2-layer layout pipeline. The key types are:
 //!
-//! - [`Column`] — a vertical container of windows with proportional width
-//! - [`VirtualLayout`] — the infinite horizontal canvas (logical, no pixels)
+//! - [`Column`] — a vertical container of windows with a pixel width
+//! - [`VirtualLayout`] — the infinite horizontal canvas (widths in pixels,
+//!   no absolute x-positions stored)
 //! - [`ActualLayout`] — projected screen coordinates (pixel rects)
 //! - [`AppliedLayout`] — the result of a mutation (new virtual + actual layouts)
+//!
+//! # Width representation
+//!
+//! Column widths are stored directly in **pixels** (`width_px`). Earlier
+//! revisions stored widths as eighths of the base `column_width` to stay
+//! resolution-independent, but that quantization discarded the inter-column
+//! `window_gap` during expand/shrink (the gap was smaller than one eighth and
+//! rounded away), so a single expand step moved by exactly `column_width`
+//! instead of `column_width + window_gap`. Pixel widths make the gap
+//! observable and let expand/shrink advance by the true
+//! `column_shift = column_width + window_gap`. The cost — dependence on the
+//! configured `column_width` and monitor resolution — is accepted; the
+//! `window_gap` is already pixel-based everywhere else.
 
 use crate::common::{Rect, WindowId};
-
-/// Proportional column width in eighths of the default column width.
-///
-/// Valid range: 1–8. A value of 4 equals `column_width` pixels;
-/// 8 equals `2 * column_width`. See [`super::projection`] for the conversion function.
-///
-/// This is intentionally **not** pixel-based — it keeps the virtual layout
-/// resolution-independent. Pixel conversion happens only during projection.
-#[doc(alias = "width")]
-pub type WidthEighths = u8;
 
 /// A column on the virtual canvas containing one or more stacked windows.
 ///
@@ -41,43 +45,58 @@ pub type WidthEighths = u8;
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Column {
-    /// Proportional width (1–8 eighths of column width base).
-    pub width_eighths: WidthEighths,
+    /// Pixel width of this column on the virtual canvas (`> 0`).
+    ///
+    /// Real bounds (`[min_column_width_px, abs_max_width]`) are enforced at
+    /// the mutation sites via [`MutationConfig`](super::mutations::MutationConfig),
+    /// not here — the column type is config-agnostic by design (it lives in
+    /// the pure layout layer). This field only carries the structural
+    /// invariant `width_px > 0` (see [`Column::is_valid_width`]).
+    ///
+    /// Expand/shrink snap this onto a `column_shift`-aligned slot ladder
+    /// (`column_shift = column_width + window_gap`); free-form widths arise
+    /// from drag-resize and from `viewport_offset` adjustments.
+    pub width_px: i32,
     /// Window IDs ordered top-to-bottom within this column.
     pub rows: Vec<WindowId>,
 }
 
 impl Column {
-    /// Create a new column with a single window and the given width.
+    /// Create a new column with a single window and the given pixel width.
+    ///
+    /// `width_px` is taken as-is; mutation-layer bounds (min/abs_max) are not
+    /// checked here — see [`Column::is_valid_width`] for the structural check.
     #[must_use]
-    pub fn new(width_eighths: WidthEighths, window: WindowId) -> Self {
+    pub fn new(width_px: i32, window: WindowId) -> Self {
         Self {
-            width_eighths,
+            width_px,
             rows: vec![window],
         }
     }
 
     /// Create a column with multiple equally-sized rows.
     #[must_use]
-    pub fn with_equal_rows(width_eighths: WidthEighths, rows: Vec<WindowId>) -> Self {
-        Self {
-            width_eighths,
-            rows,
-        }
+    pub fn with_equal_rows(width_px: i32, rows: Vec<WindowId>) -> Self {
+        Self { width_px, rows }
     }
 
-    /// Validate that width is within bounds (1–8).
+    /// Structural validity check: a column must have a strictly positive width.
+    ///
+    /// Config-dependent bounds (`min_column_width_px` / `abs_max_width`) are
+    /// enforced at the mutation sites, not here, because this type is config-
+    /// agnostic. This method only guards against the degenerate `width_px <= 0`
+    /// invariant.
     #[must_use]
     pub fn is_valid_width(&self) -> bool {
-        (1..=8).contains(&self.width_eighths)
+        self.width_px > 0
     }
 }
 
 /// The complete virtual layout — all tiling columns on the infinite horizontal canvas.
 ///
 /// This is the "source of truth" for the layout engine. It describes **what exists**
-/// (columns, windows, their proportional widths) and **where the camera is**
-/// (`viewport_offset`), but contains no pixel coordinates for individual windows.
+/// (columns, windows, their pixel widths) and **where the camera is**
+/// (`viewport_offset`), but contains no absolute x-positions for individual windows.
 ///
 /// # Camera model
 ///
@@ -298,7 +317,7 @@ mod tests {
         let id_a = WindowId(1);
         let id_b = WindowId(2);
         let layout =
-            VirtualLayout::with_columns(vec![Column::new(4, id_a), Column::new(4, id_b)], 0);
+            VirtualLayout::with_columns(vec![Column::new(960, id_a), Column::new(960, id_b)], 0);
         assert_eq!(layout.find_window(id_a), Some((0, 0)));
         assert_eq!(layout.find_window(id_b), Some((1, 0)));
         assert_eq!(layout.find_window(WindowId(99)), None);
@@ -308,8 +327,8 @@ mod tests {
     fn virtual_layout_window_count() {
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(4, vec![WindowId(1), WindowId(2)]),
-                Column::new(4, WindowId(3)),
+                Column::with_equal_rows(960, vec![WindowId(1), WindowId(2)]),
+                Column::new(960, WindowId(3)),
             ],
             0,
         );
@@ -318,9 +337,11 @@ mod tests {
 
     #[test]
     fn column_valid_width() {
+        // Structural check only: strictly positive. Config-dependent min/max
+        // bounds are enforced at the mutation sites.
         assert!(Column::new(1, WindowId(1)).is_valid_width());
-        assert!(Column::new(8, WindowId(1)).is_valid_width());
+        assert!(Column::new(960, WindowId(1)).is_valid_width());
         assert!(!Column::new(0, WindowId(1)).is_valid_width());
-        assert!(!Column::new(9, WindowId(1)).is_valid_width());
+        assert!(!Column::new(-1, WindowId(1)).is_valid_width());
     }
 }

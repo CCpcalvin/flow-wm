@@ -164,7 +164,7 @@ action = "float"
 [[rules]]
 match = { class = "Chrome_WidgetWin_1" }
 action = "tile"
-initial_width_eighths = 4
+initial_width_px = 960
 ```
 
 ### CLI Config Validation
@@ -191,7 +191,7 @@ Currently persisted:
 | Key | Type | Description |
 |---|---|---|
 | `preferred_state` | `tile \| float` | Set when user explicitly toggles via `toggle_float` |
-| `preferred_width_eighths` | `u8` | Set when user explicitly resizes a column |
+| `preferred_width_px` | `Option<u32>` | Set when user explicitly resizes a column (**not yet implemented** — width persistence is aspirational; no persistence module currently exists) |
 | `last_natural_size` | `Size` | Last size used when the window was unmanaged or floating |
 
 ### Precedence
@@ -215,12 +215,12 @@ If the user pressed `Super+Space` to float VS Code yesterday, the next time VS C
     {
       "exe": "code.exe",
       "preferred_state": "float",
-      "preferred_width_eighths": null,
+      "preferred_width_px": null,
       "last_natural_size": { "w": 1200, "h": 900 }
     },
     {
       "exe": "firefox.exe",
-      "preferred_width_eighths": 5
+      "preferred_width_px": 1536
     }
   ]
 }

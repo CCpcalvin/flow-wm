@@ -263,9 +263,13 @@ pub struct WindowRule {
     pub match_: MatchRule,
     /// Action to take when matched.
     pub action: WindowAction,
-    /// Optional initial width in eighths (1–8).
+    /// Optional initial column width in pixels.
+    ///
+    /// When set, a window matching this rule is created at this width instead
+    /// of the default `column_width`. The value must fall within the engine's
+    /// current bounds (`[min_column_width_px, abs_max_width]`) at apply time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub initial_width_eighths: Option<u8>,
+    pub initial_width_px: Option<u32>,
     /// If true, this rule overrides per-app learned state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub override_persist: bool,
@@ -390,7 +394,7 @@ pub enum WindowAction {
 /// [[rules]]
 /// match = { class = "Chrome_WidgetWin_1" }
 /// action = "tile"
-/// initial_width_eighths = 4
+/// initial_width_px = 960
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WindowRulesConfig {
@@ -893,13 +897,13 @@ action = "ignore"
 [[rules]]
 match = { class = "Chrome_WidgetWin_1" }
 action = "tile"
-initial_width_eighths = 4
+initial_width_px = 960
 "#;
         let config: WindowRulesConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.default_action, WindowAction::Float);
         assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].action, WindowAction::Ignore);
-        assert_eq!(config.rules[1].initial_width_eighths, Some(4));
+        assert_eq!(config.rules[1].initial_width_px, Some(960));
     }
 
     /// Positive: TOML with only `default_action` parses correctly (rules defaults to empty).
@@ -939,7 +943,7 @@ initial_width_eighths = 4
                     process_path_regex: Some(".*\\\\Google\\\\Chrome\\\\.*".into()),
                 },
                 action: WindowAction::Float,
-                initial_width_eighths: None,
+                initial_width_px: None,
                 override_persist: false,
             }],
         };
