@@ -33,7 +33,7 @@ use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
@@ -44,8 +44,9 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, IsZoomed, SM_CXSCREEN, SM_CYSCREEN, SetForegroundWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN,
+    SetForegroundWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -480,6 +481,82 @@ pub fn set_foreground_window(hwnd_val: isize) -> bool {
     let _ = unsafe { AttachThreadInput(our_thread_id, foreground_thread_id, false) };
 
     success
+}
+
+/// Politely ask a window to close itself by posting `WM_CLOSE` to it.
+///
+/// This is the Win32 "gentle close" path: [`PostMessageW`] places a
+/// [`WM_CLOSE`] message in the window's message queue without waiting for it
+/// to be processed (fire-and-forget from the caller's perspective). The
+/// owning application then receives `WM_CLOSE` and decides how to respond —
+/// most apps run their normal shutdown logic: prompt to save unsaved work,
+/// release resources, destroy the window, and so on.
+///
+/// # Design Decision: `PostMessageW` + `WM_CLOSE` (not `DestroyWindow`)
+///
+/// We deliberately use the *polite* close instead of `DestroyWindow`:
+///
+/// - **`WM_CLOSE`** gives the application agency. Editors like VS Code or
+///   Word can show their "save changes?" dialog; background apps can
+///   minimise to the tray instead of exiting; an app mid-operation can
+///   refuse and stay open. This is exactly the message Windows synthesises
+///   when the user clicks the window's red ✕ button.
+/// - **`DestroyWindow`** would tear the window down unconditionally. That
+///   skips the app's shutdown logic, loses unsaved data, and can leave the
+///   owning process half-cleaned-up. It is the right tool for an app that
+///   ignores `WM_CLOSE`, but not the sensible default.
+///
+/// # Why `PostMessageW` Rather Than `SendMessageW`?
+///
+/// [`SendMessageW`](windows::Win32::UI::WindowsAndMessaging::SendMessageW)
+/// would block the calling (IPC) thread until the target window's thread
+/// processes the message. A hung or modal application could stall the
+/// daemon's entire IPC loop. [`PostMessageW`] returns immediately, keeping
+/// the daemon responsive regardless of the target app's state.
+///
+/// # Lifecycle: Cleanup Is Asynchronous
+///
+/// This function returns as soon as the message is *queued*; it does **not**
+/// wait for the window to actually disappear. When the application eventually
+/// destroys the window in response to `WM_CLOSE`, Win32 fires
+/// `EVENT_OBJECT_DESTROY`, which stm's WinEvent hook turns into a
+/// [`Destroyed`](crate::registry::hooks::HookEvent::Destroyed) event. The
+/// daemon's event loop then removes the window from the registry and the
+/// layout engine automatically (and animates the gap closing). Callers must
+/// therefore **not** mutate the layout themselves after calling this — the
+/// normal event pipeline handles it.
+///
+/// # Arguments
+///
+/// * `hwnd_val` — the window handle as `isize`, matching the project's
+///   cross-thread HWND convention (see [`set_foreground_window`]); converted
+///   back to [`HWND`] at the Win32 boundary.
+///
+/// # Returns
+///
+/// `true` if the message was successfully queued, `false` if `PostMessageW`
+/// failed (e.g. the window was destroyed between the focus query and this
+/// call). A `true` result only means the message was queued — **not** that
+/// the window has closed.
+///
+/// # Example
+///
+/// ```no_run
+/// use scrolling_tiling_manager::registry::win32::close_window;
+/// // Ask the currently focused window to close (gentle, like clicking ✕).
+/// let queued = close_window(0x000C_1234);
+/// if queued {
+///     println!("close requested");
+/// }
+/// ```
+#[must_use]
+pub fn close_window(hwnd_val: isize) -> bool {
+    let target_hwnd = HWND(hwnd_val as *mut _);
+    // WM_CLOSE carries no payload, so WPARAM/LPARAM are zeroed. PostMessageW
+    // takes `Option<HWND>` (None would post to the calling thread's own
+    // queue); we always target a specific window, hence `Some(...)`.
+    let queued = unsafe { PostMessageW(Some(target_hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    queued.is_ok()
 }
 
 /// Returns `true` if the window would appear in the Alt+Tab switcher.
@@ -981,6 +1058,31 @@ mod tests {
     fn set_foreground_window_has_bool_return_type() {
         let fn_ptr: fn(isize) -> bool = set_foreground_window;
         let _ = fn_ptr; // Ensure the function pointer is not null (compilation check).
+    }
+
+    // --- close_window tests ---
+
+    /// Positive: verify that `close_window` has the `fn(isize) -> bool`
+    /// signature, mirroring [`set_foreground_window`].
+    ///
+    /// We cannot actually close a real window inside a unit test (it would
+    /// need a live, owned window on an interactive desktop), so this is a
+    /// compile-time signature check.
+    #[test]
+    fn close_window_has_bool_return_type() {
+        let fn_ptr: fn(isize) -> bool = close_window;
+        let _ = fn_ptr; // Compile-time signature check.
+    }
+
+    /// Positive: `WM_CLOSE` is the well-known message id (0x0010) and the
+    /// `WPARAM` / `LPARAM` payloads `close_window` passes construct from
+    /// integers. Asserting the constant value guards against a future
+    /// import resolving to a different symbol.
+    #[test]
+    fn win32_close_primitives_are_usable() {
+        assert_eq!(WM_CLOSE, 0x0010);
+        let _w = WPARAM(0);
+        let _l = LPARAM(0);
     }
 
     /// Positive: verify that the function accepts an isize (hwnd).
