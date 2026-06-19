@@ -71,11 +71,6 @@ impl AnimationBatch {
         (elapsed.as_secs_f64() / self.duration.as_secs_f64()).min(1.0)
     }
 
-    /// Returns `true` when [`Self::progress`] has reached `1.0`.
-    pub fn is_complete(&self) -> bool {
-        self.progress() >= 1.0
-    }
-
     /// Compute the interpolated [`Rect`] for a single tween at normalised time `t`.
     ///
     /// Applies easing independently to position and size channels:
@@ -181,18 +176,64 @@ mod tests {
         assert_eq!(batch.progress(), 1.0);
     }
 
-    // --- is_complete ---
-
     #[test]
-    fn is_complete_false_at_start() {
-        let batch = make_batch(10_000);
-        assert!(!batch.is_complete());
+    fn progress_clamps_to_exactly_one_after_real_duration() {
+        // A non-zero duration exercises the `.min(1.0)` clamp rather than the
+        // `duration.is_zero()` short-circuit. After enough wall-clock time the
+        // animator must observe progress() == *exactly* 1.0, because its
+        // completion check is `t >= 1.0` and the batch is only retired on the
+        // frame applied at that exact value (see animator.rs `run_worker`).
+        let batch = make_batch(5);
+        std::thread::sleep(Duration::from_millis(20));
+        let p = batch.progress();
+        assert!(
+            (p - 1.0).abs() < f64::EPSILON,
+            "progress should clamp to exactly 1.0, got {p}"
+        );
     }
 
+    /// Locks down the load-bearing upper-bound invariant: `progress()` must
+    /// **never** exceed `1.0`, even when wall-clock elapsed time is vastly
+    /// larger than the batch duration.
+    ///
+    /// This invariant is what makes `t >= 1.0` a *precise* and *safe*
+    /// completion signal in `run_worker` (animator.rs). If `progress()` could
+    /// exceed `1.0`, then `t >= 1.0` would be true on a frame whose
+    /// interpolation happened at `t > 1.0` — potentially past the target rect
+    /// if easing curves overshoot. The `.min(1.0)` clamp prevents this.
+    ///
+    /// Uses a 1 ms duration with a 50 ms sleep (50× overshoot) to stress the
+    /// ratio `elapsed / duration` and confirm the clamp holds regardless of
+    /// how much time passes.
     #[test]
-    fn is_complete_true_for_zero_duration() {
+    fn progress_never_exceeds_one_even_well_past_duration() {
+        let batch = make_batch(1); // 1 ms duration — tiny, high ratio after sleep
+        std::thread::sleep(Duration::from_millis(50)); // 50× past duration
+        let p = batch.progress();
+        assert!(
+            p <= 1.0,
+            "progress must never exceed 1.0; got {p} \
+             (this breaks the t >= 1.0 completion invariant in run_worker)"
+        );
+        assert!(
+            (p - 1.0).abs() < f64::EPSILON,
+            "progress should be exactly 1.0 when well past duration, got {p}"
+        );
+    }
+
+    /// Verifies that the `duration.is_zero()` short-circuit path in `progress()`
+    /// returns exactly `1.0` on **every** call, not just the first. Because
+    /// the short-circuit ignores `start_time.elapsed()` entirely, repeated
+    /// calls should all return `1.0` regardless of how much wall-clock time
+    /// has elapsed since construction.
+    #[test]
+    fn progress_is_always_one_for_zero_duration() {
         let batch = make_batch(0);
-        assert!(batch.is_complete());
+        // First call immediately.
+        assert_eq!(batch.progress(), 1.0);
+        // Second call after some wall-clock time — still 1.0.
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(batch.progress(), 1.0);
     }
 
     // --- interpolated_rect ---

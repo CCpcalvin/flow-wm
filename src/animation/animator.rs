@@ -255,7 +255,18 @@ fn run_worker(
                 log::warn!("apply_batch error at t={t:.3}: {e}");
             }
 
-            if active.batch.is_complete() {
+            // Use the same clamped `t` we just applied — NOT a fresh
+            // `is_complete()` / `progress()` re-read. The `apply_batch` call
+            // above (SetWindowPos round-trip) consumes wall-clock time, so a
+            // second progress() sample can tick past 1.0 *while this frame was
+            // interpolated at `t < 1.0`*. That would clear the batch without
+            // ever applying the precise t = 1.0 frame, leaving windows a few
+            // pixels short of their target geometry (the "resizing column
+            // width comes out wrong" bug). Since `progress()` already clamps
+            // to 1.0, gating completion on this same `t` guarantees the batch
+            // is only cleared on the frame that was applied at exactly the
+            // target rect.
+            if t >= 1.0 {
                 // Animation complete — clear the active batch.
                 log::trace!("animation complete: batch finished at t={t:.3}");
                 state.active = None;
