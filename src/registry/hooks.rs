@@ -1,39 +1,26 @@
 //! WinEvent hook setup for window lifecycle tracking.
 //!
-//! This module registers Win32 event hooks via [`SetWinEventHook`] on a
-//! dedicated background thread. Events are forwarded to the main thread
-//! through an [`mpsc`] channel and processed by
+//! Registers Win32 event hooks via [`SetWinEventHook`] on a dedicated background
+//! thread. Events are forwarded to the main thread through an [`mpsc`] channel
+//! and processed by
 //! [`WindowRegistry::process_pending_events`](super::WindowRegistry::process_pending_events).
 //!
-//! # Why a Background Thread?
+//! # Why a background thread?
 //!
-//! `SetWinEventHook` with `WINEVENT_OUTOFCONTEXT` requires the calling thread
-//! to run a Windows message loop (`GetMessageW`). This is incompatible with
-//! the IPC thread's named-pipe message loop. By running the hook on its own
-//! thread, we isolate the two message loops and avoid conflicts.
+//! `SetWinEventHook` with `WINEVENT_OUTOFCONTEXT` requires the calling thread to
+//! run a Windows message loop (`GetMessageW`), which is incompatible with the IPC
+//! thread's named-pipe message loop. Running the hook on its own thread isolates
+//! the two message loops.
 //!
-//! # Event Flow
+//! # Threading model
 //!
-//! ```text
-//! Windows OS                    Hook Thread                   IPC Thread
-//! ┌──────────┐    callback    ┌──────────────┐   send()    ┌────────────────┐
-//! │ SetWin-  │──────────────►│ hook_callback │────────────►│ process_pending │
-//! │ EventHook│               │              │             │ _events()       │
-//! └──────────┘               └──────────────┘             │ try_recv()      │
-//!                                                          └────────────────┘
-//! ```
+//! There is **no** `Arc<Mutex<Registry>>`. The IPC thread owns the registry
+//! directly; the hook thread runs `SetWinEventHook` ×N and a `GetMessageW` loop,
+//! and the callback only calls `sender.send(HookEvent)` — it never touches any
+//! STM field. The IPC thread drains the channel via `receiver.try_recv()` and
+//! applies all state transitions under `&mut self`.
 //!
-//! # Threading Model
-//!
-//! ```text
-//! Main Thread (IPC):                Hook Thread:
-//!   owns Arc<Mutex<Registry>>         SetWinEventHook ×4
-//!   process_pending_events()          GetMessageW loop
-//!       ↑ receiver.try_recv()             ↓ callback
-//!       │                           sender.send(HookEvent)
-//! ```
-//!
-//! # Hook Registration
+//! # Hook registration
 //!
 //! Six hooks are registered. Four as event ranges and two as single-event
 //! hooks (so the ultra-noisy `EVENT_OBJECT_LOCATIONCHANGE`, which sits between
@@ -51,22 +38,20 @@
 //!
 //! ## Recovery hooks (STATECHANGE + NAMECHANGE)
 //!
-//! The last two hooks exist to recover windows that `EVENT_OBJECT_CREATE`
-//! misses. `CREATE` fires very early in the Win32 lifecycle — before a window
-//! is visible, titled, or has finalized its styles. stm's registration gate
-//! (visible + titled) therefore drops some windows that *would* otherwise tile:
+//! The last two hooks recover windows that `EVENT_OBJECT_CREATE` misses. `CREATE`
+//! fires very early in the Win32 lifecycle — before a window is visible, titled,
+//! or has finalized its styles. stm's registration gate (visible + titled)
+//! therefore drops some windows that *would* otherwise tile:
 //!
-//! - **Late title (NAMECHANGE recovery)**: apps like Windows Terminal set
-//!   their title asynchronously, often more than 500 ms after creation. By the
-//!   time the title arrives, the `CREATE` retry budget is exhausted. The
-//!   `NAMECHANGE` hook lets stm re-attempt registration when the title finally
-//!   lands — but only for windows not already tracked, to avoid re-classifying
-//!   every window on every title change.
-//!
+//! - **Late title (NAMECHANGE recovery)**: apps like Windows Terminal set their
+//!   title asynchronously, often more than 500 ms after creation. By the time the
+//!   title arrives, the `CREATE` retry budget is exhausted. The `NAMECHANGE` hook
+//!   re-attempts registration when the title lands — but only for windows not
+//!   already tracked.
 //! - **Maximized at launch (STATECHANGE recovery)**: a window that starts
-//!   maximized is classified `Ignored(Maximized)`. The `STATECHANGE` hook lets
-//!   stm re-evaluate it once the user restores it (`WS_MAXIMIZE` flips off),
-//!   so it can join the layout. Only windows currently
+//!   maximized is classified `Ignored(Maximized)`. The `STATECHANGE` hook
+//!   re-evaluates it once the user restores it (`WS_MAXIMIZE` flips off), so it
+//!   can join the layout. Only windows currently
 //!   `Ignored(Maximized|Fullscreen)` are re-evaluated.
 //!
 //! # Cleanup
@@ -75,12 +60,15 @@
 //! handle is dropped), which posts `WM_QUIT` to the hook thread's message loop.
 //! On exit, all hooks are unregistered via `UnhookWinEvent`.
 //!
-//! # Test Isolation
+//! # Test isolation
 //!
-//! The optional `desktop_name` parameter allows the hook thread to switch to
-//! a test desktop before registering hooks. This ensures hooks only fire for
-//! windows on the test desktop, preventing interference with the user's real
-//! windows during integration tests.
+//! The optional `desktop_name` parameter allows the hook thread to switch to a
+//! test desktop before registering hooks, ensuring hooks only fire for windows on
+//! the test desktop and preventing interference with the user's real windows
+//! during integration tests.
+//!
+//! See the developer guide's *Event Pipelines* chapter
+//! (`docs/src/dev-guide/event-pipelines.md`) for the end-to-end hook sequence.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};

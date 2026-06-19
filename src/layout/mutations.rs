@@ -7,52 +7,34 @@
 //!
 //! # Design principles
 //!
-//! **Camera over window-shifting**: Many operations that intuitively feel like
-//! "move windows" are actually implemented by adjusting `viewport_offset` (the
-//! camera position) instead. For example, `ensure_column_visible` shifts the
-//! camera so a target column comes into view — no individual window positions
-//! are touched in the [`VirtualLayout`].
+//! - **Camera over window-shifting**: many operations that intuitively feel like
+//!   "move windows" are implemented by adjusting `viewport_offset` (the camera)
+//!   instead. For example, `ensure_column_visible` shifts the camera so a target
+//!   column comes into view — no individual window positions are touched in the
+//!   [`VirtualLayout`].
+//! - **Focus-by-WindowId**: focus is tracked as a stable [`WindowId`], not a
+//!   column/row index, so operations like column swapping require no focus fixup —
+//!   the focused window id stays valid regardless of where it moves.
 //!
-//! **Focus-by-WindowId**: Focus is tracked as a stable [`WindowId`],
-//! not as a column/row index. This means operations like column swapping require
-//! no focus fixup — the focused window ID remains valid regardless of where it
-//! moves in the layout.
+//! # Container model
 //!
-//! # Container Model
+//! A [`VirtualLayout`] is a horizontal container of [`Column`]s; each column is a
+//! vertical container of rows stacked top-to-bottom. Horizontal operations
+//! (Left/Right) swap/resize/scroll columns; vertical operations (Up/Down) swap or
+//! focus rows within a column.
 //!
-//! ```text
-//! VirtualLayout (horizontal container)
-//! ├── Column 0 (vertical container) — rows stacked top-to-bottom
-//! ├── Column 1
-//! └── Column 2
-//! ```
+//! # Sizing
 //!
-//! - **Horizontal operations** (Left/Right): swap columns, resize column widths, scroll
-//! - **Vertical operations** (Up/Down): swap rows within a column, focus between rows
+//! All size parameters come from [`MutationConfig`], derived from
+//! [`StmConfig`](crate::config::StmConfig). The engine receives this (not the full
+//! config) to stay decoupled from config parsing. Column widths are stored in
+//! pixels ([`width_px`](crate::layout::types::Column::width_px)); expand/shrink
+//! move along a discrete **slot ladder** that preserves `window_gap`, while
+//! free-form widths (drag-resize, viewport offsets) are bounded but not snapped.
 //!
-//! # Size Philosophy
-//!
-//! All size parameters come from [`MutationConfig`], which is derived from
-//! [`StmConfig`](crate::config::StmConfig). The layout engine receives this
-//! (not the full config) to stay decoupled from config parsing details.
-//!
-//! # Width model (pixel-based, with a slot ladder)
-//!
-//! Column widths are stored directly in pixels
-//! ([`width_px`](crate::layout::types::Column::width_px)). Expand/shrink move
-//! along a discrete **slot ladder** so the `window_gap` is always preserved:
-//!
-//! - `column_shift = column_width + window_gap` (one slot step)
-//! - allowed expand/shrink widths =
-//!   `{ column_width + n * column_shift : n ∈ [0, max_n] } ∪ { abs_max_width }`
-//! - `max_n = floor((monitor_width − 2*gap − column_width) / column_shift)`
-//! - `abs_max_width = monitor_width − 2*gap` (the monocle / full-width value)
-//!
-//! The two-step top lets the widest regular slot (`slot_max`) jump to
-//! `abs_max_width`, which is generally not slot-aligned (the leftover pixels
-//! between `slot_max` and `abs_max_width` are smaller than one `column_shift`).
-//! Free-form widths (drag-resize, viewport offsets) are **not** snapped to the
-//! ladder — only bounded by `[min_column_width_px, abs_max_width]`.
+//! See the developer guide's *Mutations Catalog* chapter
+//! (`docs/src/dev-guide/layout/mutations.md`) for the full mutation table and the
+//! slot-ladder width math.
 
 use crate::common::{Direction, WindowId};
 use crate::layout::projection::{canvas_width, column_step_width};

@@ -1,44 +1,32 @@
 //! Workspace hierarchy — monitors, workspaces, and the scrolling/floating split.
 //!
-//! This module groups everything that sits *above* the pure layout math in the
-//! [`layout`](crate::layout) module. It models a niri-style virtual desktop
-//! stack: a [`Monitor`] owns one or more [`Workspace`]s, and a workspace owns
-//! exactly one [`ScrollingSpace`] (the tiled windows on an infinite horizontal
-//! canvas) plus one [`FloatingSpace`] (the non-tiled windows — currently a
-//! stub).
+//! Everything that sits *above* the pure layout math in the [`layout`](crate::layout)
+//! module. Models a niri-style virtual desktop stack: a [`Monitor`] owns one or
+//! more [`Workspace`]s, and a workspace owns exactly one [`ScrollingSpace`] (tiled
+//! windows on an infinite horizontal canvas) plus one [`FloatingSpace`] (non-tiled
+//! windows — currently a stub).
 //!
-//! # The Hierarchy
+//! # Vertical scrolling between workspaces
 //!
-//! ```text
-//! Vec<Monitor>           (ScrollTilingManager tracks the active monitor)
-//!   └─ Monitor           (one physical display; owns its work area + workspaces)
-//!       └─ Vec<Workspace>  (only the active_workspace is visible)
-//!           └─ Workspace
-//!               ├─ ScrollingSpace   ← reused from the old LayoutEngine
-//!               └─ FloatingSpace    ← stub, different coordinate space
-//! ```
-//!
-//! # Vertical Scrolling Between Workspaces
-//!
-//! The horizontal scrolling inside a [`ScrollingSpace`] (left/right across
-//! columns) now has a vertical analogue: workspaces are stacked "above" and
-//! "below" the active one. Switching workspaces will eventually animate the
-//! whole stack vertically, the same way scrolling a column animates windows
-//! horizontally. **The animation design is not yet finalised**, so the
-//! workspace-switch IPC commands (`switchworkspace`, `swapworkspace`,
-//! `movetoworkspace`) are wired up as stubs in this skeleton — see the daemon
+//! The horizontal scrolling inside a [`ScrollingSpace`] (left/right across columns)
+//! will eventually have a vertical analogue: workspaces stacked "above" and "below"
+//! the active one, switched the same way columns scroll. **The animation design is
+//! not yet finalised**, so the workspace-switch IPC commands (`switchworkspace`,
+//! `swapworkspace`, `movetoworkspace`) are wired up as stubs — see the daemon
 //! dispatch module.
 //!
-//! # What Lives Here vs. What Doesn't
+//! # What lives here vs. what doesn't
 //!
-//! - **Here**: the monitor/workspace container types, the `WorkspaceId`
-//!   identifier, and the two space kinds a workspace holds.
-//! - **Not here**: the [`WindowRegistry`](crate::registry::WindowRegistry),
-//!   IPC plumbing, and window-event hooks. Those remain direct fields of
-//!   [`ScrollTilingManager`](crate::daemon::ScrollTilingManager). A workspace
-//!   never touches Win32 or the registry directly; the daemon is the only
-//!   thing that shuttles windows between the registry and the active
-//!   workspace's [`ScrollingSpace`].
+//! A workspace never touches Win32 or the registry directly. The daemon
+//! ([`ScrollTilingManager`](crate::daemon::ScrollTilingManager)) is the only thing
+//! that shuttles windows between the
+//! [`WindowRegistry`](crate::registry::WindowRegistry) and the active workspace's
+//! [`ScrollingSpace`]. IPC plumbing and window-event hooks remain direct fields of
+//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager), not of the workspace.
+//!
+//! See the developer guide's *Workspace Hierarchy* chapter
+//! (`docs/src/dev-guide/workspace.md`) for the hierarchy diagram and the roadmap
+//! for multi-monitor support.
 
 use serde::{Deserialize, Serialize};
 

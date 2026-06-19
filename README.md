@@ -55,13 +55,9 @@ stm query windows all
 
 ## Architecture
 
-The system uses a 3-layer layout pipeline:
+The daemon owns all subsystems behind `&mut self` (no `Arc<Mutex>`); a hook thread and the IPC thread coordinate via an mpsc channel.
 
-1. **Virtual Layout** — logical structure on an infinite horizontal canvas
-2. **Projection** — converts virtual layout to actual screen coordinates
-3. **Diff** — compares layouts to produce animated move instructions
-
-See [docs/spec/00-overview.md](docs/spec/00-overview.md) for the full architecture documentation.
+See the [Developer Guide](docs/src/dev-guide/README.md) for the full architecture documentation. Build the mdBook locally with `mdbook build docs/`.
 
 ## License
 

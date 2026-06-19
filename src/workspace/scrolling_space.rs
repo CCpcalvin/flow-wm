@@ -1,74 +1,55 @@
 //! Scrolling space — the infinite-horizontal-canvas tiling engine.
 //!
-//! [`ScrollingSpace`] is the main entry point for layout operations. It owns
-//! the current [`VirtualLayout`], tracks focus and monocle state, and
-//! produces [`AppliedLayout`] results for each mutation.
+//! [`ScrollingSpace`] is the main entry point for layout operations. It owns the
+//! current [`VirtualLayout`], tracks focus and monocle state, and produces
+//! [`AppliedLayout`] results for each mutation.
 //!
 //! # Where this lives
 //!
 //! A [`ScrollingSpace`] is the tiling half of a [`Workspace`](super::Workspace)
-//! (the other half being a [`FloatingSpace`](super::FloatingSpace) stub).
-//! Many workspaces can share a single monitor, but only the active one is
-//! visible; the rest are packed away "above" and "below" — the same packing
-//! idea the scrolling space uses horizontally between columns, now applied
-//! vertically between workspaces. This module is **pure layout math**: it
-//! never touches Win32 and knows nothing of HWNDs, only [`WindowId`]s.
+//! (the other half being a [`FloatingSpace`](super::FloatingSpace) stub). Many
+//! workspaces can share a single monitor, but only the active one is visible;
+//! the rest are packed "above" and "below" — the same packing idea the scrolling
+//! space uses horizontally between columns, now applied vertically between
+//! workspaces. This module is **pure layout math**: it never touches Win32 and
+//! knows nothing of HWNDs, only [`WindowId`]s.
 //!
-//! # The Mutation Pipeline
+//! # The mutation pipeline
 //!
-//! Every public method follows the same 2-step pipeline internally:
+//! Every public method runs the same pipeline internally:
+//! `mutations::*` (pure) → `apply_mutation` → `projection::project` →
+//! [`AppliedLayout`]. The animation layer then diffs that against real on-screen
+//! positions to decide what to animate (see [`AppliedLayout`]).
 //!
-//! ```text
-//! User command (e.g., swap Right)
-//!     │
-//!     ▼
-//! mutations::swap_column() → new VirtualLayout
-//!     │
-//!     ▼  (apply_mutation)
-//! projection::project() → new ActualLayout
-//!     │
-//!     ▼
-//! AppliedLayout { virtual_layout, actual_layout }
-//! ```
+//! # What ScrollingSpace does not own
 //!
-//! The animation layer receives the full `ActualLayout` and compares each
-//! window's target rect against its real on-screen position to decide which
-//! windows actually need animating. This is more robust than computing a
-//! logical diff inside the engine — see [`AppliedLayout`] for details.
+//! The scrolling space is **pure layout logic**. It does not own window
+//! metadata or tile/float/ignore state (that's
+//! [`WindowRegistry`](crate::registry::WindowRegistry)), animation timing (that's
+//! the [`animation`](crate::animation) layer), or config loading (that's
+//! [`config`](crate::config)). It only owns columns, widths, focus, and the
+//! viewport offset.
 //!
-//! # What ScrollingSpace Does NOT Own
-//!
-//! The scrolling space is **pure layout logic**. It does not own:
-//! - Window metadata (titles, classes, HWNDs) — that's `WindowRegistry`
-//! - Tile/float/ignore state — that's `WindowRegistry`
-//! - Animation timing — that's the compositor
-//! - Config loading — that's [`config`](crate::config)
-//!
-//! It only owns the layout math: columns, widths, focus, viewport offset.
+//! See the developer guide's *Mutation Pipeline* chapter
+//! (`docs/src/dev-guide/layout/pipeline.md`) for the full flow with a worked example.
 
 use crate::common::{Direction, WindowId};
 use crate::layout::mutations::{self, MutationConfig};
 use crate::layout::projection;
 use crate::layout::types::{ActualLayout, AppliedLayout, MonitorInfo, Padding, VirtualLayout};
 
-/// The scrolling space — owns virtual layout state, tracks focus, and produces diffs.
+/// The scrolling space — owns virtual layout state, tracks focus, and produces applied layouts.
 ///
-/// This is the single entry point for all tiling operations. Each public method
-/// applies a mutation (scroll, focus, swap, resize, etc.), runs the full
-/// mutation pipeline, and returns a [`AppliedLayout`] describing what changed.
+/// Single entry point for all tiling operations. Each public method applies a
+/// mutation (scroll, focus, swap, resize, toggle monocle, add/remove window),
+/// runs the mutation pipeline, and returns an [`AppliedLayout`].
 ///
 /// # Focus tracking
 ///
 /// Focus is stored as `Option<WindowId>` — a stable window identifier, not a
-/// position index. This means:
-/// - Swapping columns does not require focus fixup.
-/// - Removing a window falls back to the first available window.
-/// - Focus moves with the window, not with the layout slot.
-///
-/// This is the single entry point for all tiling mutations. Call its public
-/// methods to scroll, focus, swap, resize, toggle monocle, or
-/// add/remove windows. Each call returns a [`AppliedLayout`] containing the
-/// new layouts and animation instructions.
+/// slot index — so swapping columns needs no focus fixup and focus follows the
+/// window when the layout changes. Removing the focused window falls back to
+/// the first available window.
 ///
 /// # Example
 ///

@@ -1,67 +1,41 @@
 //! Per-window state types tracked by the registry.
 //!
-//! This module defines the vocabulary types used throughout the window registry.
-//! These types represent the **complete lifecycle** of a managed window, from
-//! initial classification through state transitions to removal.
+//! The vocabulary types used throughout the window registry, representing the
+//! complete lifecycle of a managed window: initial classification → state
+//! transitions → removal. Every tracked window exists in exactly one
+//! [`WindowState`] at any time, which determines how stm interacts with it.
 //!
-//! # State Machine
+//! # Send safety
 //!
-//! Every tracked window exists in exactly one [`WindowState`] at any time.
-//! The state determines how stm interacts with the window:
+//! All types in this module are `Send` (and most are `Send + Sync`). The tricky
+//! case is `HWND`: Win32's `HWND` wraps a raw pointer (`*mut c_void`) and is
+//! `!Send` by default. We work around this by storing `HWND` inside [`Window`]
+//! with a manual `unsafe impl Send`, and converting `HWND` to `isize` when
+//! passing window ids across thread boundaries (in
+//! [`HookEvent`](super::HookEvent)).
 //!
-//! ```text
-//!                         classify_with_state()
-//!                                │
-//!                    ┌───────────┼───────────┐
-//!                    ▼           ▼           ▼
-//!               Tiling       Floating     Ignored
-//!               (Active)     (Active)    (Maximized/
-//!                    │           │        Fullscreen/
-//!            MinimizeStart  MinimizeStart  ExplicitRule)
-//!                    │           │
-//!                    ▼           ▼
-//!            Tiling::Minimized  Floating::Minimized
-//!                    │           │
-//!            MinimizeEnd    MinimizeEnd
-//!                    │           │
-//!                    └─────┬─────┘
-//!                          ▼
-//!                  Restored to Active
-//!                  (with saved position)
-//! ```
+//! The manual `Send` impl is sound because all Win32 API calls using the handle
+//! happen on the IPC thread (which owns the registry); `HWND` is an opaque
+//! handle value, not a real pointer — Rust code never reads through it.
 //!
-//! # Send Safety
+//! # Relationship to layout types
 //!
-//! All types in this module are `Send` (and most are `Send + Sync`). This is
-//! critical because the registry is shared across threads via `Arc<Mutex<>>`.
-//!
-//! **The tricky case is `HWND`**: Win32's `HWND` wraps a raw pointer (`*mut c_void`)
-//! and is `!Send` by default. We work around this by:
-//! - Storing `HWND` inside [`Window`] with a manual `unsafe impl Send`.
-//! - Converting `HWND` to `isize` when passing window IDs across thread
-//!   boundaries (in [`HookEvent`](super::HookEvent)).
-//!
-//! The manual `Send` impl is sound because:
-//! - We never dereference `HWND` on a different thread than the one holding
-//!   the `MutexGuard<WindowRegistry>`.
-//! - All Win32 API calls using the handle happen on the IPC thread.
-//! - `HWND` is an opaque handle value, not a real pointer — we never read
-//!   through it in Rust code.
-//!
-//! # Relationship to Layout Types
-//!
-//! The registry uses [`WindowState`] to track *what* a window is doing
-//! (tiling, floating, ignored). The layout engine uses
+//! The registry uses [`WindowState`] to track *what* a window is doing (tiling,
+//! floating, ignored). The layout engine uses
 //! [`WindowId`](crate::common::WindowId) and column/row positions to track
-//! *where* a window is placed. The two systems are connected through
+//! *where* a window is placed. The two systems connect through
 //! [`VirtualSlot`], which stores the layout engine's column/row assignment
 //! inside the registry's [`Window`] struct.
 //!
-//! # Serde Integration
+//! # Serde
 //!
-//! All types implement `Serialize` and `Deserialize` for the query API.
-//! `HWND` fields use a custom `#[serde(with)]` module that serializes to
-//! `isize` (since HWND pointers aren't meaningful in JSON).
+//! All types implement `Serialize` and `Deserialize` for the query API. `HWND`
+//! fields use a custom `#[serde(with)]` module that serializes to `isize`
+//! (HWND pointers aren't meaningful in JSON).
+//!
+//! See the developer guide's *Window Registry* chapter
+//! (`docs/src/dev-guide/window-registry.md`) for the lifecycle state-machine
+//! diagram.
 
 use std::path::PathBuf;
 

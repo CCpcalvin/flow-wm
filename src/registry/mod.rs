@@ -1,84 +1,22 @@
 //! Window registry — authoritative source of truth for all tracked windows.
 //!
-//! The registry is the bridge between the Windows OS window system and stm's
-//! internal layout model. It hooks into Win32's WinEvent system to detect
-//! window creation, destruction, focus changes, minimize, restore, maximize,
-//! and fullscreen transitions. Each window is classified as
+//! The bridge between the Windows OS window system and stm's internal layout
+//! model. It hooks into Win32's WinEvent system to detect window creation,
+//! destruction, focus changes, minimize, restore, maximize, and fullscreen
+//! transitions. Each window is classified as
 //! [`Tiling`](types::TilingState), [`Floating`](types::FloatingState), or
-//! [`Ignored`](types::IgnoredReason) based on config rules, and per-window
-//! state is maintained throughout the window's entire lifecycle.
+//! [`Ignored`](types::IgnoredReason) based on config rules, and per-window state
+//! is maintained throughout the window's entire lifecycle.
 //!
-//! # Architecture: Where the Registry Fits
+//! # Threading model
 //!
-//! The registry sits between the raw Win32 event system and the layout engine:
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ Windows OS (Win32)                                              │
-//! │  ┌──────────────────────────────────────┐                       │
-//! │  │ WinEvent hooks (SetWinEventHook)     │                       │
-//! │  └──────────────┬───────────────────────┘                       │
-//! │                 │ HookEvent (via mpsc channel)                  │
-//! │                 ▼                                               │
-//! │  ┌──────────────────────────────────────┐   ┌──────────────┐    │
-//! │  │ WindowRegistry (Arc<Mutex<>>)        │◄──│ IPC Server   │    │
-//! │  │ • classify windows                   │   │ (query API)  │    │
-//! │  │ • track state transitions            │   └──────────────┘    │
-//! │  │ • serialize to JSON                  │                       │
-//! │  └──────────────┬───────────────────────┘                       │
-//! │                 │ WindowId + state                              │
-//! │                 ▼                                               │
-//! │  ┌──────────────────────────────────────┐                       │
-//! │  │ ScrollingSpace (pure layout math)    │                       │
-//! │  │ • no Win32 knowledge                 │                       │
-//! │  │ • operates on WindowId, not HWND     │                       │
-//! │  └──────────────────────────────────────┘                        │
-//! └─────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! # Window Lifecycle
-//!
-//! Every tracked window follows a well-defined lifecycle:
-//!
-//! ```text
-//!                     ┌──────────────┐
-//!                     │  Not tracked │
-//!                     └──────┬───────┘
-//!              EVENT_OBJECT_CREATE │ (or init scan)
-//!                            ▼
-//!                     ┌──────────────┐   maximized/fullscreen
-//!                     │  Classify    │──────────────────────► Ignored
-//!                     │  (rules)     │
-//!                     └──────┬───────┘
-//!              ┌─────────────┼─────────────┐
-//!              ▼                             ▼
-//!         Tiling::Active              Floating::Active
-//!              │                             │
-//!     MinimizeStart │                 MinimizeStart │
-//!              ▼                             ▼
-//!       Tiling::Minimized            Floating::Minimized
-//!              │                             │
-//!     MinimizeEnd   │                 MinimizeEnd   │
-//!              └──────────┘                 └──────────┘
-//!                     │
-//!          EVENT_OBJECT_DESTROY
-//!                     ▼
-//!               Removed from registry
-//! ```
-//!
-//! # Threading Model
-//!
-//! The registry is shared between two threads via `Arc<Mutex<WindowRegistry>>`:
-//!
-//! - **IPC thread** (main) — holds the `MutexGuard` to process hook events
-//!   and answer query commands between IPC messages.
-//! - **Hook thread** (background) — runs the WinEvent hook callback,
-//!   sends typed [`HookEvent`]s through an `mpsc` channel (non-blocking).
-//!
-//! The hook thread **never** touches the registry directly. It only sends
-//! events through the channel. The IPC thread drains these events and applies
-//! all state transitions under its `MutexGuard`. This eliminates data races
-//! and keeps all Win32 HWND dereferencing on a single thread.
+//! The registry is **not** wrapped in `Arc<Mutex>`. All subsystems in stm take
+//! `&mut self` and the borrow checker enforces exclusive access at compile time.
+//! The background hook thread never touches the registry directly: it only sends
+//! typed [`HookEvent`]s through an `mpsc` channel (non-blocking). The main IPC
+//! thread drains the channel and applies all state transitions, keeping all Win32
+//! HWND dereferencing on a single thread. See the developer guide's *Threading
+//! Model* chapter (`docs/src/dev-guide/threading-model.md`).
 //!
 //! # Submodules
 //!
@@ -90,6 +28,11 @@
 //! | [`core`] | Core [`WindowRegistry`] struct with init scan and state transitions |
 //! | [`hooks`] | WinEvent hook setup on a background thread |
 //! | [`desktop`] | Desktop switching for debug/test builds (excluded from release) |
+//!
+//! The full classification algorithm, the window-lifecycle state machine, and the
+//! 7px `GetWindowRect` border quirk are documented with diagrams in the
+//! developer guide's *Window Registry* chapter
+//! (`docs/src/dev-guide/window-registry.md`).
 
 pub mod classification;
 pub mod core;

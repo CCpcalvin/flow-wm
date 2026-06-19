@@ -1,5 +1,21 @@
 - Use `cargo add` to handle dependencies and versions. Do NOT edit `Cargo.toml` for it. 
-- Remember to write good docstring extensively, so that `cargo doc` can generate good documentation for us. The documentation should also explain the logic, design decision etc. Treat them like a wiki page for the project.
+
+## Documentation strategy
+
+This project uses a **3-layer documentation model**. Each layer has a distinct job — keep the boundaries clean so nothing is documented twice.
+
+| Layer | Location | Job |
+|-------|----------|-----|
+| **mdBook** | `docs/` (`docs/src/dev-guide/*.md`) | **Why & How It Fits** — architecture, design decisions, cross-cutting invariants, data flow, lifecycle, algorithms, diagrams (Mermaid), onboarding, roadmap. Narrative prose. This is the primary reference for understanding the project. |
+| **`///` docstrings** | source files | **What & Contract** — a one-line summary of the item, non-obvious constraints, and `# Errors` / `# Panics` / `# Safety` sections only when they apply. When deeper context lives in mdBook, add a prose cross-link with the path in parens (e.g. ``(`docs/src/dev-guide/window-registry.md`)``); do NOT use markdown links (they break in rendered rustdoc). Keep docstrings short — the rationale belongs in mdBook, not here. |
+| **`//` inline comments** | source files | **Why Here** — only the tricky local decision, invariant, or magic number that a reader cannot reconstruct from the code itself. Do not restate what the code already says. |
+
+Rules:
+- Do NOT explain design decisions in `///` — that is mdBook's job. Link there instead.
+- Every public item must still have at least one-line `///` (`#![warn(missing_docs)]` is set in `src/lib.rs`).
+- ASCII diagrams belong in mdBook (rendered as Mermaid), never in docstrings.
+- Build the book with `mdbook build docs/`; render rustdoc with `cargo doc --no-deps --document-private-items`.
+
 - **Config defaults: CODE is the single source of truth.** Default values live in the `Default` impls of each config struct in `src/config/types.rs`. Each struct carries `#[serde(default)]` at the container level, so a user's `stm.toml` may be partial, empty, or nested-partial — serde fills the gaps from the `Default` impl. `default-config.toml` in the repo root is a hand-written EXAMPLE copied to users by `stm config init`; it is NOT read at runtime. When you add or change a config field, update BOTH the `Default` impl in `src/config/types.rs` AND `default-config.toml` — the `default_config_toml_matches_compiled_defaults` test enforces they stay in sync.
 
 ## graphify

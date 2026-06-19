@@ -1,88 +1,33 @@
 //! Layout engine — infinite horizontal canvas with camera-based viewport.
 //!
-//! This is the largest module in stm. All layout computation is **pure Rust**
-//! with **zero Win32 dependencies** — testable on any platform.
+//! The pure-math core of stm: all layout computation here is **platform-independent
+//! Rust with zero Win32 dependencies**, testable on any platform. Position on the
+//! canvas is *implicit* (prefix-sum of column widths); a `viewport_offset` acts as
+//! a camera that determines which slice of the canvas is visible.
 //!
-//! # Architecture: VirtualLayout vs ActualLayout
-//!
-//! The layout system is built on a clear separation between the **infinite virtual
-//! canvas** and the **actual on-screen windows** that Windows OS manages:
-//!
-//! - **[`VirtualLayout`]** — The complete description of all columns and windows on
-//!   an infinite horizontal canvas. Columns live at logical positions starting from
-//!   x=0, packed left-to-right with no gaps. A `viewport_offset` field acts as a
-//!   **camera position** — it determines which slice of the canvas is currently visible.
-//!   No pixel coordinates exist at this layer.
-//!
-//! - **[`ActualLayout`]** — The real pixel rectangles that Windows OS must render.
-//!   Only windows visible in the viewport receive on-screen coordinates. Windows
-//!   outside the viewport are **parked** at deterministic off-screen positions
-//!   (one column-width beyond the nearest viewport edge), rather than being left at
-//!   their unreachable virtual positions. This is critical because Windows OS does
-//!   not gracefully ignore windows placed far off-screen — they must be moved to a
-//!   known, nearby parking spot so animations and transitions work correctly.
-//!
-//! # The Camera Model
-//!
-//! The `viewport_offset` on [`VirtualLayout`] acts as a camera that slides along the
-//! infinite canvas. Many operations — scrolling, focus-to-offscreen, swap —
-//! are implemented simply by adjusting this offset rather than moving individual windows.
-//!
-//! ```text
-//!  Camera →  ┃ viewport ┃
-//!            ┃ visible  ┃
-//!  ┌───┬───┬─╋───┬───┬─╋───┬───┐
-//!  │ C1│ C2│ C3│ C4│ C5│ C6│ C7│   ← infinite canvas
-//!  └───┴───┴─╋───┴───┴─╋───┴───┘
-//!     parked    on-screen   parked
-//!      left                  right
-//! ```
-//!
-//! # The 2-Layer Pipeline
-//!
-//! Layout computation follows a functional, declarative approach — there is no
-//! mutable "update Column position → propagate to Windows" loop. Instead:
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │  Layer 1: VirtualLayout (infinite canvas, pixel widths)     │
-//! │  ┌───────────────────────────────────────────────────────┐  │
-//! │  │ Column { width_px: 960, rows: [WinId(1), WinId(2)]   }│  │
-//! │  │ Column { width_px: 1440, rows: [WinId(3)]            }│  │
-//! │  │ viewport_offset: 0  ← camera position                 │  │
-//! │  └───────────────────────────────────────────────────────┘  │
-//! │         │                                                   │
-//! │         │  projection::project()  (camera shift + park)     │
-//! │         ▼                                                   │
-//! │  Layer 2: ActualLayout (pixel rects for Windows OS)         │
-//! │  ┌───────────────────────────────────────────────────────┐  │
-//! │  │ Visible:  WinId(1) @ Rect { x:4, y:4, w:952, h:532 }  │  │
-//! │  │ Visible:  WinId(2) @ Rect { x:4, y:540, w:952, h:532} │  │
-//! │  │ Parked-L: WinId(3) @ Rect { x:-964, y:4, ... }        │  │
-//! │  └───────────────────────────────────────────────────────┘  │
-//! │         │                                                   │
-//! │         │  AppliedLayout { virtual_layout, actual_layout }  │
-//! │         ▼                                                   │
-//! │  Animation layer: compare target rects vs real positions   │
-//! │  (build_tweens filters no-ops; retargets mid-flight wins)  │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! See [`workspace::ScrollingSpace`] for the orchestrator that wires it all together.
+//! Every layout change flows through three pure stages — **mutate → project →
+//! animate** — producing an [`AppliedLayout`] that the orchestrator
+//! ([`workspace::ScrollingSpace`]) consumes. There is no mutable "update column →
+//! propagate to windows" loop; windows outside the viewport are *parked* at
+//! deterministic off-screen positions by projection (see [`projection`]).
 //!
 //! # Submodules
 //!
 //! | Module | Responsibility |
 //! |--------|---------------|
-//! | [`types`] | Core data types — [`Column`], [`VirtualLayout`], [`ActualLayout`] |
-//! | [`projection`] | Virtual → actual projection with camera shift and parking |
-//! | [`mutations`] | All pure mutation functions (scroll, focus, swap, resize, etc.) |
+//! | [`types`] | Core data types — [`Column`], [`VirtualLayout`], [`ActualLayout`], [`AppliedLayout`] |
+//! | [`projection`] | Virtual → actual projection: camera shift, parking, padding |
+//! | [`mutations`] | All pure mutation functions (scroll, focus, swap, resize, add/remove) |
 //!
-//! The orchestrator that wires mutations → projection → [`AppliedLayout`] used
-//! to live here as `LayoutEngine`; it has moved to [`workspace::ScrollingSpace`]
-//! as part of the workspace-hierarchy refactor. This module now holds only the
-//! pure layout *math* (types, projection, mutations), which
-//! [`workspace::ScrollingSpace`] consumes.
+//! The orchestrator that wires mutations → projection → [`AppliedLayout`] used to
+//! live here as `LayoutEngine`; it moved to [`workspace::ScrollingSpace`] in the
+//! workspace-hierarchy refactor. This module now holds only the pure layout math.
+//!
+//! # Further reading
+//!
+//! The camera model, parking mechanism, mutation catalog, and projection
+//! algorithm are walked through with mermaid diagrams in the *Layout Engine*
+//! chapters of the developer guide (`docs/src/dev-guide/layout/`).
 
 pub mod mutations;
 pub mod projection;

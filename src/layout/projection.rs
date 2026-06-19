@@ -1,51 +1,39 @@
 //! Virtual layout → actual layout projection (camera to screen).
 //!
-//! This module implements the core **camera-to-screen** projection: it takes the
-//! infinite virtual canvas ([`VirtualLayout`]) and computes real pixel coordinates
-//! for every window ([`ActualLayout`]) that Windows OS must render.
+//! The core **camera-to-screen** projection: takes the infinite virtual canvas
+//! ([`VirtualLayout`]) and computes real pixel coordinates for every window
+//! ([`ActualLayout`]) that Windows OS must render.
 //!
 //! # How it works
 //!
-//! 1. **Camera shift**: Each column's virtual x-position is offset by subtracting
-//!    `viewport_offset` (the camera position). Columns whose shifted range overlaps
-//!    the monitor rectangle are **visible** and receive on-screen coordinates.
+//! 1. **Camera shift**: each column's virtual x-position is offset by subtracting
+//!    `viewport_offset` (the camera position). Columns whose shifted range
+//!    overlaps the monitor rectangle are **visible** and receive on-screen
+//!    coordinates.
 //!
-//! 2. **Parking**: Columns fully outside the viewport are **parked** — placed at a
-//!    deterministic position exactly one column-width beyond the nearest viewport edge.
-//!    There are two parking zones:
-//!    - **Left parking** (`monitor_left - col_width`): for columns that scrolled off
-//!      the left side of the viewport.
-//!    - **Right parking** (`monitor_right + col_width`): for columns that scrolled off
-//!      the right side.
+//! 2. **Parking**: columns fully outside the viewport are **parked** at a
+//!    deterministic position exactly one column-width beyond the nearest viewport
+//!    edge — left zone (`monitor_left - col_width`) or right zone
+//!    (`monitor_right + col_width`). Parking is necessary because Windows OS does
+//!    not gracefully handle windows at extreme off-screen coordinates; parking
+//!    just beyond the edge keeps scroll-in/out animations short and smooth.
 //!
-//!    Parking is necessary because Windows OS does not gracefully handle windows at
-//!    extreme off-screen coordinates. By parking just beyond the edge, scroll-in/out
-//!    animations are short-distance and smooth.
+//! Columns are laid out in **slots** of width `col_width + window_gap`, so the
+//! visual gap between adjacent windows comes from the slot structure (the canvas
+//! starts at `window_gap`). Vertically, `window_gap` is applied as top/bottom
+//! inset within each row; screen-level top/bottom margins come from
+//! `padding.up` / `padding.down`.
 //!
-//! # Slot Model (Gap-Aware Canvas)
+//! # Padding lives here
 //!
-//! Columns are laid out in **slots** on the virtual canvas. Each slot has width
-//! `col_width + window_gap`, providing the visual gap between adjacent windows.
-//! The canvas starts at `window_gap` (the initial left-edge gap).
+//! Padding is applied **here**, during projection — outside the window concept.
+//! The [`ActualEntry`] rects produced are the **final HWND rects**, passable
+//! directly to `SetWindowPos` with no further adjustment. This keeps padding
+//! logic in one place so no other consumer of window rects needs to know about it.
 //!
-//! ```text
-//! | gap | [Col 1] gap | [Col 2] gap | [Col 3] gap | ... | viewport
-//! ```
-//!
-//! Each column's window rect fills the full `col_width` horizontally — no horizontal
-//! inset is applied. The gap comes from the slot structure, not from insetting the
-//! window within its cell. Vertically, `window_gap` is still applied as top/bottom
-//! inset within each row.
-//!
-//! Screen-level top margin = `padding.up`, bottom margin = `padding.down`.
-//!
-//! # Padding: Outside the Window Concept
-//!
-//! Padding is applied **here**, during projection. The [`ActualEntry`] rects
-//! produced are the **final HWND rects** — they can be passed directly to
-//! `SetWindowPos` without any further adjustment. This keeps the padding logic
-//! in one place and prevents every consumer of window rects from needing to
-//! know about padding.
+//! See the developer guide's *Projection* chapter
+//! (`docs/src/dev-guide/layout/projection.md`) for the slot model and parking
+//! zones with diagrams.
 
 use crate::common::Rect;
 use crate::layout::types::{

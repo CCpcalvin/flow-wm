@@ -1,78 +1,32 @@
 //! Core window registry — authoritative source of truth for all tracked windows.
 //!
-//! [`WindowRegistry`] is the central data structure that tracks every window
-//! the daemon is aware of. It is the **single source of truth** for window
-//! metadata, classification state, and focus tracking.
+//! [`WindowRegistry`] is the central data structure tracking every window the
+//! daemon is aware of: a `HashMap<isize, Window>` keyed by the Win32 `HWND`
+//! value stored as `isize`. Storing the handle as `isize` (rather than `HWND`
+//! directly) is deliberate — `HWND` wraps `*mut c_void` and is `!Send`, while
+//! `isize` is `Send + Sync + Hash + Eq` and works as a HashMap key that can be
+//! sent through channels (`hwnd.0 as isize` / `HWND(val as *mut _)`).
 //!
-//! # Data Structure
-//!
-//! The registry maintains a `HashMap<isize, Window>` keyed by the Win32 `HWND`
-//! value stored as `isize`. This design choice (rather than using `HWND` directly)
-//! is deliberate:
-//!
-//! - `HWND` wraps `*mut c_void` and is `!Send` — it cannot be transferred
-//!   across thread boundaries.
-//! - `isize` is `Send + Sync + Hash + Eq` — it works as a HashMap key and can
-//!   be sent through channels safely.
-//! - The conversion is trivial: `hwnd.0 as isize` / `HWND(val as *mut _)`.
-//!
-//! # Threading Model
+//! # Threading model
 //!
 //! The registry is owned directly by
-//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager) — no
-//! `Arc<Mutex<>>` wrapping. The orchestrator drains hook events from the mpsc
-//! channel and dispatches to individual handler methods on the IPC thread.
+//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager) — **no
+//! `Arc<Mutex<>>`** wrapping. The IPC thread owns it; the background hook thread
+//! never accesses any STM field — it only sends typed [`HookEvent`]s through a
+//! non-blocking `mpsc` channel. The IPC thread drains that channel and dispatches
+//! to handler methods. All HWND dereferencing happens on the IPC thread. Because
+//! handlers take `&mut self`, the borrow checker enforces exclusive access at
+//! compile time — no locks, no deadlocks.
 //!
-//! ```text
-//! IPC Thread (main):              Hook Thread (background):
-//!   owns STM (all fields)           SetWinEventHook ×3
-//!   ├─ drain mpsc channel             GetMessageW loop
-//!   │    └─ try_recv() from mpsc          ↓ callback
-//!   ├─ dispatch to on_* handlers        sender.send(HookEvent)
-//!   ├─ handle event(s)
-//!   └─ ... (repeat)
-//! ```
+//! # Initialization
 //!
-//! The **hook thread never accesses any STM field**. It sends typed
-//! [`HookEvent`]s through a non-blocking `mpsc` channel. The IPC thread drains
-//! these events and dispatches to individual handler methods. This design:
+//! Construction builds a [`ClassificationPipeline`] from user + default rules,
+//! then `scan_existing_windows()` runs `EnumWindows` and registers every
+//! visible/titled/Alt+Tab-visible top-level window (pre-filtering before
+//! classification), then `start_hook_thread()` registers the WinEvent hooks.
+//! Thereafter the IPC loop drains the channel and dispatches per event.
 //!
-//! - Eliminates deadlocks entirely (no locks at all — borrow checker enforces
-//!   exclusive access at compile time via `&mut self`).
-//! - Keeps HWND dereferencing on the IPC thread (which owns the registry).
-//! - Makes the hook callback fast and non-blocking (`try_recv` on the other end).
-//!
-//! # Initialization Flow
-//!
-//! ```text
-//! 1. WindowRegistry::new(user_rules, default_rules)
-//!    └─ builds ClassificationPipeline from user and default rule configs
-//!
-//! 2. scan_existing_windows()
-//!    └─ EnumWindows → for each visible, titled, Alt+Tab visible, top-level window:
-//!       ├─ Pre-filters: visible, titled, Alt+Tab visible (WS_EX_TOOLWINDOW),
-//!       │   no owner (GW_OWNER)
-//!       ├─ get_window_info(hwnd)
-//!       └─ register_window_from_info(info)
-//!          ├─ classify_with_state_pipeline(candidate, is_max, is_fs, pipeline)
-//!          └─ insert into HashMap
-//!
-//! 3. start_hook_thread()
-//!    └─ background thread registers WinEvent hooks
-//!       └─ sends HookEvent::Created/Destroyed/Foreground/MinimizeStart/MinimizeEnd
-//!
-//! 4. Orchestrator IPC loop:
-//!    └─ each iteration:
-//!       ├─ drain mpsc channel directly
-//!       ├─ dispatch to individual handlers
-//!       │    ├─ handle_created / remove_window / set_focused / etc.
-//!       │    └─ coordinate with ScrollingSpace
-//!       └─ handle IPC command
-//! ```
-//!
-//! # State Transitions
-//!
-//! When a hook event arrives, the registry applies a state transition:
+//! # State transitions
 //!
 //! | Event | Method | Transition |
 //! |-------|--------|------------|
@@ -82,24 +36,19 @@
 //! | `MinimizeStart` | `minimize_window` | `Active` → `Minimized`, save virtual slot |
 //! | `MinimizeEnd` | `restore_window` | `Minimized` → `Active`, restore virtual slot |
 //!
-//! # Design Decision: No Win32 in State Transitions
+//! # Design decisions
 //!
-//! All state transition methods (`minimize_window`, `restore_window`, etc.)
-//! are **pure data transformations** on the `Window` struct. They do not call
-//! any Win32 APIs. This is intentional:
+//! - **No Win32 in state transitions**: `minimize_window`, `restore_window`,
+//!   etc. are pure data transformations on the `Window` struct — they call no
+//!   Win32 APIs. `SetWindowPos`/`MoveWindow` are the animator's job, not the
+//!   registry's, so the state machine is testable without Win32 mocking.
+//! - **Idempotent registration**: `register_window_from_info` returns early if
+//!   the window is already tracked — the init scan and hook events can race to
+//!   register the same window, and the first registration wins.
 //!
-//! - State transitions only mutate the registry's in-memory state.
-//! - Win32 calls (`SetWindowPos`, `MoveWindow`) are the compositor's job,
-//!   not the registry's.
-//! - This makes the registry's state machine testable without Win32 mocking.
-//!
-//! # Design Decision: Idempotent Registration
-//!
-//! `register_window_from_info` is idempotent —
-//! if the window is already tracked, it returns early without modifying the
-//! existing entry. This is critical because both the init scan and hook events
-//! can race to register the same window. The first registration wins, and the
-//! window's classification and state are preserved.
+//! See the developer guide's *Window Registry* chapter
+//! (`docs/src/dev-guide/window-registry.md`) for the classification pipeline and
+//! lifecycle state machine with diagrams.
 
 use std::collections::HashMap;
 

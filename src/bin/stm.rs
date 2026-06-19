@@ -1,35 +1,24 @@
-//! stm — ScrollingTilingManager CLI client
+//! stm — ScrollingTilingManager CLI client.
 //!
-//! Sends commands to the `stmd` daemon via a Windows named pipe.
+//! Sends commands to the `stmd` daemon via a Windows named pipe. Commands fall
+//! into four groups:
 //!
-//! # Usage
+//! | Group | Commands |
+//! |-------|----------|
+//! | Lifecycle | `start`, `stop` |
+//! | Config | `config init` / `reload` / `edit` / `path` / `check` |
+//! | Query | `query all` |
+//! | Dispatch | `dispatch focus\|swapcolumn\|movewindow\|expandcolumn\|shrinkcolumn\|closewindow`, plus stub `switchworkspace` / `swapworkspace` / `movetoworkspace` |
 //!
-//! ```text
-//! stm start [--config <dir>] [--log-file <path>]    Start the daemon (spawns stmd.exe detached)
-//! stm stop                      Stop the running daemon
-//! stm config init               Create config dir + write default files
-//! stm config reload             Reload daemon configuration from disk
-//! stm config edit               Open config directory in the system editor
-//! stm config path               Print resolved config directory path
-//! stm config check              Validate configuration files
-//! stm query all                 List all tracked windows (full debug dump)
-//! stm dispatch focus <dir>      Focus a window in the given direction
-//! stm dispatch swapcolumn <dir> Swap the focused column left/right
-//! stm dispatch movewindow <dir> Move the focused window (semantic; the daemon
-//!                                resolves the concrete action by window state)
-//! stm dispatch expandcolumn     Expand the focused column width by one step
-//! stm dispatch shrinkcolumn     Shrink the focused column width by one step
-//! stm dispatch closewindow      Close the currently focused window (gentle WM_CLOSE)
-//! stm dispatch switchworkspace <id>  Switch the active workspace (stub)
-//! stm dispatch swapworkspace <id>    Swap the active workspace with another (stub)
-//! stm dispatch movetoworkspace <id>  Move the focused window to another workspace (stub)
-//! ```
+//! See the developer guide's *IPC & Watchdog* chapter
+//! (`docs/src/dev-guide/ipc-and-watchdog.md`) for the full command reference.
 //!
 //! # Configuration
 //!
 //! The config directory is resolved via a priority chain:
 //!
-//! 1. `--config <dir>` flag on `stm start` (passed to daemon via `STM_CONFIG_DIR` env var)
+//! 1. `--config <dir>` flag on `stm start` (passed to the daemon via the
+//!    `STM_CONFIG_DIR` env var)
 //! 2. `STM_CONFIG_DIR` environment variable
 //! 3. Default: `%USERPROFILE%\.config\stm\`
 //!

@@ -334,7 +334,7 @@ impl ScrollTilingManager {
     pub(super) fn on_window_state_change(&mut self, hwnd: isize) {
         let outcome = self.registry.reclassify_os_state(hwnd);
         if let ReclassifyResult::Recovered { now_tiling: true } = outcome {
-            let applied = self.layout.add_window(WindowId(hwnd));
+            let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }
     }

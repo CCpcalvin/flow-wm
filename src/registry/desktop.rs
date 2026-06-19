@@ -1,37 +1,24 @@
 //! Desktop management for debug/test builds.
 //!
-//! Provides functions to create, open, and switch Windows desktops. Used by
-//! the daemon and test infrastructure so all window operations happen on an
-//! isolated desktop instead of the user's real desktop.
+//! Functions to create, open, and switch Windows desktops, used by the daemon
+//! and test infrastructure so all window operations happen on an isolated
+//! desktop instead of the user's real desktop.
 //!
-//! **Only compiled in debug builds** (`#[cfg(debug_assertions)]`).
-//! Excluded from release builds entirely — no desktop code ships in the
-//! production binary.
+//! **Only compiled in debug builds** (`#[cfg(debug_assertions)]`). Excluded from
+//! release builds entirely — no desktop code ships in the production binary.
 //!
-//! # Why Isolate?
+//! # Why isolate?
 //!
-//! Integration tests create and manipulate windows. Without isolation, these
-//! test windows would appear on the user's actual desktop, interfere with
-//! their work, and potentially break their layout. By switching to a dedicated
-//! test desktop, all test window operations are invisible to the user.
+//! Integration tests create and manipulate windows. Without isolation these test
+//! windows would appear on the user's actual desktop, interfere with their work,
+//! and potentially break their layout. Switching to a dedicated test desktop
+//! keeps all test window operations invisible to the user. The typical flow:
+//! test code creates a desktop and sets the test thread onto it, spawns `stmd`
+//! (which calls [`switch_to_desktop`], scans existing windows, and starts the
+//! hook thread on that desktop), runs the tests, then restores the original
+//! desktop and closes the test one.
 //!
-//! # Typical Flow
-//!
-//! ```text
-//! Test code                    Daemon (stmd)              Hook Thread
-//! ┌──────────────────┐        ┌──────────────────┐      ┌──────────────────┐
-//! │ create_desktop() │        │ switch_to_       │      │ switch_to_       │
-//! │ set_thread_      │        │  desktop(name)   │      │  desktop(name)   │
-//! │  desktop(test)   │───────►│ scan_existing_   │─────►│ SetWinEventHook  │
-//! │ spawn stmd       │        │  windows()       │      │ GetMessageW loop │
-//! │ ...run tests...  │        │ IPC loop         │      │ callback → send  │
-//! │ set_thread_      │        └──────────────────┘      └──────────────────┘
-//! │desktop(original) │
-//! │ close_desktop()  │
-//! └──────────────────┘
-//! ```
-//!
-//! # Handle Lifetime
+//! # Handle lifetime
 //!
 //! - Handles from [`create_desktop`] must be closed via [`close_desktop`].
 //! - Handles from [`current_desktop`] must **not** be closed (managed by Windows).

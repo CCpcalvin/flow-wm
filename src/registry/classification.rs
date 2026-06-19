@@ -5,53 +5,28 @@
 //! top-to-bottom with first-match-wins semantics. Maximized and fullscreen
 //! overrides always take precedence over rules.
 //!
-//! # Design: Platform Independence
+//! # Design: platform independence
 //!
 //! This module is intentionally **platform-independent**. It accepts a
 //! [`WindowCandidate`] (a plain Rust struct with no HWND) and produces a
-//! [`WindowAction`] or [`WindowState`]. This means:
+//! [`WindowAction`] or [`WindowState`]. All classification logic can therefore
+//! be unit-tested without any Win32 mocking, and the Win32 layer that gathers
+//! window metadata is cleanly separated from the decision logic.
 //!
-//! - All classification logic can be **unit-tested without any Win32 mocking**.
-//! - The classification rules are pure functions — same input, same output.
-//! - The Win32 layer (which gathers window metadata) is cleanly separated
-//!   from the decision logic.
+//! # Pipeline (overview)
 //!
-//! # Classification Pipeline
+//! Classification runs after cheap Win32 pre-filters (visible, titled, Alt+Tab
+//! visible, no owner) have already eliminated obvious non-candidates in the
+//! registry layer. Then, in order: maximized → `Ignored(Maximized)`; fullscreen
+//! → `Ignored(Fullscreen)`; otherwise the [`ClassificationPipeline`] runs user
+//! rules, then (future) learned rules, then default rules — first match wins,
+//! falling back to the default action. All regex patterns are pre-compiled at
+//! construction time. The [`matches_rule`] function is kept public for testing
+//! individual rule-matching logic.
 //!
-//! ```text
-//! HWND (raw window handle)
-//!          │
-//!          ▼
-//! ┌─ Win32 Pre-filters (in win32.rs / core.rs) ──────────────────────┐
-//! │  Visible?          ──► skip if not IsWindowVisible               │
-//! │  Has title?        ──► skip if GetWindowTextLengthW == 0         │
-//! │  Alt+Tab visible?  ──► skip if WS_EX_TOOLWINDOW && !WS_EX_APPWINDOW │
-//! │  No owner?         ──► skip if GetWindow(GW_OWNER) != null       │
-//! └───────────────────────────────────────────────────────────────────┘
-//!          │ (passes all pre-filters)
-//!          ▼
-//! ┌─ Maximized? ──► Ignored(IgnoredReason::Maximized)    ← always wins
-//! │
-//! ├─ Fullscreen? ─► Ignored(IgnoredReason::Fullscreen)   ← always wins
-//! │
-//! └─ ClassificationPipeline
-//!     ├─ User rules (first match wins, regex pre-compiled)
-//!     ├─ Learned rules (future, first match wins)
-//!     ├─ Default rules (first match wins, regex pre-compiled)
-//!     └─ Default action (fallback)
-//! ```
-//!
-//! The Win32 pre-filters (visible, titled, Alt+Tab visible, no owner) are
-//! checked in the registry layer (`core.rs`) **before** any classification
-//! happens. This is a performance optimization: cheap Win32 checks eliminate
-//! obvious non-candidates without the cost of process queries or regex
-//! matching. It also means the classification pipeline only ever sees windows
-//! that are genuine user-facing candidates.
-//!
-//! The [`ClassificationPipeline`] provides multi-layer classification with a
-//! single entry point. All regex patterns are pre-compiled at construction
-//! time for performance. The [`matches_rule`] function is kept as a public
-//! utility for testing individual rule matching logic.
+//! See the developer guide's *Window Registry* chapter
+//! (`docs/src/dev-guide/window-registry.md`) for the full classification
+//! flowchart and the default-rule catalogue.
 
 use crate::common::Rect;
 use crate::config::types::{MatchRule, WindowAction, WindowRule, WindowRulesConfig};
@@ -59,20 +34,14 @@ use crate::registry::types::{FloatingState, IgnoredReason, TilingState, WindowSt
 
 // ── WindowCandidate ────────────────────────────────────────────────
 
-/// Window metadata used for rule classification.
+/// Platform-independent snapshot of window metadata used for rule classification.
 ///
-/// This is a platform-independent snapshot of window properties used by
-/// [`ClassificationPipeline`] and [`matches_rule`] to determine the window's
-/// [`WindowAction`]. The Win32 layer fills this struct; the classifier never
-/// touches HWND.
+/// The Win32 layer fills this struct; the classifier never touches HWND. Consumed
+/// by [`ClassificationPipeline`] and [`matches_rule`] to produce a [`WindowAction`].
 ///
-/// # Design: Decoupling from Win32
-///
-/// By using a plain data struct instead of querying Win32 directly, we:
-/// - Make classification testable without any OS dependencies.
-/// - Keep the classifier pure (no side effects, no I/O).
-/// - Allow future support for other windowing systems (X11, Wayland) by
-///   just providing a different `WindowCandidate` source.
+/// See the developer guide's *Window Registry* chapter
+/// (`docs/src/dev-guide/window-registry.md`) for the decoupling rationale and
+/// the full classification algorithm.
 #[derive(Debug, Clone)]
 pub struct WindowCandidate {
     /// Executable name (e.g. `"code.exe"`).
@@ -442,36 +411,16 @@ fn compile_rules(rules: Vec<WindowRule>) -> Vec<CompiledRule> {
 
 /// Multi-layer classification pipeline with pre-compiled regex patterns.
 ///
-/// Evaluates window rules in priority order:
+/// Evaluates rule layers in priority order (first match wins):
 ///
-/// 1. **User rules** — User-defined rules from `stm-rules.yml` (highest priority).
-/// 2. **Learned rules** — Machine-learned rules from user behavior (future; currently empty).
-/// 3. **Default rules** — Bundled default rules (lowest rule priority).
-/// 4. **Default action** — Fallback when no rule matches at any layer.
+/// 1. **User rules** — from `stm-rules.toml` (highest priority).
+/// 2. **Learned rules** — machine-learned (future; currently empty).
+/// 3. **Default rules** — bundled at compile time (lowest rule priority).
+/// 4. **Default action** — fallback when no rule matches at any layer.
 ///
-/// This struct owns all rule layers and provides the single entry point
-/// [`classify`](ClassificationPipeline::classify) used by the registry.
-///
-/// # Why Multi-Layer?
-///
-/// The separation allows:
-/// - Users to override built-in defaults without editing bundled files.
-/// - Future ML-based auto-classification to sit between user and default rules.
-/// - Hot-reload of user rules without restarting the daemon.
-///
-/// # Regex Caching
-///
-/// All regex patterns (`exe_regex`, `title_regex`, `class_regex`,
-/// `process_path_regex`) are pre-compiled at construction time.
-/// This avoids the overhead of compiling regex patterns on
-/// every [`classify()`](Self::classify) call — significant when the daemon
-/// processes hundreds of window events.
-///
-/// # Usage in the Registry
-///
-/// The [`WindowRegistry`](crate::registry::core::WindowRegistry) stores a single
-/// `ClassificationPipeline` instance and delegates all classification to it.
-/// Maximized/fullscreen checks happen before the pipeline is consulted.
+/// All regex patterns are pre-compiled at construction. Entry point:
+/// [`classify`](Self::classify). OS-state overrides (maximized/fullscreen)
+/// are handled before the pipeline runs — see [`classify_with_state_pipeline`].
 pub struct ClassificationPipeline {
     /// User-defined rules with pre-compiled regexes (highest priority after OS overrides).
     user_rules: Vec<CompiledRule>,
@@ -517,14 +466,9 @@ impl ClassificationPipeline {
     /// the action from the first matching rule. If no rule matches at any
     /// layer, returns the `default_action`.
     ///
-    /// This returns a [`WindowAction`] (not [`WindowState`]) — OS overrides
+    /// Returns a [`WindowAction`] (not [`WindowState`]) — OS overrides
     /// (maximized/fullscreen) are handled separately by
     /// [`classify_with_state_pipeline`].
-    ///
-    /// # Performance
-    ///
-    /// All regex patterns are pre-compiled at construction time, so this
-    /// method performs only matching — no regex compilation or allocation.
     #[must_use]
     pub fn classify(&self, candidate: &WindowCandidate) -> WindowAction {
         // 1. User rules (first match wins)

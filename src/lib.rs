@@ -9,89 +9,32 @@
 //!
 //! | Binary | Role |
 //! |--------|------|
-//! | `stmd` | Daemon process — owns all state, manages windows |
-//! | `stm` | CLI client — sends commands to the daemon via IPC |
+//! | `stmd` | Daemon — owns all state, manages windows |
+//! | `stm` | CLI client — sends commands to the daemon via named-pipe IPC |
 //! | `stm-watchdog` | Crash-recovery helper — restores windows if the daemon dies |
 //!
-//! # Architecture Overview
+//! # Modules
 //!
-//! The system is split into layers with clear ownership boundaries:
+//! - [`workspace`] — layout orchestration (`ScrollingSpace`, `Monitor`, `Workspace`)
+//! - [`layout`] — pure layout math: mutation + projection (zero Win32)
+//! - [`registry`] — window metadata, classification, and the Win32 bridge
+//! - [`animation`] — embedded animation crate (`WindowAnimator`, `DwmFlush` pacing)
+//! - [`daemon`] — `ScrollTilingManager` coordinator, hook handlers, dispatch
+//! - [`ipc`] — named-pipe server and message protocol
+//! - [`config`] — TOML config (code is the single source of truth)
+//! - [`common`] — shared bridge types (`WindowId`, `Rect`, `Direction`)
 //!
-//! ```text
-//! ┌──────────────────────────────────────────────────────────┐
-//! │                    stm daemon (main.rs)                  │
-//! │                                                          │
-//! │  ┌──────────────┐   ┌───────────────┐                    │
-//! │  │ IPC Server   │   │ InputInter-   │                    │
-//! │  │ (src/ipc)    │   │ ceptor        │                    │
-//! │  └──────┬───────┘   └──────┬────────┘                    │
-//! │         └──────────┬───────┘                             │
-//! │                    ▼                                     │
-//! │           ┌──────────────┐    ┌──────────────────────┐   │
-//! │           │ ScrollingSpace│◄──►│ WindowRegistry       │   │
-//! │           │ (src/workspace)│   │ (src/registry)       │   │
-//! │           └──────┬───────┘    └──────────────────────┘   │
-//! │                  ▼                                       │
-//! │          ┌──────────────┐                                │
-//! │          │ Compositor   │  →  SetWindowPos (Win32)       │
-//! │          └──────────────┘                                │
-//! │                                                          │
-//! │  ┌──────────────┐   ┌──────────────┐                     │
-//! │  │ src/config   │   │ src/persist  │                     │
-//! │  └──────────────┘   └──────────────┘                     │
-//! └──────────────────────────────────────────────────────────┘
-//! ```
+//! Every layout change flows through a pure three-stage pipeline —
+//! **mutate → project → animate** — and all subsystems take `&mut self` (no
+//! `Arc<Mutex>`; the borrow checker enforces exclusive access).
 //!
-//! # The 2-Layer Layout Pipeline
+//! # Developer guide
 //!
-//! Layout computation follows a functional, declarative pipeline:
-//!
-//! 1. **Virtual Layer** ([`layout::types::VirtualLayout`]) — logical structure on an infinite
-//!    horizontal canvas. Columns store **pixel widths** (`width_px`),
-//!    not absolute x-positions.
-//!
-//! 2. **Projection** ([`layout::projection::project`]) — pure function that converts the
-//!    virtual layout into actual screen coordinates, applying all padding.
-//!    Position is *implicit* from column index and cumulative widths — there is
-//!    no mutable "update Column → propagate to Windows" loop.
-//!
-//! 3. **Animation** — the [`AppliedLayout`](layout::types::AppliedLayout) (new virtual +
-//!    actual layouts) is passed to the animation layer, which compares each window's
-//!    target rect against its real on-screen position and animates only the windows
-//!    that differ.
-//!
-//! Every mutation flows through: **mutate → project → animate**.
-//!
-//! # Ownership Model
-//!
-//! - **[`workspace::ScrollingSpace`]** owns the *layout logic*: virtual layout, focus state,
-//!   column widths, viewport offset. It never touches Win32. It lives inside a
-//!   [`workspace::Workspace`] (one workspace per virtual desktop), which in turn
-//!   lives inside a [`workspace::Monitor`]. The daemon owns `Vec<Monitor>`.
-//!
-//! - **`WindowRegistry`** (not yet implemented) will own the *window metadata*:
-//!   HWND ↔ [`common::types::WindowId`] mapping, window titles/classes, tile/float/ignore
-//!   state. It bridges the layout engine to Win32.
-//!
-//! - **[`common::types::WindowId`]** is the platform-independent bridge type between these two
-//!   components. The layout engine only ever sees `WindowId`; it never knows
-//!   about HWNDs.
-//!
-//! # Padding Strategy
-//!
-//! Padding is handled during projection — outside the Window concept entirely.
-//! The [`layout::types::ActualEntry::rect`] produced by projection is the **final HWND rect**
-//! that can be passed directly to `SetWindowPos`:
-//!
-//! ```text
-//! Column cell (no padding):  [0, 0, 960, 1080]
-//!      │
-//!      │  projection::project_column_rows() applies padding.window_gap on all sides
-//!      ▼
-//! Window rect (HWND):       [4, 4, 952, 1072]
-//! ```
-//!
-//! See [`layout::projection`] module docs for the full container model.
+//! Architecture diagrams, design rationale, the threading model, and deep
+//! algorithm walkthroughs (classification, projection, animation) live in the
+//! mdBook developer guide under `docs/`. Start with *"How to Read This Book"*
+//! (`docs/src/dev-guide/README.md`), which explains the three-layer
+//! documentation strategy used throughout the crate.
 
 pub mod animation;
 pub mod common;

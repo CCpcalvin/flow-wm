@@ -9,6 +9,10 @@
 //! {"type":"stop"}\n
 //! {"status":"ok"}\n
 //! ```
+//!
+//! See the developer guide's *IPC & Watchdog* chapter
+//! (`docs/src/dev-guide/ipc-and-watchdog.md`) for the message catalog and the
+//! named-pipe transport.
 
 use crate::common::Direction;
 use serde::{Deserialize, Serialize};
@@ -33,8 +37,9 @@ pub fn pipe_name() -> String {
 
 /// A command sent from `stm` CLI to the `stmd` daemon.
 ///
-/// Serialised with an externally tag (`"type"` field) and snake_case variant
-/// names, matching the spec in `docs/spec/05-ipc-and-watchdog.md`.
+/// Serialised with an externally tagged `"type"` field and snake_case variant
+/// names. See the developer guide (`docs/src/dev-guide/ipc-and-watchdog.md`)
+/// for the full message catalog.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SocketMessage {
