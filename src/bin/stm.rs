@@ -19,6 +19,7 @@
 //!                                resolves the concrete action by window state)
 //! stm dispatch expandcolumn     Expand the focused column width by one step
 //! stm dispatch shrinkcolumn     Shrink the focused column width by one step
+//! stm dispatch closewindow      Close the currently focused window (gentle WM_CLOSE)
 //! ```
 //!
 //! # Configuration
@@ -169,6 +170,16 @@ enum DispatchCommands {
     /// column to the previous `column_width` boundary and animates the result.
     #[command(name = "shrinkcolumn")]
     ShrinkColumn,
+    /// Close the currently focused window.
+    ///
+    /// Sends [`SocketMessage::CloseWindow`]. The daemon asks the focused
+    /// window to close itself gently via Win32 `WM_CLOSE` — the same message
+    /// Windows sends when the user clicks the window's ✕ button — so the
+    /// application can run its normal shutdown logic (prompt to save unsaved
+    /// work, release resources, etc.). The window is removed from the layout
+    /// automatically once Win32 reports its destruction.
+    #[command(name = "closewindow")]
+    CloseWindow,
 }
 
 /// Cardinal direction for `stm dispatch focus <dir>`.
@@ -409,6 +420,7 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
         DispatchCommands::ShrinkColumn => {
             send_command(SocketMessage::ShrinkColumn, "column shrunk")
         }
+        DispatchCommands::CloseWindow => send_command(SocketMessage::CloseWindow, "window closed"),
     }
 }
 
@@ -889,6 +901,28 @@ mod tests {
             } => {}
             other => panic!("expected Dispatch::ShrinkColumn, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_dispatch_closewindow() {
+        // Positive: `stm dispatch closewindow` parses to the CloseWindow variant.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "closewindow"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::CloseWindow,
+            } => {}
+            other => panic!("expected Dispatch::CloseWindow, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_closewindow_extra_arg_fails() {
+        // Negative: closewindow takes no arguments.
+        let result = Cli::try_parse_from(["stm", "dispatch", "closewindow", "extra"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch closewindow' with an extra arg should fail"
+        );
     }
 
     #[test]

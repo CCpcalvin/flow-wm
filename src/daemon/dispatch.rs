@@ -65,7 +65,7 @@ impl ScrollTilingManager {
             SocketMessage::ToggleMonocle => self.dispatch_toggle_monocle(),
             SocketMessage::PlaceAbove => unimplemented_command("place_above"),
             SocketMessage::Promote => unimplemented_command("promote"),
-            SocketMessage::CloseWindow => unimplemented_command("close_window"),
+            SocketMessage::CloseWindow => self.dispatch_close_window(),
 
             // --- Queries ---
             SocketMessage::QueryWindowsAll => self.query_windows_all(),
@@ -119,6 +119,48 @@ impl ScrollTilingManager {
             None => SocketResponse::Error {
                 message: "no window to focus in that direction".into(),
             },
+        }
+    }
+
+    /// Close the currently focused window.
+    ///
+    /// Resolves the focused [`WindowId`](crate::common::WindowId) from the
+    /// layout engine and asks Win32 to close that window gently via
+    /// `WM_CLOSE` (see [`registry_win32::close_window`] for why this is
+    /// preferred over `DestroyWindow`).
+    ///
+    /// # Why No Layout Mutation Here?
+    ///
+    /// Closing is **asynchronous**: [`registry_win32::close_window`] only
+    /// *queues* a `WM_CLOSE` message and returns immediately. The window
+    /// disappears later, once the owning application processes the message
+    /// and destroys the window. At that point Win32 fires
+    /// `EVENT_OBJECT_DESTROY`, which the registry hook turns into a
+    /// `Destroyed` event — the daemon's normal event loop then removes the
+    /// window from both the registry and the layout engine, and animates the
+    /// gap closing. Mutating the layout here would race that pipeline and
+    /// risk a double-remove.
+    ///
+    /// # Error Cases
+    ///
+    /// - No focused window (empty workspace) → error, surfaced so the CLI
+    ///   can report it.
+    /// - `WM_CLOSE` could not be queued (the window vanished mid-call,
+    ///   etc.) → error.
+    fn dispatch_close_window(&mut self) -> SocketResponse {
+        let Some(focused) = self.layout.focused() else {
+            return SocketResponse::Error {
+                message: "no focused window to close".into(),
+            };
+        };
+        let target_hwnd = focused.0;
+        if registry_win32::close_window(target_hwnd) {
+            SocketResponse::Ok
+        } else {
+            log::warn!("dispatch_close_window: close_window failed for hwnd {target_hwnd}");
+            SocketResponse::Error {
+                message: "failed to request window close".into(),
+            }
         }
     }
 
