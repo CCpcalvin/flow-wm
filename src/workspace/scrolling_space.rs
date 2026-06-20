@@ -1768,7 +1768,8 @@ mod tests {
     fn engine_center_grid_and_absolute_differ_on_same_layout() {
         // Property: the two variants produce DIFFERENT offsets on the same
         // layout (the motivating use case -- grid snaps to slot, absolute
-        // does not). The 50px difference below equals half a slot step.
+        // does not). The 52px difference below is the gap between the
+        // slot-aligned offset and the free-form midpoint.
         let mut engine_grid = center_test_engine();
         engine_grid.add_window(WindowId(1));
         let grid_offset = engine_grid
@@ -1876,6 +1877,75 @@ mod tests {
         assert_ne!(
             off_first, off_last,
             "different focus columns must produce different slot-aligned offsets"
+        );
+    }
+
+    #[test]
+    fn engine_center_grid_falls_back_to_col0_when_focus_is_stale() {
+        // Contract: `focus_col_index` returns 0 when `self.focused` points
+        // at a window no longer in the layout. `center_grid` must then
+        // behave as if column 0 were focused. Three columns are used so
+        // that col-0 and col-N produce visibly different offsets.
+        let mut engine_stale = center_test_engine();
+        engine_stale.add_window(WindowId(1));
+        engine_stale.add_window(WindowId(2));
+        engine_stale.add_window(WindowId(3));
+        engine_stale.set_focus(WindowId(99)); // not in layout
+
+        let mut engine_col0 = center_test_engine();
+        engine_col0.add_window(WindowId(1));
+        engine_col0.add_window(WindowId(2));
+        engine_col0.add_window(WindowId(3));
+        engine_col0.set_focus(WindowId(1)); // column 0 explicitly
+
+        let off_stale = engine_stale
+            .center_grid()
+            .expect("center_grid with stale focus must not be None")
+            .virtual_layout
+            .viewport_offset;
+        let off_col0 = engine_col0
+            .center_grid()
+            .expect("center_grid with explicit col-0 focus")
+            .virtual_layout
+            .viewport_offset;
+
+        assert_eq!(
+            off_stale, off_col0,
+            "stale focus must fall back to column 0, matching explicit focus on column 0"
+        );
+    }
+
+    #[test]
+    fn engine_center_grid_falls_back_to_col0_when_no_focus() {
+        // Contract: `focus_col_index` returns 0 when `self.focused` is None.
+        // `engine.focused` is assigned directly to bypass `set_focus` (which
+        // always writes Some) and simulate the no-focus state.
+        let mut engine_none = center_test_engine();
+        engine_none.add_window(WindowId(1));
+        engine_none.add_window(WindowId(2));
+        engine_none.add_window(WindowId(3));
+        engine_none.focused = None;
+
+        let mut engine_col0 = center_test_engine();
+        engine_col0.add_window(WindowId(1));
+        engine_col0.add_window(WindowId(2));
+        engine_col0.add_window(WindowId(3));
+        engine_col0.set_focus(WindowId(1)); // column 0 explicitly
+
+        let off_none = engine_none
+            .center_grid()
+            .expect("center_grid with no focus must not be None")
+            .virtual_layout
+            .viewport_offset;
+        let off_col0 = engine_col0
+            .center_grid()
+            .expect("center_grid with explicit col-0 focus")
+            .virtual_layout
+            .viewport_offset;
+
+        assert_eq!(
+            off_none, off_col0,
+            "no focus must fall back to column 0, matching explicit focus on column 0"
         );
     }
 }

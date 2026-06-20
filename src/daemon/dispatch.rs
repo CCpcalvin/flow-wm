@@ -621,12 +621,13 @@ impl ScrollTilingManager {
         // exactly-full screen is left untouched.
         let dest_applied = match self.active_monitor_mut().workspace_mut(dest_id) {
             Some(ws) => {
-                let applied = ws.scrolling.insert_window(focused);
-                if applied.virtual_layout.columns.len() < ws.scrolling.columns_per_screen() as usize
+                let post_insert = ws.scrolling.insert_window(focused);
+                if post_insert.virtual_layout.columns.len()
+                    < ws.scrolling.columns_per_screen() as usize
                 {
-                    ws.scrolling.center_grid().unwrap_or(applied)
+                    ws.scrolling.center_grid().unwrap_or(post_insert)
                 } else {
-                    applied
+                    post_insert
                 }
             }
             None => {

@@ -757,82 +757,18 @@ pub fn toggle_monocle(
 
 /// Compute a **slot-aligned** `viewport_offset` that centers the grid.
 ///
-/// This is the grid-aligned center function — the counterpart of
-/// [`center_viewport_absolute`]. It chooses a slot-aligned offset
-/// (`k * slot` where `slot = col_width + gap`) that satisfies two goals:
+/// Counterpart of [`center_viewport_absolute`]. Returns a multiple of
+/// `slot = col_width + gap` that keeps all columns visible when
+/// `num_columns <= columns_per_screen`, or shows exactly
+/// `columns_per_screen` columns centered on `focus_col` otherwise.
+/// May degenerate to `0` when no slot-aligned offset keeps all columns
+/// visible (single column on a wide monitor). See
+/// (`docs/src/dev-guide/layout/mutations.md`) for the full algorithm,
+/// tie-breaking policy, and worked examples.
 ///
-/// 1. **All relevant columns are visible** on screen.
-/// 2. **The focus column is as centered as possible** in the viewport.
+/// # Panics
 ///
-/// # Two cases
-///
-/// The decision is based on the user's `columns_per_screen` setting
-/// (see the rationale section below for why pixel geometry is not used):
-///
-/// **All columns fit** (`N ≤ columns_per_screen`):
-/// Every column must be fully visible. The valid offset range is
-/// `[N*slot - monitor_width, gap]`. Among slot-aligned offsets in this range,
-/// we pick the one closest to centering the focus column. If no slot-aligned
-/// offset exists (canvas barely exceeds monitor), we fall back to offset `0`.
-///
-/// **Scroll needed** (`N > columns_per_screen`):
-/// Exactly `C = columns_per_screen` columns are shown — the screen is always
-/// **completely filled with real columns, no blanks on either side**.
-///
-/// The leftmost visible column is `start`. It is chosen from the valid range
-/// `[max(0, f−C+1), min(f, N−C)]` which guarantees: (a) no columns before
-/// column 0, (b) no columns past the last column, and (c) the focus column
-/// is visible. Among valid `start` values, the one closest to centering the
-/// focus is selected: `ideal_start = f − C/2` (integer division, placing the
-/// focus slightly right of center for even C). The offset is
-/// `start * slot` — slot-aligned by construction.
-///
-/// # Example (N = 7, C = 4)
-///
-/// | Focus | `start` | Visible columns |
-/// |-------|---------|-----------------|
-/// | a (0) | 0       | `[a, b, c, d]`  |
-/// | d (3) | 1       | `[b, c, d, e]`  |
-/// | g (6) | 3       | `[d, e, f, g]`  |
-///
-/// # Why `columns_per_screen`, not pixel geometry
-///
-/// The user sets `columns_per_screen` to declare how many columns they want
-/// visible at once. When N ≤ `columns_per_screen`, we treat all columns as
-/// "fitting" even if the explicit `column_width` makes the total slightly
-/// exceed the monitor — the edge-case fallback (offset 0) handles the tiny
-/// overflow gracefully. When N > `columns_per_screen`, we show exactly C
-/// columns filled edge-to-edge because the user's own setting says not all
-/// columns should be visible.
-///
-/// # Slot model
-///
-/// All initialization columns have the equal base width
-/// ([`column_width`](MutationConfig::column_width)), so
-/// `slot = column_width + gap`. Column `i` occupies canvas range
-/// `[i*slot + gap, (i+1)*slot]`.
-///
-/// # Tie-breaking
-///
-/// **All-fit case**: when two slot-aligned offsets equally center the focus
-/// column, the larger offset (less negative / closer to zero) is preferred.
-/// This minimizes camera movement from the initial `viewport_offset = 0` and
-/// keeps the view left-aligned.
-///
-/// **Scroll case**: when the ideal `start` is a half-integer (even C),
-/// integer division truncates toward zero, preferring the smaller `start`
-/// (less scrolling, focus slightly right of center).
-///
-/// # Arguments
-///
-/// * `num_columns` — Total number of columns in the initial layout.
-/// * `focus_col` — Index of the focus column (0-based).
-/// * `config` — Mutation configuration.
-///
-/// # Returns
-///
-/// The computed `viewport_offset` as a pixel value (may be negative when the
-/// monitor is wider than the canvas, centering the entire canvas rightward).
+/// Debug builds panic if `num_columns == 0` or `focus_col >= num_columns`.
 #[must_use]
 pub fn center_viewport_grid(num_columns: usize, focus_col: usize, config: &MutationConfig) -> i32 {
     debug_assert!(
