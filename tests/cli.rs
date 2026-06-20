@@ -23,6 +23,9 @@ mod dispatch_setwindow;
 #[path = "cli/dispatch_swap.rs"]
 mod dispatch_swap;
 #[cfg(debug_assertions)]
+#[path = "cli/dispatch_workspace.rs"]
+mod dispatch_workspace;
+#[cfg(debug_assertions)]
 #[path = "cli/registry.rs"]
 mod registry;
 #[cfg(debug_assertions)]

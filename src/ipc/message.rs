@@ -141,6 +141,19 @@ pub enum SocketMessage {
         width_px: u32,
     },
 
+    // --- Viewport center ---
+    /// Center the viewport on the focused window, free-form (no slot snapping).
+    ///
+    /// Maps to [`ScrollingSpace::center_absolute`](crate::workspace::ScrollingSpace::center_absolute).
+    /// Contrast with [`CenterGrid`](Self::CenterGrid), which snaps to the grid.
+    Center,
+    /// Center the viewport on the grid (slot-aligned, reuses initial-layout logic).
+    ///
+    /// Maps to [`ScrollingSpace::center_grid`](crate::workspace::ScrollingSpace::center_grid).
+    /// When the column count fits `columns_per_screen`, this is equivalent to
+    /// re-running `initialize_windows`'s viewport offset computation.
+    CenterGrid,
+
     // --- Window state ---
     /// Set the focused window's mode (float, tile, or cycle).
     ///
@@ -198,9 +211,10 @@ pub enum SocketMessage {
     /// detached from the active workspace's `ScrollingSpace` (with local
     /// focus succession — no OS foreground focus push) and re-inserted into
     /// the target workspace's `ScrollingSpace` after its currently focused
-    /// column. Focus stays on the source workspace; the moved window becomes
-    /// the destination workspace's focus. The daemon animates both mutated
-    /// workspaces in a single batch (see `dispatch_move_window_to_workspace`).
+    /// column. The camera then follows the moved window: the active workspace
+    /// switches to the target so the moved window is visible (see
+    /// `dispatch_move_window_to_workspace`). Moving to the currently active
+    /// workspace is a no-op.
     ///
     /// The variant is named `MoveWindowToWorkspace` (rather than the shorter
     /// `MoveToWorkspace`) to mirror the sibling [`MoveWindow`](Self::MoveWindow)
@@ -448,6 +462,8 @@ mod tests {
             SocketMessage::ScrollRight,
             SocketMessage::ExpandColumn,
             SocketMessage::ShrinkColumn,
+            SocketMessage::Center,
+            SocketMessage::CenterGrid,
             SocketMessage::ToggleFloat,
             SocketMessage::ToggleMonocle,
             SocketMessage::PlaceAbove,
@@ -659,6 +675,8 @@ mod tests {
             SocketMessage::ScrollRight,
             SocketMessage::ExpandColumn,
             SocketMessage::ShrinkColumn,
+            SocketMessage::Center,
+            SocketMessage::CenterGrid,
             SocketMessage::SetColumnWidth { width_px: 800 },
             SocketMessage::SetWindow {
                 mode: WindowMode::Float,
