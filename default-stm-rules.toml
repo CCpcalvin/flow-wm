@@ -22,9 +22,13 @@ default_action = "tile"
 match = { class = "Shell_TrayWnd" }
 action = "ignore"
 
-# Desktop wallpaper host process (Windows 10+)
+# WinUI / XAML Islands desktop content bridge — an invisible helper window
+# (title "DesktopWindowXamlSource") created by WinUI 3 / XAML Islands hosts.
+# The Windows 11 Start Menu surface is one of these, hosted by explorer.exe.
+# It passes stm's visibility/Alt+Tab/owner gates but is never a real app
+# window the user would want tiled, so ignore it by class (race-free).
 [[rules]]
-match = { exe = "ApplicationFrameHost.exe", class = "Windows.UI.Core.CoreWindow" }
+match = { class = "Windows.UI.Composition.DesktopWindowContentBridge" }
 action = "ignore"
 
 # Windows Search overlay
