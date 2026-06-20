@@ -176,6 +176,20 @@ impl ScrollingSpace {
         &self.monitor
     }
 
+    /// Get the configured [`Padding`].
+    ///
+    /// The workspace-op dispatch handlers use the cached `window_gap` to
+    /// compute the vertical parking unit (`monitor_height + window_gap`) for
+    /// [`workspace_y_offset`](crate::workspace::workspace_y_offset). All
+    /// workspaces on a given monitor share the same padding — the daemon
+    /// derives a single [`Padding`](crate::layout::types::Padding) at
+    /// construction and threads it into every workspace's
+    /// [`ScrollingSpace`].
+    #[must_use]
+    pub fn padding(&self) -> Padding {
+        self.config.padding
+    }
+
     /// Apply a mutation and compute the resulting [`AppliedLayout`].
     ///
     /// This is the core pipeline that every mutation flows through:
@@ -1587,5 +1601,37 @@ mod tests {
         let (min, max) = engine.column_width_bounds();
         assert_eq!(min, 500);
         assert_eq!(max, 1904);
+    }
+
+    // --- padding accessor (Phase 4 workspace-op support) ---
+    //
+    // The `padding()` accessor is how the workspace-op dispatch handlers read
+    // the cached `window_gap` to compute the vertical parking unit
+    // (`monitor_height + window_gap`) fed to `workspace_y_offset`. It is a
+    // trivial getter, but it had zero direct coverage — every `test_padding()`
+    // reference elsewhere in this module is the *helper*, not the accessor.
+
+    #[test]
+    fn engine_padding_returns_configured_value() {
+        // Arrange: construct an engine with the canonical test padding.
+        // Act/Assert: the accessor returns exactly the Padding handed to `new`,
+        // unchanged — the dispatch path depends on this being the stored value.
+        let engine = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
+        assert_eq!(engine.padding(), test_padding());
+    }
+
+    #[test]
+    fn engine_padding_preserves_non_default_margins() {
+        // Arrange: a distinct padding with non-zero up/down margins and a
+        // different gap, so a future refactor that only stores `window_gap`
+        // (or hardcodes the default) would be caught.
+        // Act/Assert: the full Padding (gap + up + down) round-trips verbatim.
+        let custom = Padding {
+            window_gap: 12,
+            up: 8,
+            down: 40,
+        };
+        let engine = ScrollingSpace::new(test_monitor(), 960, 320, custom, 4);
+        assert_eq!(engine.padding(), custom);
     }
 }

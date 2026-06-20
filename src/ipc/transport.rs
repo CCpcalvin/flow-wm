@@ -8,12 +8,11 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, Instant};
 
-use windows::core::HRESULT;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
-    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
@@ -21,6 +20,7 @@ use windows::Win32::System::Pipes::{
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, WaitForSingleObject};
+use windows::core::HRESULT;
 
 use super::message::{self, SocketMessage, SocketResponse};
 
@@ -435,7 +435,10 @@ unsafe fn await_overlapped(
     deadline: Instant,
 ) -> io::Result<u32> {
     let ms = ms_until(deadline).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::TimedOut, "IPC operation timed out (deadline passed)")
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "IPC operation timed out (deadline passed)",
+        )
     })?;
 
     match unsafe { WaitForSingleObject(event, ms) } {
@@ -445,12 +448,14 @@ unsafe fn await_overlapped(
             let mut transferred = 0u32;
             // SAFETY: `overlapped` was just used to start an I/O on `handle`
             // and its event has signalled completion; we only read the result.
-            unsafe {
-                GetOverlappedResult(handle, overlapped, &mut transferred, false)
-            }
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::BrokenPipe, format!("GetOverlappedResult: {e}"))
-            })?;
+            unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, false) }.map_err(
+                |e| {
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        format!("GetOverlappedResult: {e}"),
+                    )
+                },
+            )?;
             Ok(transferred)
         }
         // WAIT_TIMEOUT (258): the deadline expired before any I/O completed.

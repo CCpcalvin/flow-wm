@@ -4,13 +4,20 @@
 //!
 //! - [`ScrollTilingManager::animate_layout`] — converts an [`AppliedLayout`]
 //!   into animation targets and submits to the animator.
+//! - [`ScrollTilingManager::animate_workspaces`] — multi-workspace variant
+//!   that submits a single combined batch with per-workspace vertical
+//!   `y_offset` applied (used by `SwitchWorkspace` / `MoveWindowToWorkspace`).
+//! - [`ScrollTilingManager::teleport_workspaces`] — bypass-animator variant
+//!   that directly `SetWindowPos`-es bystander workspaces into place with no
+//!   animation, used to maintain the workspace stacking invariant during
+//!   switches without visual noise.
 //! - [`animate_layout_raw`] — standalone version used during construction when
 //!   `ScrollTilingManager` doesn't exist yet.
 
 use windows::Win32::Foundation::HWND;
 
 use crate::animation::{IVec2, WindowAnimator, WindowRef, WindowTarget};
-use crate::layout::types::AppliedLayout;
+use crate::layout::types::{ActualLayout, AppliedLayout};
 use crate::registry::WindowRegistry;
 
 use super::types::ScrollTilingManager;
@@ -125,6 +132,152 @@ impl ScrollTilingManager {
 
         if let Err(e) = self.animator.animate(targets) {
             log::warn!("animation error: {e}");
+        }
+    }
+
+    /// Submit a single combined animation batch spanning multiple workspaces.
+    ///
+    /// Each `(ActualLayout, y_offset)` pair describes one workspace's current
+    /// on-screen layout plus the vertical parking offset to apply to every
+    /// window in that workspace. All windows from all pairs are merged into a
+    /// single [`Vec<WindowTarget>`] and submitted to the animator in one call.
+    /// This is what makes a workspace switch animate as a single coordinated
+    /// transition rather than N independent moves — the animator's worker
+    /// thread builds tweens for every target simultaneously and drives them at
+    /// a shared frame rate.
+    ///
+    /// # Where the `y_offset` is applied
+    ///
+    /// The offset is applied **here** in the daemon bridge, not in
+    /// [`layout::projection`](crate::layout::projection). The projection layer
+    /// stays pure and horizontal-only — it always produces workspace-local
+    /// coordinates, and this method decides where each workspace sits
+    /// vertically in the monitor stack. See
+    /// [`workspace_y_offset`](crate::workspace::workspace_y_offset) for the
+    /// offset computation.
+    ///
+    /// # When to use this vs [`animate_layout`](Self::animate_layout)
+    ///
+    /// - `animate_layout` — single-workspace mutation (scroll, focus, swap,
+    ///   resize). One workspace, `y_offset = 0`.
+    /// - `animate_workspaces` — workspace ops (switch, move-to-workspace)
+    ///   where two workspaces animate in lockstep with different `y_offset`s.
+    ///
+    /// # Registry sync is the caller's responsibility
+    ///
+    /// Unlike [`animate_layout`](Self::animate_layout), this method does
+    /// **not** call [`registry.update_tiling_slots_from_layout`] or
+    /// [`registry.update_tiled_rects`] — those operate on a single virtual
+    /// layout at a time, and the caller must invoke them per-workspace
+    /// before constructing the `(ActualLayout, y_offset)` pairs. This method
+    /// only submits animation targets.
+    ///
+    /// [`registry.update_tiling_slots_from_layout`]:
+    ///     crate::registry::WindowRegistry::update_tiling_slots_from_layout
+    /// [`registry.update_tiled_rects`]:
+    ///     crate::registry::WindowRegistry::update_tiled_rects
+    pub(super) fn animate_workspaces(&mut self, batches: &[(ActualLayout, i32)]) {
+        if batches.is_empty() {
+            return;
+        }
+
+        // Build the combined target list. Iterating with explicit loops
+        // (rather than `flat_map`) lets us hold one `&self.registry` borrow
+        // at a time without entangling the borrow checker across closures.
+        let mut targets: Vec<WindowTarget> = Vec::new();
+        for (layout, y_offset) in batches {
+            for entry in &layout.entries {
+                let invisible_bounds = self
+                    .registry
+                    .get_window(HWND(entry.window_id.0 as *mut _))
+                    .map(|w| w.invisible_bounds)
+                    .unwrap_or_default();
+
+                // Translate visible-rect → window-rect, then apply the
+                // vertical offset. The order doesn't matter mathematically
+                // (offset is a pure y translation, invisible_bounds adjusts
+                // y by a fixed `-top`), but applying the offset last keeps
+                // the "workspace-local rect first, workspace stack second"
+                // mental model clear.
+                let window_rect = invisible_bounds.visible_to_window(entry.rect);
+                targets.push(WindowTarget::new(
+                    WindowRef(entry.window_id.0),
+                    IVec2::new(window_rect.x, window_rect.y + y_offset),
+                    IVec2::new(window_rect.width, window_rect.height),
+                ));
+            }
+        }
+
+        if targets.is_empty() {
+            return;
+        }
+
+        log::debug!(
+            "animate_workspaces: submitting {} targets across {} workspace batch(es)",
+            targets.len(),
+            batches.len()
+        );
+
+        if let Err(e) = self.animator.animate(targets) {
+            log::warn!("animate_workspaces error: {e}");
+        }
+    }
+
+    /// Silently teleport windows across multiple workspaces, bypassing the animator.
+    ///
+    /// Each `(ActualLayout, y_offset)` pair is rendered by calling
+    /// [`set_window_rect`](crate::registry::win32::set_window_rect) directly
+    /// for every window — an instant `SetWindowPos` with no tweening. This is
+    /// the **bystander path** used during workspace switches to relocate
+    /// non-participating workspaces whose parking side changed (e.g. ws 3-7
+    /// when switching 2 → 8: they were below active 2 but must end up above
+    /// active 8). They snap into place instantly so the user's attention
+    /// stays on the two workspaces that are actually animating.
+    ///
+    /// # Why bypass the animator?
+    ///
+    /// The animator's `RetargetFromCurrent` interrupt policy would animate
+    /// every retargeted window from its current position to the new target.
+    /// For a 10-workspace switch that could mean eight bystander workspaces
+    /// all visibly sliding across the screen at once. Teleporting them keeps
+    /// the animation focused on the participant workspaces and keeps the
+    /// workspace stacking invariant intact.
+    ///
+    /// # Registry sync is the caller's responsibility
+    ///
+    /// Like [`animate_workspaces`](Self::animate_workspaces), this method
+    /// only submits positions to Win32. It does **not** update tiling slots
+    /// or tiled rects in the registry — the caller handles that
+    /// per-workspace as needed.
+    ///
+    /// # Error handling
+    ///
+    /// Per-window failures are logged at `warn` level but never propagated.
+    /// A failed teleport leaves a window at its old position — a minor
+    /// visual inconsistency on a non-visible workspace, not a crash.
+    pub(super) fn teleport_workspaces(&self, batches: &[(ActualLayout, i32)]) {
+        for (layout, y_offset) in batches {
+            for entry in &layout.entries {
+                let invisible_bounds = self
+                    .registry
+                    .get_window(HWND(entry.window_id.0 as *mut _))
+                    .map(|w| w.invisible_bounds)
+                    .unwrap_or_default();
+
+                let window_rect = invisible_bounds.visible_to_window(entry.rect);
+                let target_y = window_rect.y + y_offset;
+
+                // Direct SetWindowPos — bypass the animator entirely.
+                // Per-window result ignored: teleport is best-effort, and a
+                // single failure must not abort the rest of the batch.
+                let _ = crate::registry::win32::set_window_rect(
+                    entry.window_id.0,
+                    window_rect.x,
+                    target_y,
+                    window_rect.width,
+                    window_rect.height,
+                );
+            }
         }
     }
 }

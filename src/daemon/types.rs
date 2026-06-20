@@ -90,7 +90,7 @@ pub struct ScrollTilingManager {
     /// its own vertical stack of [`Workspace`]s.
     ///
     /// The daemon currently initialises exactly one monitor (the primary
-    /// display) with one workspace; multi-monitor and multi-workspace support
+    /// display) with ten workspaces (see `new.rs`); multi-monitor support
     /// will grow this vector. Use [`active_monitor`](Self::active_monitor) to
     /// reach the monitor that currently owns keyboard focus.
     pub(super) monitors: Vec<Monitor>,

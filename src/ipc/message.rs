@@ -139,10 +139,10 @@ pub enum SocketMessage {
 
     // --- Workspace ---
     //
-    // These three messages form the niri-style virtual-desktop surface. The
-    // daemon currently answers each with `unimplemented_command` — the
-    // protocol shape is locked in now so the CLI, keybindings, and docs can
-    // stabilise while the animation design for switching workspaces is decided.
+    // These three messages form the niri-style virtual-desktop surface.
+    // `SwitchWorkspace` and `MoveWindowToWorkspace` are implemented (see
+    // `daemon::dispatch`); `SwapWorkspace` is still a stub pending a separate
+    // animation model.
     //
     // The `workspace_id` field carries a [`crate::workspace::WorkspaceId`]
     // (a `u32` newtype over niri-style IDs). On the wire it serialises as a
@@ -171,11 +171,20 @@ pub enum SocketMessage {
     },
     /// Move the focused window to the target workspace.
     ///
-    /// Mirrors `stm dispatch movetoworkspace <id>`. The window is detached
-    /// from the current `ScrollingSpace`, re-inserted into the target
-    /// workspace's `ScrollingSpace`, and (in the eventual implementation)
-    /// focus either follows it or stays put according to config.
-    MoveToWorkspace {
+    /// Mirrors `stm dispatch movetoworkspace <id>`. The focused window is
+    /// detached from the active workspace's `ScrollingSpace` (with local
+    /// focus succession — no OS foreground focus push) and re-inserted into
+    /// the target workspace's `ScrollingSpace` after its currently focused
+    /// column. Focus stays on the source workspace; the moved window becomes
+    /// the destination workspace's focus. The daemon animates both mutated
+    /// workspaces in a single batch (see `dispatch_move_window_to_workspace`).
+    ///
+    /// The variant is named `MoveWindowToWorkspace` (rather than the shorter
+    /// `MoveToWorkspace`) to mirror the sibling [`MoveWindow`](Self::MoveWindow)
+    /// message: both operate on the focused *window*, and the longer name
+    /// disambiguates from future workspace-level moves. The CLI surface
+    /// keeps the shorter `movetoworkspace` for brevity.
+    MoveWindowToWorkspace {
         /// Destination workspace identifier.
         workspace_id: u32,
     },
@@ -471,15 +480,21 @@ mod tests {
         assert_eq!(parsed, SocketMessage::SwapWorkspace { workspace_id: 7 });
     }
 
-    // Positive: round-trip MoveToWorkspace
+    // Positive: round-trip MoveWindowToWorkspace
     #[test]
-    fn roundtrip_move_to_workspace() {
-        let msg = SocketMessage::MoveToWorkspace { workspace_id: 11 };
+    fn roundtrip_move_window_to_workspace() {
+        let msg = SocketMessage::MoveWindowToWorkspace { workspace_id: 11 };
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"type":"move_to_workspace","workspace_id":11}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"move_window_to_workspace","workspace_id":11}"#
+        );
 
         let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, SocketMessage::MoveToWorkspace { workspace_id: 11 });
+        assert_eq!(
+            parsed,
+            SocketMessage::MoveWindowToWorkspace { workspace_id: 11 }
+        );
     }
 
     // Positive: workspace_id of 0 round-trips (boundary value)
@@ -490,7 +505,7 @@ mod tests {
         for msg in [
             SocketMessage::SwitchWorkspace { workspace_id: 0 },
             SocketMessage::SwapWorkspace { workspace_id: 0 },
-            SocketMessage::MoveToWorkspace { workspace_id: 0 },
+            SocketMessage::MoveWindowToWorkspace { workspace_id: 0 },
         ] {
             let wire = encode_message(&msg).unwrap();
             let parsed: Option<SocketMessage> = decode_message(&wire);
@@ -587,7 +602,7 @@ mod tests {
             SocketMessage::ForgetAllApps,
             SocketMessage::SwitchWorkspace { workspace_id: 1 },
             SocketMessage::SwapWorkspace { workspace_id: 2 },
-            SocketMessage::MoveToWorkspace { workspace_id: 3 },
+            SocketMessage::MoveWindowToWorkspace { workspace_id: 3 },
         ];
 
         for msg in &all_variants {

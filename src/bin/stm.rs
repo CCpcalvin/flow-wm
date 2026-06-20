@@ -214,12 +214,18 @@ enum DispatchCommands {
     },
     /// Move the focused window to another workspace.
     ///
-    /// Maps to [`SocketMessage::MoveToWorkspace`]. Sends
-    /// `stm dispatch movetoworkspace <id>` to the daemon, which will
-    /// (eventually) detach the focused window from the current
-    /// `ScrollingSpace` and re-insert it into the target workspace.
+    /// Maps to [`SocketMessage::MoveWindowToWorkspace`]. Sends
+    /// `stm dispatch movetoworkspace <id>` to the daemon, which detaches the
+    /// focused window from the active workspace's `ScrollingSpace` (with
+    /// local focus succession — no OS foreground focus push) and re-inserts
+    /// it into the target workspace's `ScrollingSpace` after its focused
+    /// column. Focus stays on the source workspace.
+    ///
+    /// The CLI command name is the shorter `movetoworkspace` for brevity,
+    /// even though the underlying IPC variant is `MoveWindowToWorkspace`
+    /// (mirroring the sibling `MoveWindow` operation).
     #[command(name = "movetoworkspace")]
-    MoveToWorkspace {
+    MoveWindowToWorkspace {
         /// Identifier of the destination workspace.
         workspace_id: u32,
     },
@@ -480,8 +486,8 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
             SocketMessage::SwapWorkspace { workspace_id },
             "workspace swapped",
         ),
-        DispatchCommands::MoveToWorkspace { workspace_id } => send_command(
-            SocketMessage::MoveToWorkspace { workspace_id },
+        DispatchCommands::MoveWindowToWorkspace { workspace_id } => send_command(
+            SocketMessage::MoveWindowToWorkspace { workspace_id },
             "window moved to workspace",
         ),
     }
@@ -1153,12 +1159,14 @@ mod tests {
     #[test]
     fn parse_dispatch_movetoworkspace() {
         // Positive: `stm dispatch movetoworkspace 11` parses with workspace_id = 11.
+        // The CLI command name stays `movetoworkspace` (short form) even though
+        // the underlying Rust variant is `MoveWindowToWorkspace`.
         let cli = Cli::try_parse_from(["stm", "dispatch", "movetoworkspace", "11"]).unwrap();
         match cli.command {
             Commands::Dispatch {
-                command: DispatchCommands::MoveToWorkspace { workspace_id: 11 },
+                command: DispatchCommands::MoveWindowToWorkspace { workspace_id: 11 },
             } => {}
-            other => panic!("expected Dispatch::MoveToWorkspace(11), got: {other:?}"),
+            other => panic!("expected Dispatch::MoveWindowToWorkspace(11), got: {other:?}"),
         }
     }
 
