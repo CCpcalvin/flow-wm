@@ -418,10 +418,12 @@ impl ScrollTilingManager {
             };
         }
 
-        // Geometry capture: every workspace on this monitor shares the same
-        // work-area and padding (derived once from StmConfig at construction),
-        // so the active workspace's values are authoritative for all.
-        let monitor_height = self.active_monitor().work_area().height;
+        // Geometry capture for the parking offset: parked workspaces must
+        // travel the FULL physical monitor height to stay completely
+        // off-screen — the taskbar-excluded work area would leave a slice
+        // peeking past the taskbar strip. The window_gap is the same value
+        // used intra-workspace, so stacking looks consistent with tiling.
+        let monitor_height = self.active_monitor().screen_rect().height;
         let window_gap = self.active_scrolling().padding().window_gap;
 
         // Update the active index synchronously. The id was just validated
@@ -549,8 +551,11 @@ impl ScrollTilingManager {
         // departs, but the user's viewport stays put.
         let active_id = self.active_monitor().active_workspace_id();
 
-        // Geometry capture: shared across all workspaces on the monitor.
-        let monitor_height = self.active_monitor().work_area().height;
+        // Geometry capture: shared across all workspaces on the monitor. Uses
+        // the full physical height (not the work area) so parked workspaces
+        // stay fully off-screen — see `dispatch_switch_workspace` for the
+        // full rationale.
+        let monitor_height = self.active_monitor().screen_rect().height;
         let window_gap = self.active_scrolling().padding().window_gap;
 
         // --- Mutation 1: remove from source (the active workspace). ---

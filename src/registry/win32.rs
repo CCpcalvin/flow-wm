@@ -989,55 +989,98 @@ pub fn get_window_info(hwnd: HWND) -> Result<WindowInfo, String> {
 
 // ── Monitor queries ──────────────────────────────────────────────────
 
-/// Get the work area of the primary monitor (excluding taskbar).
+/// The two coordinate rectangles Win32 exposes for a single physical
+/// monitor, converted to the crate's [`Rect`] type.
 ///
-/// Uses `SystemParametersInfoW` with `SPI_GETWORKAREA` which returns
-/// the primary monitor's work area. The work area excludes the taskbar
-/// and any other application desktop bars registered with the shell.
+/// Produced by [`get_primary_monitor_info`], which derives both fields from
+/// a single `MONITORINFO` struct returned by `GetMonitorInfoW`.
 ///
-/// For multi-monitor setups where you need a specific monitor's work
-/// area, this would need to be replaced with `MonitorFromPoint` +
-/// `GetMonitorInfoW`. This function is suitable for the primary-monitor
-/// case which covers the typical single-monitor daemon deployment.
+/// # Why two rectangles?
+///
+/// A tiling manager needs **both** notions of "the screen":
+///
+/// - **`work_area`** (from `MONITORINFO::rcWork`) excludes the taskbar and
+///   any shell-registered appbars (e.g. `yasb`). Window placement *inside* a
+///   workspace uses this so tiled windows never underlap the taskbar.
+/// - **`screen_rect`** (from `MONITORINFO::rcMonitor`) is the full physical
+///   display bounds with nothing excluded. Workspace *parking* (hiding one
+///   workspace while another is on screen) uses this: a parked workspace
+///   must travel the full physical height to stay completely off-screen,
+///   otherwise the strip occupied by the taskbar leaks a slice of the parked
+///   workspace into view. See `workspace::workspace_y_offset`.
+///
+/// Splitting the two at the source (rather than re-deriving downstream)
+/// keeps the two use sites from being confused with each other — which is
+/// exactly the bug `get_primary_monitor_info` was introduced to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorGeometry {
+    /// Full physical display bounds (`rcMonitor`). Nothing excluded.
+    pub screen_rect: Rect,
+    /// Taskbar- and appbar-excluded work area (`rcWork`).
+    pub work_area: Rect,
+}
+
+/// Get both the physical screen rect and the taskbar-excluded work area of
+/// the primary monitor in a single `GetMonitorInfoW` call.
+///
+/// `MonitorFromWindow(NULL, MONITOR_DEFAULTTOPRIMARY)` resolves to the
+/// primary display, then `GetMonitorInfoW` fills a `MONITORINFO` whose
+/// `rcMonitor` is the full physical rect and `rcWork` is the work area.
+/// Returning both from one query removes the ambiguity of
+/// `SystemParametersInfoW(SPI_GETWORKAREA)` — which exposed only the work
+/// area and only for the primary monitor — and lifts the per-monitor
+/// limitation the previous work-area-only helper explicitly flagged.
 ///
 /// # Errors
 ///
-/// Returns an error string if `SystemParametersInfoW` fails (extremely
-/// rare — only occurs in sandboxed environments or during system shutdown).
+/// Returns an error string if `GetMonitorInfoW` fails (extremely rare —
+/// only occurs in sandboxed environments or during system shutdown).
 ///
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::get_primary_monitor_work_area;
-/// let area = get_primary_monitor_work_area().expect("work area");
-/// println!("Work area: {}x{} at ({}, {})", area.width, area.height, area.x, area.y);
+/// use scrolling_tiling_manager::registry::win32::get_primary_monitor_info;
+/// let geo = get_primary_monitor_info().expect("monitor info");
+/// println!(
+///     "Physical {}x{}, work area {}x{}",
+///     geo.screen_rect.width, geo.screen_rect.height,
+///     geo.work_area.width, geo.work_area.height,
+/// );
 /// ```
-pub fn get_primary_monitor_work_area() -> Result<Rect, String> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+pub fn get_primary_monitor_info() -> Result<MonitorGeometry, String> {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     };
 
-    /// `SPI_GETWORKAREA` — retrieves the size of the work area on the
-    /// primary display monitor. The work area is the portion of the screen
-    /// not obscured by the system taskbar or by application desktop toolbars.
-    const SPI_GETWORKAREA: u32 = 0x0030;
+    // NULL hwnd + MONITOR_DEFAULTTOPRIMARY → primary display monitor.
+    let hmonitor = unsafe { MonitorFromWindow(HWND::default(), MONITOR_DEFAULTTOPRIMARY) };
 
-    let mut rect = RECT::default();
-    unsafe {
-        SystemParametersInfoW(
-            SYSTEM_PARAMETERS_INFO_ACTION(SPI_GETWORKAREA),
-            0,
-            Some(&mut rect as *mut _ as *mut _),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    }
-    .map_err(|e| format!("SystemParametersInfoW(SPI_GETWORKAREA) failed: {e}"))?;
+    // cbSize must be set before the call; the rects are filled in by Win32.
+    let mut mi = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // `GetMonitorInfoW` returns `BOOL` (not `Result`); `.ok()` promotes a
+    // `FALSE` return into `windows::core::Error` so it flows through `?`.
+    unsafe { GetMonitorInfoW(hmonitor, &mut mi) }
+        .ok()
+        .map_err(|e| format!("GetMonitorInfoW failed: {e}"))?;
 
-    Ok(Rect {
-        x: rect.left,
-        y: rect.top,
-        width: rect.right - rect.left,
-        height: rect.bottom - rect.top,
+    let screen = mi.rcMonitor;
+    let work = mi.rcWork;
+    Ok(MonitorGeometry {
+        screen_rect: Rect {
+            x: screen.left,
+            y: screen.top,
+            width: screen.right - screen.left,
+            height: screen.bottom - screen.top,
+        },
+        work_area: Rect {
+            x: work.left,
+            y: work.top,
+            width: work.right - work.left,
+            height: work.bottom - work.top,
+        },
     })
 }
 

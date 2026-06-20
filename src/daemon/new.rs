@@ -81,9 +81,13 @@ impl ScrollTilingManager {
         // 2. Scan existing windows before hooks start.
         registry.scan_existing_windows()?;
 
-        // 3. Get monitor work area via Win32.
+        // 3. Get monitor geometry via Win32 — both the full physical screen
+        //    rect (for parking workspaces off-screen) and the taskbar-excluded
+        //    work area (for in-workspace window placement). See
+        //    registry::win32::MonitorGeometry for why both are needed.
+        let geometry = registry_win32::get_primary_monitor_info()?;
         let monitor = MonitorInfo {
-            work_area: registry_win32::get_primary_monitor_work_area()?,
+            work_area: geometry.work_area,
         };
 
         // 4. Derive layout parameters from the app config.
@@ -207,7 +211,7 @@ impl ScrollTilingManager {
 
         Ok(Self {
             registry,
-            monitors: vec![Monitor::new(monitor.work_area, workspaces, 0)],
+            monitors: vec![Monitor::new(geometry.screen_rect, monitor.work_area, workspaces, 0)],
             active_monitor: 0,
             animator,
             server,

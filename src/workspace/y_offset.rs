@@ -4,7 +4,9 @@
 //! horizontally inside a [`ScrollingSpace`](super::ScrollingSpace): the active
 //! workspace sits at `y = 0`, previous workspaces (id < active) park above at
 //! `-y_unit`, and next workspaces (id > active) park below at `+y_unit`, where
-//! `y_unit = monitor_height + window_gap`.
+//! `y_unit = monitor_height + window_gap`. Here `monitor_height` is the full
+//! **physical** screen height (taskbar included), never the work area — see
+//! the `monitor_height` parameter docs for why.
 //!
 //! # The ±1-Unit Model
 //!
@@ -56,7 +58,10 @@ use crate::workspace::WorkspaceId;
 ///
 /// * `target_id` — The workspace whose parking offset is being computed.
 /// * `active_id` — The currently active workspace.
-/// * `monitor_height` — The monitor work-area height, in pixels.
+/// * `monitor_height` — The full **physical** monitor height, in pixels (NOT
+///   the taskbar-excluded work area). Parked workspaces must travel the full
+///   physical height to stay completely off-screen; using the work area would
+///   leave a slice the height of the taskbar/topbar visible.
 /// * `window_gap` — The configured gap, in pixels. The same value is used
 ///   both intra-workspace (between adjacent windows) and inter-workspace
 ///   (between stacked workspaces), so the stacking looks visually consistent

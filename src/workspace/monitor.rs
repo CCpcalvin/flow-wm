@@ -1,11 +1,13 @@
 //! Physical monitor owning a vertical stack of workspaces.
 //!
 //! A [`Monitor`] is the top of the workspace hierarchy under
-//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager). It binds a
-//! piece of screen geometry (the work-area [`Rect`](crate::common::Rect)) to
-//! the [`Workspace`]s available on that display. Only one workspace per
-//! monitor is on screen at a time — the `active_workspace` — while the rest
-//! sit parked above and below, ready to be scrolled into view.
+//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager). It binds two
+//! pieces of screen geometry to the [`Workspace`]s available on that display:
+//! the full physical [`Rect`](crate::common::Rect) (for parking workspaces
+//! off-screen) and the taskbar-excluded work area (for in-workspace tiling).
+//! Only one workspace per monitor is on screen at a time — the
+//! `active_workspace` — while the rest sit parked above and below, ready to
+//! be scrolled into view.
 //!
 //! See the [module-level docs](super) for the full hierarchy diagram.
 
@@ -14,14 +16,26 @@ use crate::common::Rect;
 
 /// A physical monitor and the workspaces it can show.
 ///
-/// The monitor remembers its work-area [`Rect`] so that new workspaces can be
-/// sized correctly and so future vertical-packing math (the workspace analogue
-/// of horizontal column packing) has the geometry it needs. Each
-/// [`Workspace`]'s [`ScrollingSpace`] *also* carries a copy of this rect
-/// (inside its `MonitorInfo`) for projection — the two are kept in sync by the
-/// daemon at construction time. For this skeleton there is exactly one
-/// monitor, so the duplication is benign; multi-monitor support lands later.
+/// The monitor remembers **two** screen rectangles for this display:
+///
+/// - **`screen_rect`** — the full physical bounds (taskbar included). Used
+///   for *inter-workspace* geometry: parking a non-active workspace far
+///   enough off-screen that none of it leaks past the taskbar strip (see
+///   `workspace::workspace_y_offset`).
+/// - **`work_area`** — the taskbar-excluded bounds. Used for *intra-workspace*
+///   geometry: sizing each workspace so tiled windows never underlap the
+///   taskbar or any shell appbar (e.g. `yasb`).
+///
+/// Each [`Workspace`]'s [`ScrollingSpace`] *also* carries a copy of the work
+/// area (inside its `MonitorInfo`) for projection — the two are kept in sync
+/// by the daemon at construction time. For this skeleton there is exactly
+/// one monitor, so the duplication is benign; multi-monitor support lands
+/// later.
 pub struct Monitor {
+    /// Full physical screen geometry for this display, in screen
+    /// coordinates. Taskbar and appbars are NOT excluded. Source of truth
+    /// for parking workspaces off-screen.
+    screen_rect: Rect,
     /// Work-area geometry (taskbar excluded) for this display, in screen
     /// coordinates. Source of truth for sizing workspaces.
     work_area: Rect,
@@ -34,27 +48,47 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    /// Create a new monitor with the given work area and workspace stack.
+    /// Create a new monitor with the given geometry and workspace stack.
+    ///
+    /// `screen_rect` is the full physical monitor rect (taskbar included);
+    /// `work_area` is the taskbar-excluded rect used for in-workspace
+    /// tiling. The daemon populates both from a single
+    /// `GetMonitorInfoW` query at construction time.
     ///
     /// `active_workspace` is clamped into range so a stale index can never
     /// panic a later accessor. If `workspaces` is empty the active index is
     /// forced to `0`; callers should push a workspace before relying on
     /// [`active_workspace`](Self::active_workspace).
     #[must_use]
-    pub fn new(work_area: Rect, workspaces: Vec<Workspace>, active_workspace: usize) -> Self {
+    pub fn new(
+        screen_rect: Rect,
+        work_area: Rect,
+        workspaces: Vec<Workspace>,
+        active_workspace: usize,
+    ) -> Self {
         let active_workspace = if workspaces.is_empty() {
             0
         } else {
             active_workspace.min(workspaces.len() - 1)
         };
         Self {
+            screen_rect,
             work_area,
             workspaces,
             active_workspace,
         }
     }
 
-    /// The work-area [`Rect`] for this monitor.
+    /// The full physical [`Rect`] for this monitor (taskbar included).
+    ///
+    /// Use this for inter-workspace math (parking workspaces off-screen).
+    /// For in-workspace window placement use [`work_area`](Self::work_area).
+    #[must_use]
+    pub fn screen_rect(&self) -> Rect {
+        self.screen_rect
+    }
+
+    /// The work-area [`Rect`] for this monitor (taskbar excluded).
     #[must_use]
     pub fn work_area(&self) -> Rect {
         self.work_area
@@ -254,16 +288,16 @@ mod tests {
             .iter()
             .map(|&id| Workspace::new(WorkspaceId(id), make_scrolling()))
             .collect();
-        Monitor::new(
-            Rect {
-                x: 0,
-                y: 0,
-                width: 1920,
-                height: 1080,
-            },
-            workspaces,
-            active_idx,
-        )
+        // Tests don't model a taskbar, so screen_rect and work_area are
+        // identical — the two-rect distinction only matters for the parking
+        // math exercised in y_offset.rs.
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        Monitor::new(rect, rect, workspaces, active_idx)
     }
 
     // ---- find_workspace_index --------------------------------------------
@@ -369,5 +403,51 @@ mod tests {
         let prev = monitor.set_active_workspace(WorkspaceId(1));
         assert_eq!(prev, Some(2));
         assert_eq!(monitor.active_workspace_index(), 0);
+    }
+
+    // ---- screen_rect / work_area storage --------------------------------
+    //
+    // Regression guard for the y_offset bug: a Monitor must carry the full
+    // physical rect SEPARATELY from the taskbar-excluded work area, so the
+    // parking math can use the (larger) physical height.
+
+    #[test]
+    fn screen_rect_returns_stored_value() {
+        let screen = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1200,
+        };
+        let work = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1160,
+        };
+        let monitor = Monitor::new(screen, work, Vec::new(), 0);
+        assert_eq!(monitor.screen_rect(), screen);
+    }
+
+    #[test]
+    fn screen_rect_and_work_area_are_stored_independently() {
+        // Physical 1200-tall screen with a 40px bottom taskbar → work area
+        // is 1160 tall. The two must NOT collapse to the same value, or the
+        // parking offset would under-travel by exactly the taskbar height.
+        let screen = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1200,
+        };
+        let work = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1160,
+        };
+        let monitor = Monitor::new(screen, work, Vec::new(), 0);
+        assert_ne!(monitor.screen_rect(), monitor.work_area());
+        assert_eq!(monitor.screen_rect().height - monitor.work_area().height, 40);
     }
 }
