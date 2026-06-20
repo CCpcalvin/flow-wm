@@ -190,6 +190,17 @@ impl ScrollingSpace {
         self.config.padding
     }
 
+    /// Get the configured `columns_per_screen` threshold.
+    ///
+    /// Used by dispatch hooks (e.g. auto-center after a workspace move) to
+    /// decide whether the destination grid is sparse enough to recenter.
+    /// All workspaces on a monitor share this value — see [`Self::padding`]
+    /// for the sharing rationale.
+    #[must_use]
+    pub fn columns_per_screen(&self) -> u32 {
+        self.config.columns_per_screen
+    }
+
     /// Apply a mutation and compute the resulting [`AppliedLayout`].
     ///
     /// This is the core pipeline that every mutation flows through:
@@ -553,6 +564,60 @@ impl ScrollingSpace {
             .and_then(|idx| ids.get(idx).copied())
             .or_else(|| ids.last().copied());
         self.apply_mutation(new_layout)
+    }
+
+    // -----------------------------------------------------------------------
+    // Viewport center operations
+    // -----------------------------------------------------------------------
+
+    /// Center the viewport on the grid (slot-aligned), using the focused column.
+    ///
+    /// Same math as [`initialize_windows`](Self::initialize_windows): picks a
+    /// slot-aligned `viewport_offset` that best centers the focused column
+    /// while keeping every column visible (all-fit) or filling the screen
+    /// without blanks (scroll). Returns `None` when the layout is empty. The
+    /// focus column falls back to index 0 when no window is focused. See
+    /// (`docs/src/dev-guide/layout/mutations.md`).
+    pub fn center_grid(&mut self) -> Option<AppliedLayout> {
+        let num_columns = self.virtual_layout.columns.len();
+        if num_columns == 0 {
+            return None;
+        }
+        let focus_col = self.focus_col_index();
+        let mut new_layout = self.virtual_layout.clone();
+        new_layout.viewport_offset =
+            mutations::center_viewport_grid(num_columns, focus_col, &self.config);
+        Some(self.apply_mutation(new_layout))
+    }
+
+    /// Center the viewport absolutely (free-form offset, visually centered).
+    ///
+    /// Counterpart of [`center_grid`](Self::center_grid): the offset is not
+    /// snapped to the slot grid. In the all-fit case the entire canvas is
+    /// centered (the offset may be negative when the canvas is narrower than
+    /// the monitor); in the scroll case the focus column lands at the monitor
+    /// midpoint. Returns `None` when the layout is empty. See
+    /// (`docs/src/dev-guide/layout/mutations.md`).
+    pub fn center_absolute(&mut self) -> Option<AppliedLayout> {
+        let num_columns = self.virtual_layout.columns.len();
+        if num_columns == 0 {
+            return None;
+        }
+        let focus_col = self.focus_col_index();
+        let mut new_layout = self.virtual_layout.clone();
+        new_layout.viewport_offset =
+            mutations::center_viewport_absolute(num_columns, focus_col, &self.config);
+        Some(self.apply_mutation(new_layout))
+    }
+
+    /// Resolve the focused window's column index.
+    ///
+    /// Falls back to index 0 when no window is focused or the focused window
+    /// is no longer in the layout (stale focus state).
+    fn focus_col_index(&self) -> usize {
+        self.focused
+            .and_then(|w| self.virtual_layout.find_window(w).map(|(c, _)| c))
+            .unwrap_or(0)
     }
 }
 
@@ -1633,5 +1698,254 @@ mod tests {
         };
         let engine = ScrollingSpace::new(test_monitor(), 960, 320, custom, 4);
         assert_eq!(engine.padding(), custom);
+    }
+
+    // --- Viewport center operations (center_grid / center_absolute) ---
+    //
+    // Uses col_width=400 (slot=404) so center_grid produces non-degenerate
+    // slot-aligned offsets. With the default col_width=960 the all-fit range
+    // collapses for small N and center_grid degenerates to 0 (see Phase 1a
+    // `center_viewport_grid_single_column_always_zero`); col_width=400 makes
+    // the slot-ladder wide enough to admit a valid k.
+
+    /// Build an engine with `col_width=400` for non-degenerate center tests.
+    fn center_test_engine() -> ScrollingSpace {
+        ScrollingSpace::new(test_monitor(), 400, 100, test_padding(), 4)
+    }
+
+    #[test]
+    fn engine_center_grid_empty_returns_none() {
+        // Negative: empty layout has nothing to center -> None.
+        let mut engine = center_test_engine();
+        assert!(engine.center_grid().is_none());
+    }
+
+    #[test]
+    fn engine_center_absolute_empty_returns_none() {
+        // Negative: empty layout has nothing to center -> None.
+        let mut engine = center_test_engine();
+        assert!(engine.center_absolute().is_none());
+    }
+
+    #[test]
+    fn engine_center_grid_applies_slot_aligned_offset() {
+        // Positive: single col, col_width=400, gap=4, monitor=1920.
+        // slot=404, canvas_width=404, min_offset=-1516, max_offset=4.
+        // focus_center=204, ideal_offset=-756, ideal_k=-2 -> -2*404 = -808.
+        let mut engine = center_test_engine();
+        engine.add_window(WindowId(1));
+
+        let diff = engine.center_grid().expect("center_grid on 1 col");
+        assert_eq!(
+            diff.virtual_layout.viewport_offset, -808,
+            "slot-aligned offset = -2 * slot(404)"
+        );
+        assert_eq!(
+            engine.virtual_layout().viewport_offset,
+            -808,
+            "engine state must reflect the centered offset"
+        );
+    }
+
+    #[test]
+    fn engine_center_absolute_applies_free_form_offset() {
+        // Positive: single col, col_width=400, gap=4, monitor=1920.
+        // canvas_width = gap + N*slot = 4 + 404 = 408.
+        // midpoint = (408 - 1920) / 2 = -756. Free-form, not slot-aligned
+        // (contrast with center_grid's -808).
+        let mut engine = center_test_engine();
+        engine.add_window(WindowId(1));
+
+        let diff = engine.center_absolute().expect("center_absolute on 1 col");
+        assert_eq!(
+            diff.virtual_layout.viewport_offset, -756,
+            "free-form midpoint = (canvas_width - monitor_width) / 2"
+        );
+        assert_eq!(engine.virtual_layout().viewport_offset, -756);
+    }
+
+    #[test]
+    fn engine_center_grid_and_absolute_differ_on_same_layout() {
+        // Property: the two variants produce DIFFERENT offsets on the same
+        // layout (the motivating use case -- grid snaps to slot, absolute
+        // does not). The 52px difference below is the gap between the
+        // slot-aligned offset and the free-form midpoint.
+        let mut engine_grid = center_test_engine();
+        engine_grid.add_window(WindowId(1));
+        let grid_offset = engine_grid
+            .center_grid()
+            .expect("center_grid")
+            .virtual_layout
+            .viewport_offset;
+
+        let mut engine_abs = center_test_engine();
+        engine_abs.add_window(WindowId(1));
+        let abs_offset = engine_abs
+            .center_absolute()
+            .expect("center_absolute")
+            .virtual_layout
+            .viewport_offset;
+
+        assert_eq!(grid_offset, -808, "grid snaps to slot -2 * 404");
+        assert_eq!(abs_offset, -756, "absolute is free-form midpoint");
+        assert_ne!(
+            grid_offset, abs_offset,
+            "the two variants MUST differ -- that is the whole point of having both"
+        );
+        assert_eq!(
+            (grid_offset - abs_offset).abs(),
+            52,
+            "difference is half a slot step (slot=404, abs rounds away from slot)"
+        );
+    }
+
+    #[test]
+    fn engine_center_preserves_focus_and_all_windows() {
+        // Invariant: centering only changes viewport_offset. It must NOT
+        // change focus, column count, or window presence in actual_layout.
+        // Verified for both variants on a 3-column layout.
+        let verify = |engine: &mut ScrollingSpace, focused_before: WindowId| {
+            let total_windows = engine.virtual_layout().window_count();
+            for method_name in ["grid", "absolute"] {
+                let diff = match method_name {
+                    "grid" => engine.center_grid(),
+                    "absolute" => engine.center_absolute(),
+                    _ => unreachable!(),
+                }
+                .expect("center on non-empty layout");
+
+                assert_eq!(
+                    engine.focused(),
+                    Some(focused_before),
+                    "{method_name}: focus must not change"
+                );
+                assert_eq!(
+                    diff.virtual_layout.window_count(),
+                    total_windows,
+                    "{method_name}: no windows lost"
+                );
+                assert_eq!(
+                    diff.actual_layout.entries.len(),
+                    total_windows,
+                    "{method_name}: actual_layout must include every window (parked + visible)"
+                );
+            }
+        };
+
+        let mut engine = center_test_engine();
+        engine.add_window(WindowId(1));
+        engine.add_window(WindowId(2));
+        engine.add_window(WindowId(3));
+        engine.set_focus(WindowId(2)); // focus middle column
+        verify(&mut engine, WindowId(2));
+    }
+
+    #[test]
+    fn engine_center_grid_with_focus_changes_offset() {
+        // Property: when 4 cols > columns_per_screen=2 (scroll case), the
+        // focus column's index affects the resulting slot-aligned offset.
+        let make_engine = || {
+            let mut e = ScrollingSpace::new(test_monitor(), 400, 100, test_padding(), 2);
+            e.add_window(WindowId(1));
+            e.add_window(WindowId(2));
+            e.add_window(WindowId(3));
+            e.add_window(WindowId(4));
+            e
+        };
+
+        let mut e_first = make_engine();
+        e_first.set_focus(WindowId(1));
+        let off_first = e_first
+            .center_grid()
+            .expect("center_grid focus=first")
+            .virtual_layout
+            .viewport_offset;
+
+        let mut e_last = make_engine();
+        e_last.set_focus(WindowId(4));
+        let off_last = e_last
+            .center_grid()
+            .expect("center_grid focus=last")
+            .virtual_layout
+            .viewport_offset;
+
+        assert_eq!(off_first, 0, "focus=col0 -> start=0 -> offset 0");
+        assert_eq!(
+            off_last, 808,
+            "focus=col3, C=2 -> start_min=max(0,2)=2, start_max=min(3,2)=2 -> offset=2*slot(404)"
+        );
+        assert_ne!(
+            off_first, off_last,
+            "different focus columns must produce different slot-aligned offsets"
+        );
+    }
+
+    #[test]
+    fn engine_center_grid_falls_back_to_col0_when_focus_is_stale() {
+        // Contract: `focus_col_index` returns 0 when `self.focused` points
+        // at a window no longer in the layout. `center_grid` must then
+        // behave as if column 0 were focused. Three columns are used so
+        // that col-0 and col-N produce visibly different offsets.
+        let mut engine_stale = center_test_engine();
+        engine_stale.add_window(WindowId(1));
+        engine_stale.add_window(WindowId(2));
+        engine_stale.add_window(WindowId(3));
+        engine_stale.set_focus(WindowId(99)); // not in layout
+
+        let mut engine_col0 = center_test_engine();
+        engine_col0.add_window(WindowId(1));
+        engine_col0.add_window(WindowId(2));
+        engine_col0.add_window(WindowId(3));
+        engine_col0.set_focus(WindowId(1)); // column 0 explicitly
+
+        let off_stale = engine_stale
+            .center_grid()
+            .expect("center_grid with stale focus must not be None")
+            .virtual_layout
+            .viewport_offset;
+        let off_col0 = engine_col0
+            .center_grid()
+            .expect("center_grid with explicit col-0 focus")
+            .virtual_layout
+            .viewport_offset;
+
+        assert_eq!(
+            off_stale, off_col0,
+            "stale focus must fall back to column 0, matching explicit focus on column 0"
+        );
+    }
+
+    #[test]
+    fn engine_center_grid_falls_back_to_col0_when_no_focus() {
+        // Contract: `focus_col_index` returns 0 when `self.focused` is None.
+        // `engine.focused` is assigned directly to bypass `set_focus` (which
+        // always writes Some) and simulate the no-focus state.
+        let mut engine_none = center_test_engine();
+        engine_none.add_window(WindowId(1));
+        engine_none.add_window(WindowId(2));
+        engine_none.add_window(WindowId(3));
+        engine_none.focused = None;
+
+        let mut engine_col0 = center_test_engine();
+        engine_col0.add_window(WindowId(1));
+        engine_col0.add_window(WindowId(2));
+        engine_col0.add_window(WindowId(3));
+        engine_col0.set_focus(WindowId(1)); // column 0 explicitly
+
+        let off_none = engine_none
+            .center_grid()
+            .expect("center_grid with no focus must not be None")
+            .virtual_layout
+            .viewport_offset;
+        let off_col0 = engine_col0
+            .center_grid()
+            .expect("center_grid with explicit col-0 focus")
+            .virtual_layout
+            .viewport_offset;
+
+        assert_eq!(
+            off_none, off_col0,
+            "no focus must fall back to column 0, matching explicit focus on column 0"
+        );
     }
 }
