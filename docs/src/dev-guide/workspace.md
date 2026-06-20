@@ -18,7 +18,7 @@ graph TB
     M --> ws["workspaces: Vec&lt;Workspace&gt;<br/>active_workspace: usize"]
     ws --> W["Workspace<br/>id: WorkspaceId"]
     W --> SS["ScrollingSpace<br/>(infinite horizontal canvas)"]
-    W --> FS["FloatingSpace<br/>(stub — on-screen rects)"]
+    W --> FS["FloatingSpace<br/>(on-screen pixel rects)"]
 ```
 
 `ScrollTilingManager` is defined in [`src/daemon/mod.rs`](../../src/daemon/mod.rs). It
@@ -65,17 +65,17 @@ projection pipeline maps those virtual coordinates to actual on-screen pixel
 rectangles. This is the entire tiling engine; see [layout overview](./layout/overview.md)
 for the virtual-to-actual pipeline.
 
-**FloatingSpace** tracks literal on-screen pixel rectangles — the position the
-user dragged a window to. It does not participate in the virtual-to-actual
-pipeline at all. Currently it is a stub (`struct FloatingSpace;`) that exists so
-the workspace hierarchy has the right shape from day one. Future work will add
-smart placement, z-order management, and gap avoidance between floating and tiled
-windows.
+**FloatingSpace** tracks literal on-screen pixel rectangles. It does not
+participate in the virtual-to-actual pipeline at all — floating windows are
+stored as `ActualEntry` values (the same type the projection produces) and
+submitted directly to the animator. See [floating space](./floating-space.md)
+for the full architecture: the tile↔float transitions, animation batch
+merging, focus model, and configuration.
 
 The key design consequence: a workspace never mixes the two spaces at the layout
-level. The daemon applies a tiling layout to the `ScrollingSpace` and passes the
-resulting `AppliedLayout` to the animator, independently of whatever the
-`FloatingSpace` will eventually track.
+level. When the daemon submits an animation batch, each workspace's scrolling
+layout and floating layout are **merged** into a single `ActualLayout` so that
+both tiles and floats ride together in the same `animate_workspaces` call.
 
 ## Future Direction: Vertical Scrolling Between Workspaces
 

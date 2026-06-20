@@ -119,6 +119,9 @@ pub struct StmConfig {
 
     /// Behavior when a minimized tiling window is restored.
     pub minimize_restore: MinimizeRestore,
+
+    /// Floating window configuration.
+    pub floating: FloatingConfig,
 }
 
 fn default_window_action() -> WindowAction {
@@ -134,6 +137,7 @@ impl Default for StmConfig {
             padding: Padding::default(),
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
+            floating: FloatingConfig::default(),
         }
     }
 }
@@ -537,6 +541,36 @@ impl Default for AnimationConfig {
     }
 }
 
+/// Floating window configuration.
+///
+/// Controls defaults for windows moved to [`FloatingSpace`](crate::workspace::FloatingSpace).
+/// Dimensions are expressed as fractions of the monitor work area so the default
+/// scales across different resolutions (`docs/src/dev-guide/floating-space.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FloatingConfig {
+    /// Default width as a fraction of the work area width (0.0–1.0).
+    ///
+    /// Used when a window has no known natural size, e.g. immediately after
+    /// being moved from tiling to floating for the first time.
+    pub default_width: f32,
+
+    /// Default height as a fraction of the work area height (0.0–1.0).
+    ///
+    /// Used when a window has no known natural size, e.g. immediately after
+    /// being moved from tiling to floating for the first time.
+    pub default_height: f32,
+}
+
+impl Default for FloatingConfig {
+    fn default() -> Self {
+        Self {
+            default_width: 0.6,
+            default_height: 0.7,
+        }
+    }
+}
+
 /// Strategy for restoring minimized tiling windows.
 ///
 /// - `OriginalSlot` — put the window back where it was before minimize
@@ -724,6 +758,10 @@ strategy = "original_slot"
             minimize_restore: MinimizeRestore {
                 strategy: MinimizeRestoreStrategy::AppendRight,
             },
+            floating: FloatingConfig {
+                default_width: 0.5,
+                default_height: 0.6,
+            },
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
@@ -742,6 +780,8 @@ strategy = "original_slot"
             parsed.minimize_restore.strategy,
             MinimizeRestoreStrategy::AppendRight
         );
+        assert_eq!(parsed.floating.default_width, 0.5);
+        assert_eq!(parsed.floating.default_height, 0.6);
     }
 
     #[test]

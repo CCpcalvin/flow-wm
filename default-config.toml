@@ -47,3 +47,10 @@ easing = "ease-out-expo"
 # Options: original_slot, right_of_focused, append_right
 [minimize_restore]
 strategy = "original_slot"
+
+# Floating window configuration.
+# Dimensions are fractions of the monitor work area (0.0 to 1.0),
+# so the default popup size scales across different resolutions.
+[floating]
+default_width = 0.6
+default_height = 0.7

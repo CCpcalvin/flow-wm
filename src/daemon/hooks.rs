@@ -176,9 +176,9 @@ impl ScrollTilingManager {
     /// already correct and we avoid a redundant (and potentially disruptive)
     /// `SetForegroundWindow` call.
     fn remove_from_layout_and_refocus(&mut self, window: WindowId) {
-        let prev_focus = self.active_scrolling().focused();
+        let prev_focus = self.active_scrolling().last_focused_window();
         let applied = self.active_scrolling_mut().remove_window(window);
-        let new_focus = self.active_scrolling().focused();
+        let new_focus = self.active_scrolling().last_focused_window();
 
         if new_focus != prev_focus
             && let Some(id) = new_focus

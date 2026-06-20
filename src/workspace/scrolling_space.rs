@@ -75,8 +75,11 @@ use crate::layout::types::{ActualLayout, AppliedLayout, MonitorInfo, Padding, Vi
 pub struct ScrollingSpace {
     /// Current virtual layout (the infinite horizontal canvas).
     virtual_layout: VirtualLayout,
-    /// Currently focused window.
-    focused: Option<WindowId>,
+    /// Per-space history cursor: the most recently interacted-with window in this space.
+    ///
+    /// This is NOT OS-level focus (owned by the registry via `set_focused`).
+    /// See (`docs/src/dev-guide/workspace.md`).
+    last_focused_window: Option<WindowId>,
     /// Last projected actual layout (cached for the `actual_layout()` accessor).
     actual: ActualLayout,
     /// The monitor being managed.
@@ -141,7 +144,7 @@ impl ScrollingSpace {
 
         Self {
             virtual_layout,
-            focused: None,
+            last_focused_window: None,
             actual,
             monitor,
             config,
@@ -164,10 +167,12 @@ impl ScrollingSpace {
         &self.actual
     }
 
-    /// Get the currently focused window.
+    /// Get the per-space last-focused window (history cursor, NOT OS focus).
+    ///
+    /// See (`docs/src/dev-guide/workspace.md`).
     #[must_use]
-    pub fn focused(&self) -> Option<WindowId> {
-        self.focused
+    pub fn last_focused_window(&self) -> Option<WindowId> {
+        self.last_focused_window
     }
 
     /// Get a reference to the monitor info.
@@ -251,9 +256,9 @@ impl ScrollingSpace {
     /// Failure to do so causes window positions to desync from the layout state,
     /// producing incorrect diffs on subsequent mutations.
     pub fn focus(&mut self, direction: Direction) -> Option<(WindowId, Option<AppliedLayout>)> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let result = mutations::focus(&self.virtual_layout, focused, direction, &self.config)?;
-        self.focused = Some(result.focused);
+        self.last_focused_window = Some(result.focused);
 
         let diff = if result.new_layout.viewport_offset != self.virtual_layout.viewport_offset {
             Some(self.apply_mutation(result.new_layout))
@@ -270,7 +275,7 @@ impl ScrollingSpace {
     /// in the layout. This does not produce a [`AppliedLayout`]; it only updates
     /// internal focus state.
     pub fn set_focus(&mut self, window: WindowId) {
-        self.focused = Some(window);
+        self.last_focused_window = Some(window);
     }
 
     // -----------------------------------------------------------------------
@@ -285,7 +290,7 @@ impl ScrollingSpace {
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
     pub fn swap_column(&mut self, direction: Direction) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let new_layout =
             mutations::swap_column(&self.virtual_layout, focused, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
@@ -301,7 +306,7 @@ impl ScrollingSpace {
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
     pub fn swap_window(&mut self, direction: Direction) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let new_layout =
             mutations::swap_window(&self.virtual_layout, focused, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
@@ -315,7 +320,7 @@ impl ScrollingSpace {
     ///
     /// No direction is needed — the resize is independent (no neighbor compensation).
     pub fn expand_column(&mut self) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let new_layout = mutations::expand_column(&self.virtual_layout, focused, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
@@ -324,14 +329,14 @@ impl ScrollingSpace {
     ///
     /// No direction is needed — the resize is independent (no neighbor compensation).
     pub fn shrink_column(&mut self) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let new_layout = mutations::shrink_column(&self.virtual_layout, focused, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
     /// Set the focused column width to an explicit pixel value.
     pub fn set_column_width(&mut self, target_px: i32) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let new_layout =
             mutations::set_column_width(&self.virtual_layout, focused, target_px, &self.config)?;
         Some(self.apply_mutation(new_layout))
@@ -358,7 +363,7 @@ impl ScrollingSpace {
 
     /// Toggle monocle mode for the focused window.
     pub fn toggle_monocle(&mut self) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         // Resolve the focused column up front, before any mutation runs. If the
         // focused window isn't in the layout there's nothing to toggle, and
         // returning early here is safe because nothing has been computed yet.
@@ -386,7 +391,7 @@ impl ScrollingSpace {
     /// Add a window as a new column appended to the right.
     pub fn add_window(&mut self, window: WindowId) -> AppliedLayout {
         let new_layout = mutations::add_window(&self.virtual_layout, window, &self.config);
-        self.focused = Some(window);
+        self.last_focused_window = Some(window);
         self.apply_mutation(new_layout)
     }
 
@@ -426,26 +431,26 @@ impl ScrollingSpace {
     /// engine.set_focus(WindowId(1));  // focus back to col 0
     ///
     /// engine.insert_window(WindowId(3)); // inserted at col 1, between 1 and 2
-    /// assert_eq!(engine.focused(), Some(WindowId(3)));
+    /// assert_eq!(engine.last_focused_window(), Some(WindowId(3)));
     /// ```
     pub fn insert_window(&mut self, window: WindowId) -> AppliedLayout {
-        let focused = self.focused;
+        let focused = self.last_focused_window;
         let new_layout = mutations::insert_window_after_focused(
             &self.virtual_layout,
             focused,
             window,
             &self.config,
         );
-        self.focused = Some(window);
+        self.last_focused_window = Some(window);
         self.apply_mutation(new_layout)
     }
 
     /// Add a window as a new row in the focused column.
     pub fn add_window_to_focused_column(&mut self, window: WindowId) -> Option<AppliedLayout> {
-        let focused = self.focused?;
+        let focused = self.last_focused_window?;
         let (col, _) = self.virtual_layout.find_window(focused)?;
         let new_layout = mutations::add_window_to_column(&self.virtual_layout, col, window);
-        self.focused = Some(window);
+        self.last_focused_window = Some(window);
         Some(self.apply_mutation(new_layout))
     }
 
@@ -488,7 +493,7 @@ impl ScrollingSpace {
     pub fn remove_window(&mut self, window: WindowId) -> AppliedLayout {
         // 1. Find the window's position before removal.
         let pos = self.virtual_layout.find_window(window);
-        let was_focused = self.focused == Some(window);
+        let was_focused = self.last_focused_window == Some(window);
 
         // 2. Resolve the new focus if the removed window was focused.
         //    `next_available_window` operates on the pre-removal layout, so it
@@ -498,7 +503,7 @@ impl ScrollingSpace {
                 mutations::next_available_window(&self.virtual_layout, col, row)
             })
         } else {
-            self.focused
+            self.last_focused_window
         };
 
         // 3. Remove the window from the virtual layout.
@@ -507,7 +512,7 @@ impl ScrollingSpace {
         let mut new_layout = mutations::remove_window(&self.virtual_layout, window, &self.config);
 
         // Commit the new focus.
-        self.focused = new_focused;
+        self.last_focused_window = new_focused;
 
         // 4. Ensure the focused window's column is visible (if any focus remains).
         if let Some(focused) = new_focused
@@ -549,7 +554,7 @@ impl ScrollingSpace {
         let new_layout = mutations::initialize_windows(&ids, &self.config, focus_col_idx);
         // Focus the window at the focus column (the user's foreground window),
         // falling back to the last window when no focus column was specified.
-        self.focused = focus_col_idx
+        self.last_focused_window = focus_col_idx
             .and_then(|idx| ids.get(idx).copied())
             .or_else(|| ids.last().copied());
         self.apply_mutation(new_layout)
@@ -592,7 +597,7 @@ mod tests {
     #[test]
     fn engine_add_windows_and_focus() {
         let engine = engine_with_three_columns();
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
         assert_eq!(engine.virtual_layout().columns.len(), 3);
         assert_eq!(engine.virtual_layout().window_count(), 3);
     }
@@ -602,7 +607,7 @@ mod tests {
         let mut engine = engine_with_three_columns();
         let (new_focus, _diff) = engine.focus(Direction::Right).expect("focus right");
         assert_eq!(new_focus, WindowId(2));
-        assert_eq!(engine.focused(), Some(WindowId(2)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(2)));
     }
 
     #[test]
@@ -640,7 +645,7 @@ mod tests {
         engine.set_focus(WindowId(2));
         let _ = engine.remove_window(WindowId(2));
         // Focus should fall back to the LEFT column's window (W1).
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
     }
 
     #[test]
@@ -678,11 +683,11 @@ mod tests {
 
         // Step 1: Add windows
         let d1 = engine.add_window(WindowId(1));
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
         assert_eq!(d1.actual_layout.entries.len(), 1);
 
         let d2 = engine.add_window(WindowId(2));
-        assert_eq!(engine.focused(), Some(WindowId(2)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(2)));
         assert_eq!(d2.actual_layout.entries.len(), 2);
 
         let d3 = engine.add_window(WindowId(3));
@@ -816,7 +821,7 @@ mod tests {
         let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.insert_window(WindowId(1));
         assert_eq!(engine.virtual_layout().columns.len(), 1);
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
     }
 
     #[test]
@@ -825,7 +830,7 @@ mod tests {
         // Layout: [W1][W2][W3], focus W1. insert W4 → [W1][W4][W2][W3].
         let mut engine = engine_with_three_columns();
         // engine_with_three_columns sets focus to W1 (col 0)
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
 
         engine.insert_window(WindowId(4));
         assert_eq!(engine.virtual_layout().columns.len(), 4);
@@ -833,7 +838,7 @@ mod tests {
         assert_eq!(engine.virtual_layout().columns[1].rows[0], WindowId(4)); // new
         assert_eq!(engine.virtual_layout().columns[2].rows[0], WindowId(2)); // shifted
         assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(3)); // shifted
-        assert_eq!(engine.focused(), Some(WindowId(4))); // focus moved to new
+        assert_eq!(engine.last_focused_window(), Some(WindowId(4))); // focus moved to new
     }
 
     #[test]
@@ -845,7 +850,7 @@ mod tests {
         let _ = engine.insert_window(WindowId(4));
         assert_eq!(engine.virtual_layout().columns.len(), 4);
         assert_eq!(engine.virtual_layout().columns[3].rows[0], WindowId(4));
-        assert_eq!(engine.focused(), Some(WindowId(4)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(4)));
     }
 
     #[test]
@@ -875,7 +880,7 @@ mod tests {
         engine.insert_window(WindowId(4));
         // New column at index 1. With 4 columns × 960px > 1920px viewport,
         // ensure_column_visible keeps the new column visible.
-        assert_eq!(engine.focused(), Some(WindowId(4)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(4)));
     }
 
     #[test]
@@ -890,7 +895,7 @@ mod tests {
         // Insert W3 after focused (W1) → W3 at col 1.
         engine.insert_window(WindowId(3));
         assert_eq!(engine.virtual_layout().columns.len(), 2);
-        assert_eq!(engine.focused(), Some(WindowId(3)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(3)));
     }
 
     #[test]
@@ -995,7 +1000,7 @@ mod tests {
 
         let _ = engine.remove_window(WindowId(2));
         // Focus falls back to the left column's window (W1).
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
     }
 
     #[test]
@@ -1009,7 +1014,7 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         let _ = engine.remove_window(WindowId(1));
-        assert_eq!(engine.focused(), Some(WindowId(2)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(2)));
     }
 
     #[test]
@@ -1022,7 +1027,7 @@ mod tests {
         engine.set_focus(WindowId(3));
 
         let _ = engine.remove_window(WindowId(3));
-        assert_eq!(engine.focused(), Some(WindowId(2)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(2)));
     }
 
     #[test]
@@ -1032,7 +1037,7 @@ mod tests {
         engine.add_window(WindowId(1));
 
         let _ = engine.remove_window(WindowId(1));
-        assert_eq!(engine.focused(), None);
+        assert_eq!(engine.last_focused_window(), None);
         assert!(engine.virtual_layout().columns.is_empty());
     }
 
@@ -1046,7 +1051,7 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         let _ = engine.remove_window(WindowId(2));
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
     }
 
     #[test]
@@ -1057,7 +1062,11 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         let diff = engine.remove_window(WindowId(99));
-        assert_eq!(engine.focused(), Some(WindowId(1)), "focus must not change");
+        assert_eq!(
+            engine.last_focused_window(),
+            Some(WindowId(1)),
+            "focus must not change"
+        );
         assert_eq!(
             diff.virtual_layout.columns.len(),
             3,
@@ -1087,7 +1096,7 @@ mod tests {
         // Focus was on W2 (removed). next_available_window at (col 0, row 1):
         // no left, no right → None. Focus becomes None.
         assert_eq!(
-            engine.focused(),
+            engine.last_focused_window(),
             None,
             "focus should be None after removing the focused window from a single-column multi-row layout"
         );
@@ -1108,7 +1117,7 @@ mod tests {
 
         let diff = engine.remove_window(WindowId(1));
         // Focus should be unchanged (W3 was not removed).
-        assert_eq!(engine.focused(), Some(WindowId(3)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(3)));
         // Layout should have 2 columns.
         assert_eq!(diff.virtual_layout.columns.len(), 2);
         // W3 should be in column index 1 (shifted from 2).
@@ -1139,7 +1148,7 @@ mod tests {
         let prev_offset = engine.virtual_layout().viewport_offset;
         let diff = engine.remove_window(WindowId(4));
         // Focus should fall to W3 (left neighbour).
-        assert_eq!(engine.focused(), Some(WindowId(3)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(3)));
         // W3 is now in column index 2 (columns shifted after removal).
         // W3's column is at canvas position ~1932, which is off-screen from
         // offset 0 (viewport right = 1920). ensure_column_visible should scroll.
@@ -1321,7 +1330,7 @@ mod tests {
         let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
         let diff = engine.initialize_windows(vec![], None);
         assert!(diff.virtual_layout.columns.is_empty());
-        assert!(engine.focused().is_none());
+        assert!(engine.last_focused_window().is_none());
     }
 
     #[test]
@@ -1330,7 +1339,7 @@ mod tests {
         let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
         let diff = engine.initialize_windows(vec![WindowId(1)], None);
         assert_eq!(diff.virtual_layout.columns.len(), 1);
-        assert_eq!(engine.focused(), Some(WindowId(1)));
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
         // Should produce moves (new window appeared)
         assert!(!diff.actual_layout.entries.is_empty());
     }
@@ -1344,7 +1353,7 @@ mod tests {
         assert_eq!(diff.virtual_layout.columns[0].rows[0], WindowId(10));
         assert_eq!(diff.virtual_layout.columns[1].rows[0], WindowId(20));
         assert_eq!(diff.virtual_layout.columns[2].rows[0], WindowId(30));
-        assert_eq!(engine.focused(), Some(WindowId(30))); // last window
+        assert_eq!(engine.last_focused_window(), Some(WindowId(30))); // last window
     }
 
     #[test]
@@ -1358,7 +1367,7 @@ mod tests {
             engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], Some(0));
         assert_eq!(diff.virtual_layout.columns.len(), 3);
         assert_eq!(
-            engine.focused(),
+            engine.last_focused_window(),
             Some(WindowId(10)),
             "focus_col_idx=0 should focus the first window, not the last"
         );
@@ -1370,7 +1379,7 @@ mod tests {
         let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], Some(1));
         assert_eq!(
-            engine.focused(),
+            engine.last_focused_window(),
             Some(WindowId(20)),
             "focus_col_idx=1 should focus the second window"
         );
@@ -1382,7 +1391,7 @@ mod tests {
         let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4);
         engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], None);
         assert_eq!(
-            engine.focused(),
+            engine.last_focused_window(),
             Some(WindowId(30)),
             "focus_col_idx=None should fall back to last window"
         );
@@ -1400,7 +1409,7 @@ mod tests {
         );
         assert_eq!(diff.virtual_layout.columns.len(), 4);
         assert_eq!(
-            engine.focused(),
+            engine.last_focused_window(),
             Some(WindowId(3)),
             "focus_col_idx=2 should focus WindowId(3)"
         );
