@@ -175,9 +175,10 @@ pub enum SocketMessage {
     /// detached from the active workspace's `ScrollingSpace` (with local
     /// focus succession — no OS foreground focus push) and re-inserted into
     /// the target workspace's `ScrollingSpace` after its currently focused
-    /// column. Focus stays on the source workspace; the moved window becomes
-    /// the destination workspace's focus. The daemon animates both mutated
-    /// workspaces in a single batch (see `dispatch_move_window_to_workspace`).
+    /// column. The camera then follows the moved window: the active workspace
+    /// switches to the target so the moved window is visible (see
+    /// `dispatch_move_window_to_workspace`). Moving to the currently active
+    /// workspace is a no-op.
     ///
     /// The variant is named `MoveWindowToWorkspace` (rather than the shorter
     /// `MoveToWorkspace`) to mirror the sibling [`MoveWindow`](Self::MoveWindow)
