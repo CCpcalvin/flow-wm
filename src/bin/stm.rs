@@ -171,6 +171,21 @@ enum DispatchCommands {
     /// column to the previous `column_width` boundary and animates the result.
     #[command(name = "shrinkcolumn")]
     ShrinkColumn,
+    /// Center the viewport on the focused window, free-form (no grid snapping).
+    ///
+    /// Sends [`SocketMessage::Center`]. The daemon slides the viewport so the
+    /// focused window (or the canvas, when all columns fit) lands at the
+    /// monitor midpoint. Contrast with `centergrid`, which snaps to the grid.
+    #[command(name = "center")]
+    Center,
+    /// Center the viewport on the grid (slot-aligned).
+    ///
+    /// Sends [`SocketMessage::CenterGrid`]. The daemon re-runs the same
+    /// slot-aligned viewport computation used at initial layout, so the
+    /// result is identical to a freshly-opened workspace with the same
+    /// column count and focus.
+    #[command(name = "centergrid")]
+    CenterGrid,
     /// Close the currently focused window.
     ///
     /// Sends [`SocketMessage::CloseWindow`]. The daemon asks the focused
@@ -476,6 +491,10 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
         }
         DispatchCommands::ShrinkColumn => {
             send_command(SocketMessage::ShrinkColumn, "column shrunk")
+        }
+        DispatchCommands::Center => send_command(SocketMessage::Center, "viewport centered"),
+        DispatchCommands::CenterGrid => {
+            send_command(SocketMessage::CenterGrid, "viewport grid-centered")
         }
         DispatchCommands::CloseWindow => send_command(SocketMessage::CloseWindow, "window closed"),
         DispatchCommands::SwitchWorkspace { workspace_id } => send_command(

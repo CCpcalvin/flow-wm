@@ -62,6 +62,10 @@ impl ScrollTilingManager {
             SocketMessage::ShrinkColumn => self.dispatch_shrink(),
             SocketMessage::SetColumnWidth { width_px } => self.dispatch_set_column_width(*width_px),
 
+            // --- Viewport center ---
+            SocketMessage::Center => self.dispatch_center_absolute(),
+            SocketMessage::CenterGrid => self.dispatch_center_grid(),
+
             // --- Window state ---
             SocketMessage::ToggleFloat => unimplemented_command("toggle_float"),
             SocketMessage::ToggleMonocle => self.dispatch_toggle_monocle(),
@@ -334,6 +338,38 @@ impl ScrollTilingManager {
         }
     }
 
+    /// Dispatch a free-form viewport center on the focused window.
+    ///
+    /// Delegates to [`ScrollingSpace::center_absolute`](crate::workspace::ScrollingSpace::center_absolute)
+    /// (see `docs/src/dev-guide/layout/mutations.md` for the grid-vs-absolute
+    /// distinction).
+    fn dispatch_center_absolute(&mut self) -> SocketResponse {
+        match self.active_scrolling_mut().center_absolute() {
+            Some(diff) => {
+                self.animate_layout(&diff);
+                SocketResponse::Ok
+            }
+            None => SocketResponse::Error {
+                message: "cannot center viewport (empty workspace)".into(),
+            },
+        }
+    }
+
+    /// Dispatch a slot-aligned viewport center on the grid.
+    ///
+    /// Delegates to [`ScrollingSpace::center_grid`](crate::workspace::ScrollingSpace::center_grid).
+    fn dispatch_center_grid(&mut self) -> SocketResponse {
+        match self.active_scrolling_mut().center_grid() {
+            Some(diff) => {
+                self.animate_layout(&diff);
+                SocketResponse::Ok
+            }
+            None => SocketResponse::Error {
+                message: "cannot center viewport grid (empty workspace)".into(),
+            },
+        }
+    }
+
     /// Dispatch a monocle mode toggle on the focused column.
     fn dispatch_toggle_monocle(&mut self) -> SocketResponse {
         match self.active_scrolling_mut().toggle_monocle() {
@@ -576,8 +612,23 @@ impl ScrollTilingManager {
         // --- Mutation 2: insert into destination. ---
         // `insert_window` places the window after the dest's focused column
         // (or at the start if dest is empty) and re-focuses the new window.
+        //
+        // Auto-center: when the destination ends up sparser than
+        // `columns_per_screen`, slot-center its grid so the moved window
+        // doesn't sit alone at a left-aligned position. Grid variant matches
+        // `initialize_windows` for consistency
+        // (`docs/src/dev-guide/layout/mutations.md`). Strict `<` so an
+        // exactly-full screen is left untouched.
         let dest_applied = match self.active_monitor_mut().workspace_mut(dest_id) {
-            Some(ws) => ws.scrolling.insert_window(focused),
+            Some(ws) => {
+                let applied = ws.scrolling.insert_window(focused);
+                if applied.virtual_layout.columns.len() < ws.scrolling.columns_per_screen() as usize
+                {
+                    ws.scrolling.center_grid().unwrap_or(applied)
+                } else {
+                    applied
+                }
+            }
             None => {
                 // `dest_id` was validated above, so this branch is
                 // unreachable in practice. Guard anyway to stay
