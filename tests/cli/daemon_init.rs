@@ -657,31 +657,44 @@ fn daemon_init_excludes_background_windows_from_real_desktop() {
         );
     }
 
-    // Assert: no window in the registry has an offscreen position.
+    // Assert: no window in the registry is offscreen or degenerate.
+    //
+    // Geometry is read from `window_rect` (the live Win32 `GetWindowRect`
+    // captured at query time), falling back to `pre_manage_rect` (the snapshot
+    // taken at registration) when `window_rect` is null — e.g. a transient
+    // `GetWindowRect` failure. The registry JSON has no top-level `rect` key;
+    // an earlier version of this test read `w["rect"]`, which silently
+    // defaulted every field to 0 via `.unwrap_or(0)` and made the degenerate
+    // assert fire spuriously on whichever window happened to be iterated first.
+    //
     // Background helper windows (e.g., GearLink_KBAgent.exe) often sit at
-    // x: -32000 or x: -10000 (the "default" position for hidden helper windows).
+    // x: -32000 or x: -10000 (the "default" position for hidden helper
+    // windows), and tray-icon helpers can be tiny 2x2px artifacts. Neither
+    // should survive the Alt+Tab / owner / iconic pre-filters, so any such
+    // window reaching the registry is a bug.
     for w in windows {
-        let x = w["rect"]["x"].as_i64().unwrap_or(0);
-        let y = w["rect"]["y"].as_i64().unwrap_or(0);
+        let rect = w["window_rect"]
+            .as_object()
+            .or_else(|| w["pre_manage_rect"].as_object())
+            .expect("window entry should have window_rect or pre_manage_rect");
+        let x = rect["x"].as_i64().unwrap_or(0);
+        let y = rect["y"].as_i64().unwrap_or(0);
+        let width = rect["width"].as_i64().unwrap_or(0);
+        let height = rect["height"].as_i64().unwrap_or(0);
+
         assert!(
             x > -1000 && y > -1000,
             "registry should not contain offscreen windows, got hwnd={:?} at ({}, {})",
             w["hwnd"],
             x,
-            y
+            y,
         );
-    }
-
-    // Assert: no tiny 2x2px artifact windows (typical of tray icons / helpers).
-    for w in windows {
-        let width = w["rect"]["width"].as_i64().unwrap_or(0);
-        let height = w["rect"]["height"].as_i64().unwrap_or(0);
         assert!(
             width >= 2 && height >= 2,
             "registry should not contain degenerate windows, got hwnd={:?} with {}x{}",
             w["hwnd"],
             width,
-            height
+            height,
         );
     }
 
