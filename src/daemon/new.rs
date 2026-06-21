@@ -26,6 +26,8 @@ use std::time::Duration;
 use crate::animation::WindowAnimator;
 use crate::animation::backend::win32::Win32Backend;
 use crate::common::WindowId;
+use crate::config::dirs::history_rules_path_in;
+use crate::config::history::HistoryStore;
 use crate::config::types::{StmConfig, WindowRulesConfig};
 use crate::ipc::transport::PipeServer;
 use crate::layout::types::MonitorInfo;
@@ -77,6 +79,16 @@ impl ScrollTilingManager {
 
         // 1. Create registry from rules.
         let mut registry = WindowRegistry::new(&user_rules, &default_rules);
+
+        // Load learned rules from `history-stm-rules.toml` and push them into
+        // the registry's classification pipeline BEFORE scanning existing
+        // windows, so previously-recorded decisions apply to windows that
+        // were already open when stmd started.
+        let history = HistoryStore::load(&history_rules_path_in(&config_dir));
+        if !history.is_empty() {
+            log::info!("loaded {} learned rules from history", history.len());
+            registry.set_learned_rules(history.rules().to_vec());
+        }
 
         // 2. Scan existing windows before hooks start.
         registry.scan_existing_windows()?;
@@ -219,6 +231,7 @@ impl ScrollTilingManager {
 
         Ok(Self {
             registry,
+            history,
             monitors: vec![Monitor::new(
                 geometry.screen_rect,
                 monitor.work_area,

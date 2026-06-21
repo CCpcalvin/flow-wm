@@ -56,7 +56,7 @@ use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GW_OWNER, GetWindow};
 
 use crate::common::Rect;
-use crate::config::types::WindowRulesConfig;
+use crate::config::types::{WindowRule, WindowRulesConfig};
 
 use super::classification;
 use super::types::{FloatingState, IgnoredReason, TilingState, VirtualSlot, Window, WindowState};
@@ -336,6 +336,13 @@ impl WindowRegistry {
     #[must_use]
     pub fn focused(&self) -> Option<crate::common::WindowId> {
         self.focused.map(crate::common::WindowId)
+    }
+
+    /// Replace the classification pipeline's learned-rules layer.
+    ///
+    /// See (`docs/src/dev-guide/classification.md`).
+    pub fn set_learned_rules(&mut self, rules: Vec<WindowRule>) {
+        self.pipeline.set_learned_rules(rules);
     }
 
     /// Transitions a window to minimized state.

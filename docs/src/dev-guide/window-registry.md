@@ -193,7 +193,7 @@ flowchart TB
 
     subgraph PIPE["Multi-layer rule pipeline"]
         UR["User rules<br/>(from stm-rules.toml)<br/>first match wins"]
-        LR["Learned rules<br/>(future: empty)<br/>first match wins"]
+        LR["Learned rules<br/>(history-stm-rules.toml)<br/>first match wins"]
         DR["Default rules<br/>(embedded at compile time)<br/>first match wins"]
         FALL["Default action<br/>(fallback)"]
         UR -- no match --> LR

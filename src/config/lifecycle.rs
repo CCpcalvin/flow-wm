@@ -144,7 +144,7 @@ pub fn load_app_config(path: &Path) -> StmConfig {
 
 /// Load window rules config from a TOML file.
 ///
-/// If the file doesn't exist, returns the default (empty rules, `default_action: tile`).
+/// If the file doesn't exist, returns the default (empty rules, `default_action: float`).
 /// If the file exists but is malformed, logs an error and returns the default.
 /// This function never panics — it is designed for daemon startup where a bad
 /// rules file should not prevent the daemon from running.
@@ -637,7 +637,7 @@ strategy = "original_slot"
 
         // stm-rules.toml should contain valid WindowRulesConfig TOML.
         let rules: WindowRulesConfig = toml::from_str(&contents).unwrap();
-        assert_eq!(rules.default_action, WindowAction::Tile);
+        assert_eq!(rules.default_action, WindowAction::Float);
     }
 
     /// Negative: `init_config_dir` does not overwrite existing files.
@@ -811,7 +811,7 @@ initial_width_px = 960
     fn load_rules_config_missing_file_returns_default() {
         let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm-rules.toml");
         let config = load_rules_config(&path);
-        assert_eq!(config.default_action, WindowAction::Tile);
+        assert_eq!(config.default_action, WindowAction::Float);
         assert!(config.rules.is_empty());
     }
 
@@ -822,7 +822,7 @@ initial_width_px = 960
         f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
 
         let config = load_rules_config(f.path());
-        assert_eq!(config.default_action, WindowAction::Tile);
+        assert_eq!(config.default_action, WindowAction::Float);
         assert!(config.rules.is_empty());
     }
 
@@ -833,7 +833,7 @@ initial_width_px = 960
         f.write_all(b"").unwrap();
 
         let config = load_rules_config(f.path());
-        assert_eq!(config.default_action, WindowAction::Tile);
+        assert_eq!(config.default_action, WindowAction::Float);
         assert!(config.rules.is_empty());
     }
 
@@ -881,7 +881,7 @@ initial_width_px = 960
     #[test]
     fn load_default_rules_returns_embedded_rules() {
         let config = load_default_rules();
-        assert_eq!(config.default_action, WindowAction::Tile);
+        assert_eq!(config.default_action, WindowAction::Float);
         assert!(
             !config.rules.is_empty(),
             "embedded default rules should not be empty"
@@ -1004,7 +1004,7 @@ initial_width_px = 960
     /// malformed TOML to `toml::from_str::<WindowRulesConfig>()` and
     /// verifying that (a) the error variant is reachable and (b)
     /// `WindowRulesConfig::default()` is a valid fallback (non-panicking,
-    /// empty rules, `default_action: tile`).
+    /// empty rules, `default_action: float`).
     ///
     /// The identical `match Ok/Err` pattern in `load_default_rules` is
     /// validated structurally by `load_rules_config_malformed_toml_returns_default`
@@ -1023,7 +1023,7 @@ initial_width_px = 960
 
         // Assert: the fallback default is a valid, usable config.
         let fallback = WindowRulesConfig::default();
-        assert_eq!(fallback.default_action, WindowAction::Tile);
+        assert_eq!(fallback.default_action, WindowAction::Float);
         assert!(fallback.rules.is_empty(), "fallback should have no rules");
     }
 
@@ -1046,7 +1046,7 @@ initial_width_px = 960
         }
 
         let config = load_rules_config(&path);
-        assert_eq!(config.default_action, WindowAction::Tile);
+        assert_eq!(config.default_action, WindowAction::Float);
         assert!(
             !config.rules.is_empty(),
             "bundled rules should not be empty"

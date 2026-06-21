@@ -27,6 +27,7 @@
 - [Workspace Hierarchy](./dev-guide/workspace.md)
 - [Floating Space](./dev-guide/floating-space.md)
 - [Window Registry](./dev-guide/window-registry.md)
+- [Classification & Learned Rules](./dev-guide/classification.md)
 - [Animation](./dev-guide/animation.md)
 - [IPC & Watchdog](./dev-guide/ipc-and-watchdog.md)
 - [Config & Persistence](./dev-guide/config-and-persistence.md)

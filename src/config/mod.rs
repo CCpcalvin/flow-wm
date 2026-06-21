@@ -28,6 +28,7 @@
 //! See [`lifecycle`] module docs for detailed documentation of each function.
 
 pub mod dirs;
+pub mod history;
 pub mod lifecycle;
 pub mod schema;
 pub mod types;

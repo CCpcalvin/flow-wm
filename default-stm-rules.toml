@@ -13,7 +13,7 @@
 #
 # For match field documentation, see the MatchRule docstring in src/config/types.rs.
 
-default_action = "tile"
+default_action = "float"
 
 # ── Windows Shell ────────────────────────────────────────────────────
 
