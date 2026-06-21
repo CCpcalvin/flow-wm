@@ -9,6 +9,7 @@
 
 use crate::common::{Direction, Size, WindowId};
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
+use crate::layout::projection;
 use crate::layout::types::ActualLayout;
 use crate::registry::hooks::{add_float_hwnd, remove_float_hwnd, set_float_hwnds};
 use crate::registry::types::{FloatingState, TilingState, WindowState};
@@ -66,8 +67,7 @@ impl ScrollTilingManager {
             SocketMessage::SetColumnWidth { width_px } => self.dispatch_set_column_width(*width_px),
 
             // --- Viewport center ---
-            SocketMessage::Center => self.dispatch_center_absolute(),
-            SocketMessage::CenterGrid => self.dispatch_center_grid(),
+            SocketMessage::Center => self.dispatch_center(),
 
             // --- Window state ---
             SocketMessage::ToggleFloat => self.dispatch_set_window(WindowMode::Cycle),
@@ -342,34 +342,20 @@ impl ScrollTilingManager {
         }
     }
 
-    /// Dispatch a free-form viewport center on the focused window.
+    /// Center the viewport so the focused column lands at the monitor midpoint.
     ///
-    /// Delegates to [`ScrollingSpace::center_absolute`](crate::workspace::ScrollingSpace::center_absolute)
-    /// (see `docs/src/dev-guide/layout/mutations.md` for the grid-vs-absolute
-    /// distinction).
-    fn dispatch_center_absolute(&mut self) -> SocketResponse {
-        match self.active_scrolling_mut().center_absolute() {
+    /// Delegates to [`ScrollingSpace::center_focused_column`] which uses the
+    /// actual prefix-sum canvas position (variable-width aware). Always centers
+    /// even when all columns fit — this is the explicit center command. See
+    /// (`docs/src/dev-guide/layout/mutations.md`).
+    fn dispatch_center(&mut self) -> SocketResponse {
+        match self.active_scrolling_mut().center_focused_column() {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
                 message: "cannot center viewport (empty workspace)".into(),
-            },
-        }
-    }
-
-    /// Dispatch a slot-aligned viewport center on the grid.
-    ///
-    /// Delegates to [`ScrollingSpace::center_grid`](crate::workspace::ScrollingSpace::center_grid).
-    fn dispatch_center_grid(&mut self) -> SocketResponse {
-        match self.active_scrolling_mut().center_grid() {
-            Some(diff) => {
-                self.animate_layout(&diff);
-                SocketResponse::Ok
-            }
-            None => SocketResponse::Error {
-                message: "cannot center viewport grid (empty workspace)".into(),
             },
         }
     }
@@ -642,6 +628,21 @@ impl ScrollTilingManager {
             }
         };
 
+        // Capture the focused window's current column width before removal,
+        // so it can be preserved in the destination workspace.
+        let moved_width_px: u32 = self
+            .active_scrolling()
+            .virtual_layout()
+            .find_window(focused)
+            .map(|(col_idx, _)| {
+                self.active_scrolling().virtual_layout().columns[col_idx].width_px as u32
+            })
+            .unwrap_or_else(|| {
+                // Fallback to base column_width if lookup fails (e.g. stale
+                // focus). This is safe — the window will just get the default.
+                self.active_scrolling().config().column_width
+            });
+
         // --- Mutation 1: remove from source (the active workspace). ---
         // `remove_window` runs the full focus-fallback + ensure-visible
         // pipeline internally and returns the post-removal AppliedLayout.
@@ -657,24 +658,28 @@ impl ScrollTilingManager {
             .update_tiled_rects(&source_applied.actual_layout);
 
         // --- Mutation 2: insert into destination. ---
-        // `insert_window` places the window after the dest's focused column
-        // (or at the start if dest is empty) and re-focuses the new window.
-        //
-        // Auto-center: when the destination ends up sparser than
-        // `columns_per_screen`, slot-center its grid so the moved window
-        // doesn't sit alone at a left-aligned position. Grid variant matches
-        // `initialize_windows` for consistency
-        // (`docs/src/dev-guide/layout/mutations.md`). Strict `<` so an
-        // exactly-full screen is left untouched.
+        // The moved window preserves its pre-move width via
+        // `insert_window_with_width`. After insertion, decide how to
+        // position the viewport: fit (all columns fit in monitor → center
+        // the entire canvas) vs. overflow (ensure the moved window's new
+        // column is visible).
         let dest_applied = match self.active_monitor_mut().workspace_mut(dest_id) {
             Some(ws) => {
-                let post_insert = ws.scrolling.insert_window(focused);
-                if post_insert.virtual_layout.columns.len()
-                    < ws.scrolling.columns_per_screen() as usize
-                {
-                    ws.scrolling.center_grid().unwrap_or(post_insert)
+                let post_insert = ws
+                    .scrolling
+                    .insert_window_with_width(focused, moved_width_px);
+                let gap = ws.scrolling.config().padding.window_gap;
+                let canvas_w = projection::canvas_width(&post_insert.virtual_layout, gap);
+                let monitor_w = ws.scrolling.config().monitor_width;
+                if canvas_w <= monitor_w {
+                    // Fit: center the entire canvas (offset may be negative
+                    // when canvas < monitor — projection handles this).
+                    ws.scrolling.center_canvas().unwrap_or(post_insert)
                 } else {
-                    post_insert
+                    // Overflow: ensure the moved window's new column is
+                    // visible. `insert_window_with_width` focuses the moved
+                    // window, so `ensure_focused_visible` targets it.
+                    ws.scrolling.ensure_focused_visible().unwrap_or(post_insert)
                 }
             }
             None => {

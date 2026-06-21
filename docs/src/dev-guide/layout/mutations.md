@@ -16,14 +16,14 @@ Every layout change in ScrollingTilingManager is expressed as a **pure function*
 | Structural | Insert after focused | `insert_window_after_focused(layout, focused, window, config)` | Inserts a new column immediately after the focused window's column. Calls `ensure_column_visible` on the new column. |
 | Structural | Add to column | `add_window_to_column(layout, col_idx, window)` | Appends a window as a new row in an existing column. |
 | Structural | Remove window | `remove_window(layout, window, config)` | Removes a window from its column. If the column becomes empty, the column is removed entirely. Clamps `viewport_offset` to prevent scrolling past the new rightmost column. |
-| Structural | Initialize windows | `initialize_windows(ids, config, focus_idx)` | Builds the initial layout from a list of window IDs. Each becomes a single-row column at `column_width`. Sets `viewport_offset` via `center_viewport_grid`. |
+| Structural | Initialize windows | `initialize_windows(ids, config, focus_idx, widths)` | Builds the initial layout from a list of window IDs. Each becomes a single-row column. When `widths` is `Some`, each width is quantized to the nearest slot-ladder rung (clamped to `[column_width, abs_max_width]`); when `None`, all columns use `column_width`. Sets `viewport_offset` via the canvas-width fit predicate (see [Center behaviors](#center-behaviors-three-modes)). |
 | Sizing | Expand column | `expand_column(layout, focused, config)` | Grows the focused column by one rung on the slot ladder. Two-step top jumps to `abs_max_width`. No-op if already at `abs_max_width`. |
 | Sizing | Shrink column | `shrink_column(layout, focused, config)` | Shrinks the focused column by one rung. Reverses the two-step top. No-op if already at `column_width` (ladder floor). |
 | Sizing | Set column width | `set_column_width(layout, focused, target_px, config)` | Sets the focused column to an explicit pixel width (free-form, not snapped to ladder). Bounded by `[min_column_width_px, abs_max_width]`. Calls `ensure_column_visible`. |
 | Sizing | Resize column | `resize_column(layout, focused, delta_px, config)` | Adds a pixel delta to the current width and delegates to `set_column_width`. Used by drag-resize. |
 | State | Toggle monocle | `toggle_monocle(layout, focused, saved, config)` | Enters monocle by setting the focused column to `abs_max_width` and saving the previous width. Exits monocle by restoring the saved width (defaults to `column_width`). |
-| Viewport center | Center grid | `center_viewport_grid(num_columns, focus_col, config)` | Computes a **slot-aligned** `viewport_offset` that centers the focus column while keeping all columns visible (all-fit case), or shows exactly `columns_per_screen` columns with the focus column centered (scroll case). Used by `initialize_windows` and the move-to-workspace auto-center hook. |
-| Viewport center | Center absolute | `center_viewport_absolute(num_columns, focus_col, config)` | Computes a **free-form** `viewport_offset` that places the canvas midpoint (all-fit) or the focus column center (scroll) at the monitor midpoint. Not slot-aligned; may return a negative offset when the canvas is narrower than the monitor. Exposed as the `stm dispatch center` command. |
+| Viewport center | Center focused column | `center_viewport_on_focused(layout, focus_col, config)` | Computes a free-form `viewport_offset` that places the focused column's center at the monitor midpoint, using prefix-sum canvas positions (variable-width aware). **Always** centers, even when all columns already fit. Exposed as the `stm dispatch center` command. |
+| Viewport center | Center canvas | `center_viewport_canvas(layout, config)` | Computes a free-form `viewport_offset` that centers the entire canvas in the monitor: `(canvas_width - monitor_width) / 2`. May return a negative offset when the canvas is narrower than the monitor (projection handles this). Used by `initialize_windows` (fit case) and the move-to-workspace auto-center hook (fit case). |
 
 ## The F4-ladder slot model
 
@@ -81,25 +81,70 @@ When a window is removed, it is spliced out of its column's `rows` vector. If th
 
 ### `initialize_windows`
 
-Builds the initial `VirtualLayout` from a list of `WindowId` values. Each window becomes a single-row column at `column_width`. The `viewport_offset` is set by `center_viewport_grid`, which uses the user's `columns_per_screen` config to decide whether all columns fit on screen (left-aligned with focus centered) or scrolling is needed (show exactly `columns_per_screen` columns with the focus column as centered as possible). The offset is always slot-aligned for initialization.
+Builds the initial `VirtualLayout` from a list of `WindowId` values. Each window becomes a single-row column.
 
-### `center_viewport_grid` vs `center_viewport_absolute`
+**Width assignment.** When `widths: Some(&[u32])` is provided (the init flow collects each window's `pre_manage_rect.width` from the registry scan), each width is passed through `quantize_to_ladder` and snapped to the nearest slot-ladder rung, clamped to `[column_width, abs_max_width]`. When `widths: None`, every column uses `column_width` (the original behavior, retained for tests that don't care about variable widths). Free-form widths between rungs are reachable only via drag-resize (`set_column_width`), exactly as before — initialization always lands on a ladder rung.
 
-Two viewport-centering operations exist because they optimize for different visual goals, and the same distinction powers the move-to-workspace auto-center hook.
+**Viewport offset.** The `viewport_offset` is decided by the canvas-width fit predicate (see [Center behaviors](#center-behaviors-three-modes)):
 
-**`center_viewport_grid`** — slot-aligned. The result is always a multiple of `column_shift = column_width + window_gap`, so column boundaries land exactly on slot boundaries. This is the variant used during initialization and the auto-center hook when a window moves into a sparse destination workspace (destination column count strictly less than `columns_per_screen`). It degenerates to `0` when no slot-aligned offset can keep all columns visible: a single column on a wide monitor would need a *negative* multiple of `column_shift` to be visually centered, but that would push the column's left edge before the canvas origin, so the function falls back to offset `0` (left-aligned).
+- If `canvas_width(layout, window_gap) ≤ monitor_width` (all columns fit), the canvas is centered via `center_viewport_canvas`.
+- Else if a focus column is provided, `ensure_column_visible` shifts the viewport to reveal the focus column with a `window_gap` margin.
+- Else (overflow with no focus), `viewport_offset = 0`.
 
-**`center_viewport_absolute`** — free-form. The result is computed directly as the midpoint between canvas and monitor — `(canvas_width - monitor_width) / 2` for the all-fit case, or `focus_center - monitor_width / 2` for the scroll case — with no slot quantization. This variant **does not degenerate**: the single-column-wide-monitor case returns a negative offset that visually centers the column even though the camera slides before the canvas origin. Projection already handles negative offsets (it is the same path used by the all-fit centering during initialization).
+The old `columns_per_screen` config field is retained for compatibility but is **not** consulted by this logic — fit is computed from actual canvas width, which is the only correct approach once columns can have different widths.
 
-The contrast is intentional. Grid centering keeps column boundaries on the slot grid — which is what `ensure_column_visible` and scroll-step operations expect — at the cost of a degenerate left-aligned case when the canvas is much narrower than the monitor. Absolute centering prioritizes visual centering over grid alignment, and is exposed as a user-invoked command (`stm dispatch center`) for when the user explicitly wants the focus column at the monitor midpoint regardless of grid alignment. The grid variant is the default for automated flows (`initialize_windows`, move-to-workspace) because it never produces surprising mid-slot positions.
+## Center behaviors: three modes
 
-| Property | `center_viewport_grid` | `center_viewport_absolute` |
-|----------|------------------------|----------------------------|
-| Offset quantization | Multiple of `column_shift` | Arbitrary pixel value |
-| All-fit case | Slot-aligned, keeps all columns visible | Canvas midpoint; may slide before origin (negative offset) |
-| Scroll case | Shows exactly `columns_per_screen` columns, focus near center slot | Focus column center at monitor midpoint |
-| Degenerate case (1 col, wide monitor) | Returns `0` (no valid slot-aligned offset) | Returns negative offset (visually centered) |
-| Used by | `initialize_windows`, move-to-workspace auto-center | `stm dispatch center` command |
+There are three viewport-centering behaviors, each driven by a different trigger. They all use **prefix-sum canvas positions** (the same math `projection::project` and `ensure_column_visible` already use) — none of them assume uniform column widths.
+
+```mermaid
+flowchart TD
+    Trigger["Trigger: user runs `stm dispatch center`,<br/>or automated flow needs viewport adjustment"]
+    Trigger --> Decision{"What should be centered?"}
+
+    Decision -->|"Explicit user command"| Focused["**Center focused column**<br/>viewport_offset = canvas_x(focused)<br/>- (monitor_width - focused_width) / 2<br/><br/>Always centers, even when all columns fit."]
+    Decision -->|"Automated flow + everything fits"| Canvas["**Center canvas**<br/>viewport_offset =<br/>(canvas_width - monitor_width) / 2<br/><br/>May be negative when canvas < monitor."]
+    Decision -->|"Automated flow + overflow"| Ensure["**Ensure column visible**<br/>existing `ensure_column_visible`<br/>(free-form min-scroll, gap margin)<br/><br/>No centering — just reveal the column."]
+
+    Focused -.->|Used by| FC["`stm dispatch center` command<br/>(dispatch_center → ScrollingSpace::center_focused_column)"]
+    Canvas -.->|Used by| CC["`initialize_windows` fit case<br/>move-to-workspace fit case<br/>(ScrollingSpace::center_canvas)"]
+    Ensure -.->|Used by| EC["`initialize_windows` overflow case<br/>move-to-workspace overflow case<br/>(ScrollingSpace::ensure_focused_visible)"]
+```
+
+### `center_viewport_on_focused` — center the focused column
+
+```
+canvas_x(f) = Σ width[i] for i in 0..f + (f + 1) * window_gap
+viewport_offset = canvas_x(focused) - (monitor_width - focused_width) / 2
+```
+
+The `(f + 1) * window_gap` term is the easy off-by-one trap: the canvas starts with a left-edge gap, then each column contributes its width plus a trailing gap, so column `f`'s left edge sits at `(f + 1)` gaps plus the widths of all preceding columns. `focused_width` is the focused column's **actual** `width_px` (read from the layout, not assumed) — this is the fix for the original bug where the old `center_viewport_grid`/`center_viewport_absolute` functions assumed uniform widths and computed `f * slot` instead.
+
+This is the only behavior that centers **unconditionally** — the user explicitly asked for it via `stm dispatch center`. The other two behaviors are policy decisions made by automated flows.
+
+### `center_viewport_canvas` — center the entire canvas
+
+```
+viewport_offset = (canvas_width(layout, window_gap) - monitor_width) / 2
+```
+
+Uses `projection::canvas_width` as the authoritative canvas math (`window_gap + Σ(width_px + window_gap)`). When the canvas is narrower than the monitor, this returns a negative offset — projection already supports this (the column's left edge is shifted right of the canvas origin by the gap, which compensates). Used when an automated flow knows everything fits and wants a clean visual midpoint.
+
+### `ensure_column_visible` — reveal without centering (unchanged)
+
+The existing free-form min-scroll primitive. Used by automated flows when the canvas overflows the monitor: rather than centering (which would push other useful columns off-screen), it shifts the viewport by the minimum amount needed to reveal the target column with a `window_gap` margin. See [`ensure_column_visible`](#ensure_column_visible) above.
+
+### Why the old `center_viewport_grid` / `center_viewport_absolute` were removed
+
+Both functions took `(num_columns, focus_col, config)` and computed positions as `f * slot` / `gap + N * slot`. They never saw `&VirtualLayout`, so once any column was expanded, shrunk, or drag-resized, the math was wrong. The refactor collapses them into the two prefix-sum primitives above (`center_viewport_on_focused` for the user command, `center_viewport_canvas` for the automated fit case), with `ensure_column_visible` covering the overflow case. The old "grid" vs "absolute" distinction (slot-aligned vs free-form) turned out to be a red herring: the real axis is "what should be centered" (focused column vs entire canvas vs nothing), not "is the offset quantized".
+
+| Property | `center_viewport_on_focused` | `center_viewport_canvas` | `ensure_column_visible` |
+|----------|------------------------------|--------------------------|-------------------------|
+| Trigger | Explicit user command (`stm dispatch center`) | Automated flow, all columns fit | Automated flow, canvas overflows |
+| Centers | Focused column at monitor midpoint | Entire canvas at monitor midpoint | Nothing — minimum-scroll reveal |
+| Offset quantization | Free-form | Free-form | Free-form |
+| Negative offset possible | Yes (when focused col is near canvas left) | Yes (when canvas < monitor) | No (clamped to ≥ 0) |
+| Unconditional | Yes (always centers) | No (only used when fit predicate passes) | No (only used when target is off-screen) |
 
 ## The pure-function convention
 
