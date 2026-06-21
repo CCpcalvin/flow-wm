@@ -17,6 +17,22 @@
 use crate::common::Direction;
 use serde::{Deserialize, Serialize};
 
+/// Target window mode for the [`SocketMessage::SetWindow`] command.
+///
+/// Used by both the IPC wire format (serde) and the CLI (clap `Subcommand`).
+/// See the developer guide (`docs/src/dev-guide/ipc-and-watchdog.md`) for the
+/// message catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::Subcommand)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowMode {
+    /// Place the focused window in floating mode.
+    Float,
+    /// Place the focused window in tiling mode.
+    Tile,
+    /// Toggle between float and tile based on current state.
+    Cycle,
+}
+
 /// Default named pipe path used by the daemon and CLI on Windows.
 pub const PIPE_NAME: &str = r"\\.\pipe\stm";
 
@@ -126,19 +142,21 @@ pub enum SocketMessage {
     },
 
     // --- Viewport center ---
-    /// Center the viewport on the focused window, free-form (no slot snapping).
+    /// Center the viewport so the focused column lands at the monitor midpoint.
     ///
-    /// Maps to [`ScrollingSpace::center_absolute`](crate::workspace::ScrollingSpace::center_absolute).
-    /// Contrast with [`CenterGrid`](Self::CenterGrid), which snaps to the grid.
+    /// Maps to [`ScrollingSpace::center_focused_column`](crate::workspace::ScrollingSpace::center_focused_column).
+    /// Uses the variable-width prefix sum, so it is correct even when columns
+    /// have been expanded or shrunk. See (`docs/src/dev-guide/layout/mutations.md`).
     Center,
-    /// Center the viewport on the grid (slot-aligned, reuses initial-layout logic).
-    ///
-    /// Maps to [`ScrollingSpace::center_grid`](crate::workspace::ScrollingSpace::center_grid).
-    /// When the column count fits `columns_per_screen`, this is equivalent to
-    /// re-running `initialize_windows`'s viewport offset computation.
-    CenterGrid,
 
     // --- Window state ---
+    /// Set the focused window's mode (float, tile, or cycle).
+    ///
+    /// Replaces the legacy [`ToggleFloat`] with explicit mode control.
+    SetWindow {
+        /// Desired window mode.
+        mode: WindowMode,
+    },
     /// Toggle the focused window between tiling and floating.
     ToggleFloat,
     /// Toggle monocle mode on the focused column.
@@ -440,7 +458,6 @@ mod tests {
             SocketMessage::ExpandColumn,
             SocketMessage::ShrinkColumn,
             SocketMessage::Center,
-            SocketMessage::CenterGrid,
             SocketMessage::ToggleFloat,
             SocketMessage::ToggleMonocle,
             SocketMessage::PlaceAbove,
@@ -542,6 +559,60 @@ mod tests {
         );
     }
 
+    // Positive: round-trip SetWindow (float)
+    #[test]
+    fn roundtrip_set_window_float() {
+        let msg = SocketMessage::SetWindow {
+            mode: WindowMode::Float,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"set_window","mode":"float"}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            SocketMessage::SetWindow {
+                mode: WindowMode::Float
+            }
+        );
+    }
+
+    // Positive: round-trip SetWindow (tile)
+    #[test]
+    fn roundtrip_set_window_tile() {
+        let msg = SocketMessage::SetWindow {
+            mode: WindowMode::Tile,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"set_window","mode":"tile"}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            SocketMessage::SetWindow {
+                mode: WindowMode::Tile
+            }
+        );
+    }
+
+    // Positive: round-trip SetWindow (cycle)
+    #[test]
+    fn roundtrip_set_window_cycle() {
+        let msg = SocketMessage::SetWindow {
+            mode: WindowMode::Cycle,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"set_window","mode":"cycle"}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            SocketMessage::SetWindow {
+                mode: WindowMode::Cycle
+            }
+        );
+    }
+
     // --- encode_message error path ---
 
     // Negative: encode_message returns Err for a type that fails serialization
@@ -599,8 +670,10 @@ mod tests {
             SocketMessage::ExpandColumn,
             SocketMessage::ShrinkColumn,
             SocketMessage::Center,
-            SocketMessage::CenterGrid,
             SocketMessage::SetColumnWidth { width_px: 800 },
+            SocketMessage::SetWindow {
+                mode: WindowMode::Float,
+            },
             SocketMessage::ToggleFloat,
             SocketMessage::ToggleMonocle,
             SocketMessage::PlaceAbove,

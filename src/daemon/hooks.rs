@@ -23,6 +23,7 @@
 use windows::Win32::Foundation::HWND;
 
 use crate::common::WindowId;
+use crate::registry::hooks::remove_float_hwnd;
 use crate::registry::types::{ReclassifyResult, VisibilityChange};
 use crate::registry::win32 as registry_win32;
 
@@ -103,6 +104,10 @@ impl ScrollTilingManager {
         if was_tiling {
             self.remove_from_layout_and_refocus(WindowId(hwnd));
         }
+
+        // A destroyed float must leave the tracking set so the LOCATIONCHANGE
+        // callback stops forwarding it. Harmless no-op for tiled/ignored windows.
+        remove_float_hwnd(hwnd);
 
         self.registry.remove_window(hwnd);
         // Border overlay: detach explicitly — `refresh_border_for` would also
@@ -189,9 +194,9 @@ impl ScrollTilingManager {
     /// already correct and we avoid a redundant (and potentially disruptive)
     /// `SetForegroundWindow` call.
     fn remove_from_layout_and_refocus(&mut self, window: WindowId) {
-        let prev_focus = self.active_scrolling().focused();
+        let prev_focus = self.active_scrolling().last_focused_window();
         let applied = self.active_scrolling_mut().remove_window(window);
-        let new_focus = self.active_scrolling().focused();
+        let new_focus = self.active_scrolling().last_focused_window();
 
         if new_focus != prev_focus
             && let Some(id) = new_focus

@@ -106,8 +106,16 @@ impl ScrollTilingManager {
         // 6. Batch-initialize layout from existing tiling windows.
         //    Sort by x-coordinate so column assignment is deterministic and
         //    windows travel the shortest distance to their tiling positions.
-        let tiling_ids = registry.tiling_window_ids_sorted_by_x();
-        log::debug!("init: {} tiling windows (sorted by x)", tiling_ids.len());
+        //    Collect each window's pre-STM width for width-aware init.
+        let (tiling_ids, widths): (Vec<WindowId>, Vec<u32>) = registry
+            .tiling_window_ids_with_widths_sorted_by_x()
+            .into_iter()
+            .unzip();
+        log::debug!(
+            "init: {} tiling windows (sorted by x), widths: {:?}",
+            tiling_ids.len(),
+            widths
+        );
         let initial_diff = if !tiling_ids.is_empty() {
             // Query the actual foreground window so init focuses the column
             // the user was last interacting with, rather than blindly picking
@@ -117,7 +125,7 @@ impl ScrollTilingManager {
                 tiling_ids.iter().position(|&id| id == wid)
             });
             log::debug!("init: focus_col = {focus_col:?} (foreground window lookup)");
-            let diff = scrolling.initialize_windows(tiling_ids, focus_col);
+            let diff = scrolling.initialize_windows(tiling_ids, focus_col, Some(&widths));
             for entry in &diff.actual_layout.entries {
                 log::trace!(
                     "init target: {:?} rect ({},{},{},{})",
@@ -245,6 +253,7 @@ impl ScrollTilingManager {
             hook_signal,
             shutting_down: false,
             pending_creations: Vec::new(),
+            float_resume_deadline: None,
         };
         // Initial border overlay attach for windows found during the scan.
         // Idempotent and O(N) where N = tracked windows.

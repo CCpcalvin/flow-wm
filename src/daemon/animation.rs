@@ -196,8 +196,15 @@ impl ScrollTilingManager {
         // (rather than `flat_map`) lets us hold one `&self.registry` borrow
         // at a time without entangling the borrow checker across closures.
         let mut targets: Vec<WindowTarget> = Vec::new();
+        // Whether any target in this batch is a tracked float window. Used
+        // after the loop to decide whether to suppress LOCATIONCHANGE capture
+        // for the animation's duration.
+        let mut has_float_target = false;
         for (layout, y_offset) in batches {
             for entry in &layout.entries {
+                if !has_float_target && crate::registry::hooks::is_float_hwnd(entry.window_id.0) {
+                    has_float_target = true;
+                }
                 let invisible_bounds = self
                     .registry
                     .get_window(HWND(entry.window_id.0 as *mut _))
@@ -224,6 +231,14 @@ impl ScrollTilingManager {
 
         if targets.is_empty() {
             return;
+        }
+
+        // Suppress LOCATIONCHANGE capture for the animation's duration so the
+        // animator's intermediate rects don't reach FloatingSpace. Only armed
+        // when animation is enabled: an instant (0 ms) snap lands at the final
+        // rect, so its LOCATIONCHANGE is already correct.
+        if has_float_target && self.config.animation.enabled {
+            self.arm_float_tracking_suppression();
         }
 
         log::debug!(

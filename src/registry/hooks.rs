@@ -22,10 +22,9 @@
 //!
 //! # Hook registration
 //!
-//! Six hooks are registered. Four as event ranges and two as single-event
-//! hooks (so the ultra-noisy `EVENT_OBJECT_LOCATIONCHANGE`, which sits between
-//! `STATECHANGE` and `NAMECHANGE` in the numeric ordering, is deliberately
-//! excluded):
+//! Seven hooks are registered. `STATECHANGE`, `NAMECHANGE`, and
+//! `LOCATIONCHANGE` are each registered as single-event hooks so the ranges
+//! between them stay disjoint:
 //!
 //! | Hook | Event Range | Purpose |
 //! |------|-------------|---------|
@@ -35,6 +34,11 @@
 //! | SHOW/HIDE | `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` | Tray-hide, DWM cloak, re-show |
 //! | STATECHANGE | `EVENT_OBJECT_STATECHANGE` (single) | Maximized/fullscreen recovery |
 //! | NAMECHANGE | `EVENT_OBJECT_NAMECHANGE` (single) | Late-title recovery (e.g. Windows Terminal) |
+//! | LOCATIONCHANGE | `EVENT_OBJECT_LOCATIONCHANGE` (single) | Float-window drag tracking |
+//!
+//! `LOCATIONCHANGE` fires on every move/resize pixel system-wide, so the
+//! callback drops all of them except those for tracked active-workspace float
+//! windows while tracking is enabled (see [`FLOAT_HWNS`] / [`FLOAT_TRACKING_ACTIVE`]).
 //!
 //! ## Recovery hooks (STATECHANGE + NAMECHANGE)
 //!
@@ -70,7 +74,10 @@
 //! See the developer guide's *Event Pipelines* chapter
 //! (`docs/src/dev-guide/event-pipelines.md`) for the end-to-end hook sequence.
 
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
@@ -121,9 +128,13 @@ const EVENT_OBJECT_HIDE: u32 = 0x8003;
 /// queries only for windows currently `Ignored(Maximized|Fullscreen)`).
 const EVENT_OBJECT_STATECHANGE: u32 = 0x800A;
 
-// `EVENT_OBJECT_LOCATIONCHANGE` (0x800B) is deliberately NOT hooked. It fires
-// on every pixel of window move/resize and would flood the event channel.
-// Maximize/restore is already covered by STATECHANGE above.
+/// `EVENT_OBJECT_LOCATIONCHANGE` — a window's screen position or size changed.
+///
+/// Fires on every pixel of a move/resize. To avoid flooding the channel, the
+/// hook callback drops every such event except those whose `hwnd` is in
+/// [`FLOAT_HWNS`] (active-workspace floating windows) and only while
+/// [`FLOAT_TRACKING_ACTIVE`] is set. See (`docs/src/dev-guide/floating-space.md`).
+const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
 
 /// `EVENT_OBJECT_NAMECHANGE` — a window object's name (title) changed.
 ///
@@ -239,6 +250,16 @@ pub enum HookEvent {
         /// The window whose title changed.
         hwnd: isize,
     },
+    /// A floating window's screen rect changed (`EVENT_OBJECT_LOCATIONCHANGE`).
+    ///
+    /// Only emitted for windows in [`FLOAT_HWNS`] (active-workspace floats) and
+    /// only while [`FLOAT_TRACKING_ACTIVE`] is `true`. The callback forwards the
+    /// `hwnd` only; the main thread reads the rect via `GetWindowRect` so the
+    /// callback stays minimal (matching the stateless-callback invariant).
+    LocationChange {
+        /// The floating window whose position or size changed.
+        hwnd: isize,
+    },
 }
 
 // ── Global sender ────────────────────────────────────────────────────
@@ -270,6 +291,108 @@ static HOOK_SENDER: OnceLock<Sender<HookEvent>> = OnceLock::new();
 /// The RAII [`HookSignal`] wrapper owns the actual `HANDLE` and closes it on
 /// drop; this global is purely for read-only access from the callback.
 static HOOK_SIGNAL: OnceLock<isize> = OnceLock::new();
+
+// ── Floating-location tracking (shared with the hook callback) ───────
+
+/// HWND values of the active workspace's floating windows.
+///
+/// The hook callback reads this (membership check) to decide whether an
+/// `EVENT_OBJECT_LOCATIONCHANGE` should be forwarded; the main thread writes it
+/// whenever the float set changes (float/tile transitions, window destroy,
+/// active-workspace switch). It holds **only** the active workspace's floats so
+/// that the noisy location event can never reach a parked workspace's windows.
+///
+/// Stored as `isize` (not `HWND`) for `Send`/`Sync` safety — see
+/// [`HOOK_SIGNAL`] for the same rationale. Initialized once in
+/// [`start_hook_thread`].
+static FLOAT_HWNS: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
+
+/// Whether `EVENT_OBJECT_LOCATIONCHANGE` for float windows is currently forwarded.
+///
+/// Flipped to `false` by the daemon while stm is animating floating windows
+/// (so its own `SetWindowPos` calls are not mis-captured as user drags) and
+/// flipped back to `true` once the animation-duration timer elapses, after a
+/// resync poll. Defaults to `true` so user drags are captured whenever no
+/// stm float animation is in flight.
+static FLOAT_TRACKING_ACTIVE: AtomicBool = AtomicBool::new(true);
+
+/// Recovers from a poisoned [`Mutex`] guard by taking the inner value.
+///
+/// The float-HWND set ops are infallible, so poisoning is only reachable via a
+/// panic on another thread while holding the lock — recovering the inner data
+/// keeps the hook callback panic-free (it runs on the hook thread).
+fn unpoison<T>(
+    lock: std::sync::LockResult<std::sync::MutexGuard<'_, T>>,
+) -> std::sync::MutexGuard<'_, T> {
+    lock.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// ── Float-tracking maintenance (main-thread API) ─────────────────────
+
+/// Returns `true` if float location changes are currently being forwarded.
+#[must_use]
+pub fn float_tracking_active() -> bool {
+    FLOAT_TRACKING_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Enables or disables forwarding of float location-change events.
+///
+/// Setting this to `false` takes effect on the next callback invocation; events
+/// already in flight on the channel are still drained by the main thread, which
+/// re-checks [`float_tracking_active`] before applying them.
+pub fn set_float_tracking_active(enabled: bool) {
+    FLOAT_TRACKING_ACTIVE.store(enabled, Ordering::Release);
+}
+
+/// Adds a window to the active-workspace float set.
+pub fn add_float_hwnd(hwnd: isize) {
+    if let Some(set) = FLOAT_HWNS.get() {
+        unpoison(set.lock()).insert(hwnd);
+    }
+}
+
+/// Removes a window from the active-workspace float set (no-op if absent).
+pub fn remove_float_hwnd(hwnd: isize) {
+    if let Some(set) = FLOAT_HWNS.get() {
+        unpoison(set.lock()).remove(&hwnd);
+    }
+}
+
+/// Replaces the active-workspace float set with `hwnds`.
+///
+/// Used on workspace switch: the new active workspace's floats replace the old
+/// one's, so parked-workspace floats can never be captured.
+pub fn set_float_hwnds(hwnds: &[isize]) {
+    if let Some(set) = FLOAT_HWNS.get() {
+        let mut guard = unpoison(set.lock());
+        guard.clear();
+        guard.extend(hwnds.iter().copied());
+    }
+}
+
+/// Returns `true` if `hwnd` is a tracked active-workspace float.
+///
+/// Called by the hook callback (hook thread) and by the animation bridge
+/// (main thread) to decide whether a batch needs float-suppression.
+#[must_use]
+pub fn is_float_hwnd(hwnd: isize) -> bool {
+    match FLOAT_HWNS.get() {
+        Some(set) => unpoison(set.lock()).contains(&hwnd),
+        None => false,
+    }
+}
+
+/// Returns a snapshot of all active-workspace float HWNDs.
+///
+/// Used by the resume poll to re-read every float's rect after a stm float
+/// animation completes.
+#[must_use]
+pub fn float_hwnds_snapshot() -> Vec<isize> {
+    match FLOAT_HWNS.get() {
+        Some(set) => unpoison(set.lock()).iter().copied().collect(),
+        None => Vec::new(),
+    }
+}
 
 // ── HookThreadHandle ─────────────────────────────────────────────────
 
@@ -418,6 +541,11 @@ pub fn start_hook_thread(
         .set(signal_event.0 as isize)
         .map_err(|_| "start_hook_thread called more than once — this is a bug".to_owned())?;
 
+    // Initialize the float-HWND set (empty until the daemon populates it).
+    FLOAT_HWNS
+        .set(Mutex::new(HashSet::new()))
+        .map_err(|_| "start_hook_thread called more than once — this is a bug".to_owned())?;
+
     let hook_signal = HookSignal(signal_event);
 
     std::thread::spawn(move || {
@@ -515,11 +643,12 @@ fn run_hook_loop() {
 /// - `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` (range; tray-hide, DWM cloak, re-show)
 /// - `EVENT_OBJECT_STATECHANGE` (single; maximized/fullscreen recovery)
 /// - `EVENT_OBJECT_NAMECHANGE` (single; late-title recovery)
+/// - `EVENT_OBJECT_LOCATIONCHANGE` (single; float drag tracking)
 ///
-/// `STATECHANGE` and `NAMECHANGE` are registered as **single-event** hooks
-/// rather than a `0x800A..=0x800C` range so that the intervening
-/// `EVENT_OBJECT_LOCATIONCHANGE` (`0x800B`) is NOT hooked — it fires on every
-/// pixel of window movement and would flood the channel.
+/// `STATECHANGE`, `NAMECHANGE`, and `LOCATIONCHANGE` are each registered as
+/// **single-event** hooks rather than one `0x800A..=0x800C` range. `LOCATIONCHANGE`
+/// (`0x800B`) is callback-filtered to active-workspace floats only (see
+/// [`FLOAT_HWNS`]) so its per-pixel noisiness cannot flood the channel.
 fn register_hooks() -> Vec<HWINEVENTHOOK> {
     let mut hooks = Vec::new();
 
@@ -604,11 +733,10 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
 
     // Hook: EVENT_OBJECT_STATECHANGE (single event)
     //
-    // Registered as a single-event hook (min == max == STATECHANGE) so the
-    // immediately-following EVENT_OBJECT_LOCATIONCHANGE (0x800B) is NOT
-    // included. LOCATIONCHANGE fires on every move/resize pixel and would
-    // overwhelm the channel. STATECHANGE alone covers the maximize/restore
-    // transition (WS_MAXIMIZE bit flip) that drives Option D recovery.
+    // Registered as a single-event hook (min == max == STATECHANGE) to keep
+    // it disjoint from the separately-registered LOCATIONCHANGE / NAMECHANGE
+    // hooks. STATECHANGE covers the maximize/restore transition (WS_MAXIMIZE
+    // bit flip) that drives Option D recovery.
     let h = unsafe {
         SetWinEventHook(
             EVENT_OBJECT_STATECHANGE,
@@ -648,6 +776,32 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
         log::debug!("hook registered: NAMECHANGE");
     } else {
         log::error!("failed to hook NAMECHANGE");
+    }
+
+    // Hook: EVENT_OBJECT_LOCATIONCHANGE (single event)
+    //
+    // Registered as a single-event hook (not folded into the STATECHANGE /
+    // NAMECHANGE range, which would also catch it but complicate reasoning).
+    // The callback drops every LOCATIONCHANGE except those for tracked
+    // active-workspace floats while tracking is enabled — so despite the
+    // event's noisiness, only genuine user drags of float windows reach the
+    // channel.
+    let h = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            None,
+            Some(hook_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if is_valid_hook(h) {
+        hooks.push(h);
+        log::debug!("hook registered: LOCATIONCHANGE (float-filtered)");
+    } else {
+        log::error!("failed to hook LOCATIONCHANGE");
     }
 
     hooks
@@ -692,6 +846,16 @@ unsafe extern "system" fn hook_callback(
     // Store the HWND value as isize for Send safety.
     let hwnd_val = hwnd.0 as isize;
 
+    // LOCATIONCHANGE is the ultra-noisy event: filter it hard. Only forward
+    // when the window is a tracked active-workspace float AND tracking is
+    // currently enabled (disabled while stm animates floats). All other event
+    // types are forwarded unconditionally as before.
+    if event == EVENT_OBJECT_LOCATIONCHANGE
+        && (!FLOAT_TRACKING_ACTIVE.load(Ordering::Acquire) || !is_float_hwnd(hwnd_val))
+    {
+        return;
+    }
+
     let hook_event = match event {
         EVENT_OBJECT_CREATE => HookEvent::Created { hwnd: hwnd_val },
         EVENT_OBJECT_DESTROY => HookEvent::Destroyed { hwnd: hwnd_val },
@@ -702,6 +866,7 @@ unsafe extern "system" fn hook_callback(
         EVENT_OBJECT_HIDE => HookEvent::Hidden { hwnd: hwnd_val },
         EVENT_OBJECT_STATECHANGE => HookEvent::StateChange { hwnd: hwnd_val },
         EVENT_OBJECT_NAMECHANGE => HookEvent::NameChange { hwnd: hwnd_val },
+        EVENT_OBJECT_LOCATIONCHANGE => HookEvent::LocationChange { hwnd: hwnd_val },
         _ => return, // Ignore other events in the range.
     };
 
@@ -766,14 +931,59 @@ mod tests {
     }
 
     #[test]
+    fn hook_event_location_change_carries_hwnd() {
+        let ev = HookEvent::LocationChange { hwnd: 11235 };
+        match ev {
+            HookEvent::LocationChange { hwnd } => assert_eq!(hwnd, 11235),
+            _ => panic!("expected LocationChange"),
+        }
+    }
+
+    #[test]
     fn event_object_statechange_namechange_constants_correct() {
         // Microsoft Win32 event-constant values (verify invariant).
         assert_eq!(EVENT_OBJECT_STATECHANGE, 0x800A);
         assert_eq!(EVENT_OBJECT_NAMECHANGE, 0x800C);
-        // STATECHANGE < LOCATIONCHANGE (0x800B, intentionally NOT hooked)
-        //   < NAMECHANGE — so a 0x800A..=0x800C range would wrongly include
-        //   the noisy LOCATIONCHANGE. The single-event registration avoids it.
-        assert!(EVENT_OBJECT_STATECHANGE < 0x800B);
-        assert!(0x800B < EVENT_OBJECT_NAMECHANGE);
+        assert_eq!(EVENT_OBJECT_LOCATIONCHANGE, 0x800B);
+        // STATECHANGE < LOCATIONCHANGE < NAMECHANGE. Each is registered as a
+        // single-event hook so the ranges stay disjoint; LOCATIONCHANGE is
+        // additionally callback-filtered to float windows only.
+        assert!(EVENT_OBJECT_STATECHANGE < EVENT_OBJECT_LOCATIONCHANGE);
+        assert!(EVENT_OBJECT_LOCATIONCHANGE < EVENT_OBJECT_NAMECHANGE);
+    }
+
+    #[test]
+    fn float_hwnd_set_add_remove_membership() {
+        // Mirror the global init done in start_hook_thread so the test can
+        // exercise the maintenance API without spawning the hook thread.
+        FLOAT_HWNS.set(Mutex::new(HashSet::new())).ok();
+        add_float_hwnd(100);
+        add_float_hwnd(200);
+        assert!(is_float_hwnd(100));
+        assert!(is_float_hwnd(200));
+        assert!(!is_float_hwnd(300));
+        remove_float_hwnd(100);
+        assert!(!is_float_hwnd(100));
+        // set_float_hwnds replaces the whole set.
+        set_float_hwnds(&[300, 400]);
+        assert!(!is_float_hwnd(200));
+        assert!(is_float_hwnd(300));
+        assert!(is_float_hwnd(400));
+        let snap = float_hwnds_snapshot();
+        assert_eq!(snap.len(), 2);
+        assert!(snap.contains(&300));
+        assert!(snap.contains(&400));
+    }
+
+    #[test]
+    fn float_tracking_active_flag_round_trip() {
+        // Default is true (static AtomicBool init). Save, flip, verify, then
+        // restore so other tests in the process aren't affected by the toggle.
+        let original = float_tracking_active();
+        set_float_tracking_active(false);
+        assert!(!float_tracking_active());
+        set_float_tracking_active(true);
+        assert!(float_tracking_active());
+        set_float_tracking_active(original);
     }
 }

@@ -67,3 +67,10 @@ thickness = 3
 focused_color = "#00AAFF"
 unfocused_color = "#555555"
 floating_color = "#AA00FF"
+
+# Floating window configuration.
+# Dimensions are fractions of the monitor work area (0.0 to 1.0),
+# so the default popup size scales across different resolutions.
+[floating]
+default_width = 0.6
+default_height = 0.7

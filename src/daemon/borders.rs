@@ -33,7 +33,7 @@ impl ScrollTilingManager {
         let window = self.registry.get_window(HWND(hwnd as *mut _))?;
         let state = match window.state {
             WindowState::Tiling(TilingState::Active { .. }) => {
-                if self.registry.focused() == Some(hwnd) {
+                if self.registry.focused() == Some(crate::common::WindowId(hwnd)) {
                     BorderState::Focused
                 } else {
                     BorderState::Unfocused

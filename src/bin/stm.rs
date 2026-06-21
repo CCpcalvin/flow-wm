@@ -36,6 +36,7 @@ use scrolling_tiling_manager::common::Direction;
 use scrolling_tiling_manager::config;
 use scrolling_tiling_manager::ipc::message::SocketMessage;
 use scrolling_tiling_manager::ipc::message::SocketResponse;
+use scrolling_tiling_manager::ipc::message::WindowMode;
 use scrolling_tiling_manager::ipc::transport;
 
 /// Maximum time to wait for the daemon to become ready after spawning.
@@ -171,21 +172,13 @@ enum DispatchCommands {
     /// column to the previous `column_width` boundary and animates the result.
     #[command(name = "shrinkcolumn")]
     ShrinkColumn,
-    /// Center the viewport on the focused window, free-form (no grid snapping).
+    /// Center the viewport so the focused column lands at the monitor midpoint.
     ///
     /// Sends [`SocketMessage::Center`]. The daemon slides the viewport so the
-    /// focused window (or the canvas, when all columns fit) lands at the
-    /// monitor midpoint. Contrast with `centergrid`, which snaps to the grid.
+    /// focused column lands at the monitor midpoint using the variable-width
+    /// prefix sum — works correctly even with expanded or shrunk columns.
     #[command(name = "center")]
     Center,
-    /// Center the viewport on the grid (slot-aligned).
-    ///
-    /// Sends [`SocketMessage::CenterGrid`]. The daemon re-runs the same
-    /// slot-aligned viewport computation used at initial layout, so the
-    /// result is identical to a freshly-opened workspace with the same
-    /// column count and focus.
-    #[command(name = "centergrid")]
-    CenterGrid,
     /// Close the currently focused window.
     ///
     /// Sends [`SocketMessage::CloseWindow`]. The daemon asks the focused
@@ -196,6 +189,16 @@ enum DispatchCommands {
     /// automatically once Win32 reports its destruction.
     #[command(name = "closewindow")]
     CloseWindow,
+    /// Set the focused window's tiling mode.
+    ///
+    /// Maps to [`SocketMessage::SetWindow`]. Sends
+    /// `stm dispatch setwindow float|tile|cycle` to the daemon, which
+    /// transitions the focused window between floating and tiling modes.
+    #[command(name = "setwindow")]
+    SetWindow {
+        #[command(subcommand)]
+        mode: WindowMode,
+    },
 
     // --- Workspace (niri-style virtual desktop) ---
     //
@@ -493,10 +496,8 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
             send_command(SocketMessage::ShrinkColumn, "column shrunk")
         }
         DispatchCommands::Center => send_command(SocketMessage::Center, "viewport centered"),
-        DispatchCommands::CenterGrid => {
-            send_command(SocketMessage::CenterGrid, "viewport grid-centered")
-        }
         DispatchCommands::CloseWindow => send_command(SocketMessage::CloseWindow, "window closed"),
+        DispatchCommands::SetWindow { mode } => cmd_dispatch_setwindow(mode),
         DispatchCommands::SwitchWorkspace { workspace_id } => send_command(
             SocketMessage::SwitchWorkspace { workspace_id },
             "workspace switched",
@@ -552,6 +553,19 @@ fn cmd_dispatch_movewindow(direction: HorizontalDirection) -> Result<(), String>
         },
     };
     send_command(msg, "window moved")
+}
+
+/// Send a set-window-mode command to the daemon.
+///
+/// Maps `stm dispatch setwindow float|tile|cycle` to [`SocketMessage::SetWindow`].
+fn cmd_dispatch_setwindow(mode: WindowMode) -> Result<(), String> {
+    let msg = SocketMessage::SetWindow { mode };
+    let label = match mode {
+        WindowMode::Float => "float",
+        WindowMode::Tile => "tile",
+        WindowMode::Cycle => "cycle",
+    };
+    send_command(msg, &format!("window set to {label}"))
 }
 
 /// Send a command to the daemon and print a success message on Ok.
@@ -1073,6 +1087,73 @@ mod tests {
         assert!(
             result.is_err(),
             "'stm dispatch closewindow' with an extra arg should fail"
+        );
+    }
+
+    // --- setwindow parsing ---
+
+    #[test]
+    fn parse_dispatch_setwindow_float() {
+        // Positive: `stm dispatch setwindow float` parses with mode = Float.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "setwindow", "float"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::SetWindow {
+                        mode: WindowMode::Float,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::SetWindow::Float, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_setwindow_tile() {
+        // Positive: `stm dispatch setwindow tile` parses with mode = Tile.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "setwindow", "tile"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::SetWindow {
+                        mode: WindowMode::Tile,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::SetWindow::Tile, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_setwindow_cycle() {
+        // Positive: `stm dispatch setwindow cycle` parses with mode = Cycle.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "setwindow", "cycle"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::SetWindow {
+                        mode: WindowMode::Cycle,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::SetWindow::Cycle, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_setwindow_without_mode_fails() {
+        // Negative: setwindow needs a mode subcommand.
+        let result = Cli::try_parse_from(["stm", "dispatch", "setwindow"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch setwindow' without a mode should fail"
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_setwindow_invalid_mode_fails() {
+        // Negative: setwindow only accepts float/tile/cycle.
+        let result = Cli::try_parse_from(["stm", "dispatch", "setwindow", "invalid"]);
+        assert!(
+            result.is_err(),
+            "'stm dispatch setwindow invalid' should fail"
         );
     }
 

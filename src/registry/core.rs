@@ -325,14 +325,22 @@ impl WindowRegistry {
         }
     }
 
-    /// Returns the currently focused window's HWND value, if any.
+    /// Returns the OS-focused window, if any.
     ///
-    /// The daemon uses this to resolve per-window border colors (focused vs
-    /// unfocused) without re-querying the OS — `set_focused` already filters
-    /// out untracked windows, so this value is always a tracked HWND or `None`.
+    /// This is the registry-level focus owned by the OS foreground event
+    /// handler (`set_focused`), distinct from the per-space tiled history
+    /// cursor in `ScrollingSpace::last_focused_window`. Returns `None`
+    /// when no tracked window is focused.
+    ///
+    /// The daemon's border subsystem uses this to resolve per-window border
+    /// colors (focused vs unfocused) without re-querying the OS — `set_focused`
+    /// already filters out untracked windows, so this value is always a tracked
+    /// HWND or `None`.
+    ///
+    /// See the Window Registry chapter (`docs/src/dev-guide/window-registry.md`).
     #[must_use]
-    pub fn focused(&self) -> Option<isize> {
-        self.focused
+    pub fn focused(&self) -> Option<crate::common::WindowId> {
+        self.focused.map(crate::common::WindowId)
     }
 
     /// Transitions a window to minimized state.
@@ -520,6 +528,15 @@ impl WindowRegistry {
         self.windows.get(&hwnd_key(hwnd))
     }
 
+    /// Returns a mutable reference to a tracked window.
+    ///
+    /// Used by the daemon to transition a window between Tiling and Floating
+    /// states (`docs/src/dev-guide/floating-space.md`).
+    #[must_use]
+    pub fn get_window_mut(&mut self, hwnd: HWND) -> Option<&mut Window> {
+        self.windows.get_mut(&hwnd_key(hwnd))
+    }
+
     /// Returns an iterator over all tracked windows.
     pub fn windows(&self) -> impl Iterator<Item = &Window> {
         self.windows.values()
@@ -694,6 +711,29 @@ impl WindowRegistry {
             .collect();
         ids.sort_by_key(|(_, x)| *x);
         ids.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Returns tiling window IDs with their `pre_manage_rect.width` sorted by x.
+    ///
+    /// Like [`tiling_window_ids_sorted_by_x`](Self::tiling_window_ids_sorted_by_x)
+    /// but also returns each window's pre-STM width for init-time width
+    /// preservation. Widths are clamped to `u32` (negative widths become 0,
+    /// callers should substitute `column_width`).
+    #[must_use]
+    pub fn tiling_window_ids_with_widths_sorted_by_x(&self) -> Vec<(crate::common::WindowId, u32)> {
+        let mut entries: Vec<(crate::common::WindowId, i32, u32)> = self
+            .windows
+            .iter()
+            .filter_map(|(key, w)| match &w.state {
+                WindowState::Tiling(TilingState::Active { .. }) => {
+                    let width = w.pre_manage_rect.width.max(0) as u32;
+                    Some((crate::common::WindowId(*key), w.pre_manage_rect.x, width))
+                }
+                _ => None,
+            })
+            .collect();
+        entries.sort_by_key(|(_, x, _)| *x);
+        entries.into_iter().map(|(id, _, w)| (id, w)).collect()
     }
 
     /// Synchronize tiling state from the layout engine's virtual layout.
@@ -1553,6 +1593,32 @@ mod tests {
         reg.windows.insert(hwnd_val, window);
     }
 
+    fn insert_test_window_with_rect_and_width(
+        reg: &mut WindowRegistry,
+        hwnd_val: isize,
+        state: WindowState,
+        x: i32,
+        width: i32,
+    ) {
+        let hwnd = HWND(hwnd_val as *mut _);
+        let window = Window::new(
+            hwnd,
+            "test.exe".into(),
+            format!("Test-{hwnd_val}"),
+            "TestClass".into(),
+            std::path::PathBuf::from("C:\\test.exe"),
+            crate::common::Rect {
+                x,
+                y: 0,
+                width,
+                height: 100,
+            },
+            state,
+            crate::common::InvisibleBounds::zero(),
+        );
+        reg.windows.insert(hwnd_val, window);
+    }
+
     // ── set_focused tests ────────────────────────────────────────────
 
     #[test]
@@ -1605,66 +1671,112 @@ mod tests {
         assert_eq!(reg.focused, Some(20));
     }
 
-    // ── focused() getter tests ───────────────────────────────────────
-    //
-    // The `focused()` method is the public API contract that external modules
-    // (notably `daemon/borders.rs::border_style_for`) rely on to resolve
-    // focused-vs-unfocused border colors. Existing tests above exercise the
-    // underlying `focused` field directly (same module → private access);
-    // these tests pin the public getter so the contract holds even if the
-    // field is later made private.
+    // ── focused() getter tests ──────────────────────────────────────
 
     #[test]
-    fn focused_getter_returns_none_on_fresh_registry() {
-        // Arrange: brand-new registry has never seen a focus event.
+    fn focused_returns_none_by_default() {
         let (user, default) = default_rules();
         let reg = WindowRegistry::new(&user, &default);
-
-        // Act + Assert: public getter must report no focus.
         assert!(reg.focused().is_none());
     }
 
     #[test]
-    fn focused_getter_returns_value_set_via_set_focused() {
-        // Arrange: insert a tracked window and mark it focused.
+    fn focused_returns_set_value() {
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
-        let hwnd_val = 31415isize;
         insert_test_window(
             &mut reg,
-            hwnd_val,
+            42,
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
         );
-        reg.set_focused(hwnd_val);
-
-        // Act: read through the public getter.
-        // Assert: must match what `set_focused` recorded.
-        assert_eq!(reg.focused(), Some(hwnd_val));
+        reg.set_focused(42);
+        assert_eq!(reg.focused(), Some(crate::common::WindowId(42)));
     }
 
     #[test]
-    fn focused_getter_clears_when_focused_window_is_removed() {
-        // Arrange: tracked + focused window, then removed via `remove_window`.
-        // `remove_window` clears `focused` if it pointed at the removed HWND
-        // (see `core.rs` line ~299) — the public getter must reflect this.
+    fn focused_returns_none_after_clear() {
+        // Removing the focused window clears focus — getter must reflect that.
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
-        let hwnd_val = 2718isize;
         insert_test_window(
             &mut reg,
-            hwnd_val,
+            42,
             WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
         );
-        reg.set_focused(hwnd_val);
-        assert_eq!(reg.focused(), Some(hwnd_val));
+        reg.set_focused(42);
+        assert_eq!(reg.focused(), Some(crate::common::WindowId(42)));
 
-        // Act: remove the focused window.
-        reg.remove_window(hwnd_val);
-
-        // Assert: getter now reports no focus — border subsystem must detach.
+        reg.remove_window(42);
         assert!(reg.focused().is_none());
     }
 
+    // ── get_window_mut tests ─────────────────────────────────────────
+    //
+    // get_window_mut is the mutable accessor used by the daemon to transition
+    // a window between Tiling and Floating states (dispatch_set_window). It is
+    // a pure HashMap lookup — no Win32 — so it is fully unit-testable using
+    // the same insert_test_window helper as the focused() tests above.
+
+    #[test]
+    fn get_window_mut_returns_some_and_allows_mutation_for_existing() {
+        // Positive: an existing window is returned as Some, and mutating
+        // through the reference persists in the registry. This mirrors how
+        // dispatch_set_window writes a new WindowState (Tiling → Floating).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+
+        // Act: mutate the window's state through the mutable reference.
+        let window = reg
+            .get_window_mut(HWND(42 as *mut _))
+            .expect("existing window should be Some");
+        window.state = WindowState::Floating(FloatingState::Active {
+            rect: crate::common::Rect {
+                x: 10,
+                y: 10,
+                width: 800,
+                height: 600,
+            },
+        });
+
+        // Assert: the mutation persisted.
+        let after = reg.get_window(HWND(42 as *mut _)).unwrap();
+        assert!(
+            matches!(
+                after.state,
+                WindowState::Floating(FloatingState::Active { .. })
+            ),
+            "state mutation via get_window_mut should persist"
+        );
+    }
+
+    #[test]
+    fn get_window_mut_returns_none_for_absent_hwnd() {
+        // Negative: an HWND never inserted returns None — the daemon relies on
+        // this (it guards the mutation with `if let Some(window) = ...` in
+        // set_window_to_float, so a None must not panic).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        // Empty registry.
+        assert!(reg.get_window_mut(HWND(99999 as *mut _)).is_none());
+
+        // Non-empty registry but absent hwnd.
+        insert_test_window(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        assert!(reg.get_window_mut(HWND(77777 as *mut _)).is_none());
+
+        // After removal, a previously-present hwnd returns None.
+        reg.remove_window(10);
+        assert!(reg.get_window_mut(HWND(10 as *mut _)).is_none());
+    }
     // ── register_window_from_info tests ──────────────────────────────
 
     #[test]
@@ -2127,6 +2239,140 @@ mod tests {
         assert_eq!(sorted.len(), 2);
         assert!(sorted.contains(&crate::common::WindowId(10)));
         assert!(sorted.contains(&crate::common::WindowId(20)));
+    }
+
+    #[test]
+    fn sorted_with_widths_returns_ids_and_widths() {
+        // Positive: returns (id, width) pairs sorted by x. Widths come
+        // from pre_manage_rect.width.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        // Insert with a helper that lets us set custom width.
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            300,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            300,
+            800,
+        );
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            100,
+            WindowState::Tiling(TilingState::Active { col: 1, row: 0 }),
+            100,
+            1200,
+        );
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            500,
+            WindowState::Tiling(TilingState::Active { col: 2, row: 0 }),
+            500,
+            600,
+        );
+
+        let result = reg.tiling_window_ids_with_widths_sorted_by_x();
+        assert_eq!(result.len(), 3);
+        // Sorted by x: 100, 300, 500
+        assert_eq!(result[0].0, crate::common::WindowId(100));
+        assert_eq!(result[0].1, 1200);
+        assert_eq!(result[1].0, crate::common::WindowId(300));
+        assert_eq!(result[1].1, 800);
+        assert_eq!(result[2].0, crate::common::WindowId(500));
+        assert_eq!(result[2].1, 600);
+    }
+
+    #[test]
+    fn sorted_with_widths_empty_registry() {
+        // Positive: empty registry → empty vec.
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        let result = reg.tiling_window_ids_with_widths_sorted_by_x();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn sorted_with_widths_single_window() {
+        // Positive: single tiling window → single (id, width) pair.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            100,
+            800,
+        );
+        let result = reg.tiling_window_ids_with_widths_sorted_by_x();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, crate::common::WindowId(42));
+        assert_eq!(result[0].1, 800);
+    }
+
+    #[test]
+    fn sorted_with_widths_excludes_non_tiling_windows() {
+        // Negative: floating and ignored windows are excluded even when they
+        // have valid x and width. Mirrors `sorted_by_x_excludes_non_tiling_windows`
+        // for the width-returning variant — important because dispatch's init
+        // flow feeds these widths straight into `initialize_windows`, so a
+        // non-tiling leak would desync the column count vs. the ids count.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            500,
+            800,
+        );
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            20,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 100,
+                    y: 0,
+                    width: 200,
+                    height: 200,
+                },
+            }),
+            100,
+            1200,
+        );
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            30,
+            WindowState::Ignored(IgnoredReason::Maximized),
+            0,
+            600,
+        );
+        let result = reg.tiling_window_ids_with_widths_sorted_by_x();
+        assert_eq!(result.len(), 1, "only the tiling-active window must appear");
+        assert_eq!(result[0].0, crate::common::WindowId(10));
+        assert_eq!(result[0].1, 800);
+    }
+
+    #[test]
+    fn sorted_with_widths_clamps_negative_width_to_zero() {
+        // Edge: a negative `pre_manage_rect.width` (should not happen via
+        // Win32, but the impl clamps with `max(0)` before `as u32`). Without
+        // the clamp, `-200i32 as u32` wraps to `u32::MAX - 199 ≈ 4.29e9`,
+        // which would then blow past `abs_max_width` during quantize.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window_with_rect_and_width(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            100,
+            -200,
+        );
+        let result = reg.tiling_window_ids_with_widths_sorted_by_x();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].1, 0,
+            "negative width must clamp to 0, not wrap to a huge u32"
+        );
     }
 
     // ── Direct handler tests (replaces process_pending_events tests) ──

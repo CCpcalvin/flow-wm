@@ -12,7 +12,7 @@ use crate::config::types::StmConfig;
 use crate::ipc::transport::PipeServer;
 use crate::registry::WindowRegistry;
 use crate::registry::hooks::{HookSignal, HookThreadHandle};
-use crate::workspace::{Monitor, ScrollingSpace, Workspace};
+use crate::workspace::{FloatingSpace, Monitor, ScrollingSpace, Workspace};
 
 /// Intermediate struct holding layout engine parameters derived from
 /// [`StmConfig`]. Used during construction to keep the parameter list
@@ -169,6 +169,15 @@ pub struct ScrollTilingManager {
     /// on `WaitForMultipleObjects` instead of `INFINITE`. This ensures
     /// pending windows are retried even if no new hook events arrive.
     pub(super) pending_creations: Vec<(isize, u8)>,
+
+    /// Deadline at which float-location tracking resumes after stm suppresses
+    /// it for a float animation.
+    ///
+    /// `None` when no suppression is active — `FLOAT_TRACKING_ACTIVE` stays on
+    /// and `EVENT_OBJECT_LOCATIONCHANGE` from floats is captured live. Set by
+    /// [`arm_float_tracking_suppression`](super::ScrollTilingManager::arm_float_tracking_suppression)
+    /// and cleared by the resume poll in the main loop.
+    pub(super) float_resume_deadline: Option<std::time::Instant>,
 }
 
 impl ScrollTilingManager {
@@ -214,7 +223,6 @@ impl ScrollTilingManager {
 
     /// Mutably borrow the active workspace of the active monitor.
     #[must_use]
-    #[allow(dead_code)] // API surface for the upcoming workspace-switch commands.
     pub(super) fn active_workspace_mut(&mut self) -> &mut Workspace {
         self.active_monitor_mut().active_workspace_mut()
     }
@@ -234,5 +242,19 @@ impl ScrollTilingManager {
     #[must_use]
     pub(super) fn active_scrolling_mut(&mut self) -> &mut ScrollingSpace {
         self.active_monitor_mut().active_scrolling_mut()
+    }
+
+    /// Borrow the floating space of the active workspace.
+    #[must_use]
+    #[allow(dead_code)] // API surface for upcoming floating-window management.
+    pub(super) fn active_floating(&self) -> &FloatingSpace {
+        self.active_monitor().active_floating()
+    }
+
+    /// Mutably borrow the floating space of the active workspace.
+    #[must_use]
+    #[allow(dead_code)] // API surface for upcoming floating-window management.
+    pub(super) fn active_floating_mut(&mut self) -> &mut FloatingSpace {
+        self.active_monitor_mut().active_floating_mut()
     }
 }

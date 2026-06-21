@@ -106,7 +106,8 @@ impl ScrollTilingManager {
     /// ```text
     /// start_accept()                          // Spawn background accept thread
     /// loop {
-    ///     timeout = pending_creations.is_empty() ? INFINITE : 100ms
+    ///     resume float tracking if its deadline arrived
+    ///     timeout = soonest(pending_creations?100ms, float_resume_deadline, INFINITE)
     ///     MsgWaitForMultipleObjects(          // Sleep until something happens
     ///         [hook_signal, connected_event],
     ///         timeout,
@@ -170,21 +171,23 @@ impl ScrollTilingManager {
         let wait_handles = [hook_handle, connect_handle];
 
         loop {
+            // Resume float tracking if its suppression deadline has arrived.
+            // Runs before computing the timeout so a due deadline is handled
+            // now instead of scheduling a 1 ms re-wake.
+            self.maybe_resume_float_tracking();
+
             // Block until a hook event, an IPC client connection, OR a Win32
-            // window message arrives. When there are pending window creations,
-            // use a finite timeout so they're retried even without new wakes.
+            // window message arrives. When there are pending window creations
+            // or a float-resume deadline, use the sooner finite timeout so
+            // they're retried even without new wakes.
             //
             // MsgWaitForMultipleObjects returns WAIT_EVENT whose inner u32 is:
             //   0     = WAIT_OBJECT_0 (first handle = hook_signal)
             //   1     = WAIT_OBJECT_0 + 1 (second handle = connected_event)
             //   2     = WAIT_OBJECT_0 + 2 (new input in queue — needs pumping)
-            //   258   = WAIT_TIMEOUT (retry pending creations)
+            //   258   = WAIT_TIMEOUT (retry pending creations / resume float)
             //   u32::MAX = WAIT_FAILED (fatal — break)
-            let timeout = if self.pending_creations.is_empty() {
-                u32::MAX // INFINITE
-            } else {
-                PENDING_RETRY_TIMEOUT_MS
-            };
+            let timeout = self.compute_wait_timeout();
 
             let wait_result = unsafe {
                 MsgWaitForMultipleObjects(Some(&wait_handles), false, timeout, QS_ALLINPUT)
@@ -233,8 +236,10 @@ impl ScrollTilingManager {
                     // Service border overlay messages before each IPC read.
                     self.pump_messages();
 
-                    // Drain hook events before each IPC message.
+                    // Drain hook events before each IPC message, and resume
+                    // float tracking if its deadline arrived mid-session.
                     self.process_hook_events();
+                    self.maybe_resume_float_tracking();
 
                     // Read next IPC message (blocking — but client is active).
                     match self.server.read_message() {
@@ -301,6 +306,19 @@ impl ScrollTilingManager {
                 let _ = DispatchMessageW(&msg);
             }
         }
+    }
+
+    /// Compute the `WaitForMultipleObjects` timeout for this iteration.
+    ///
+    /// Delegates to [`compute_wait_timeout_inner`] (the testable pure form)
+    /// using the manager's current pending-creations state and resume
+    /// deadline. See that function for the deadline-selection rules.
+    fn compute_wait_timeout(&self) -> u32 {
+        compute_wait_timeout_inner(
+            !self.pending_creations.is_empty(),
+            self.float_resume_deadline,
+            std::time::Instant::now(),
+        )
     }
 
     /// Drain all pending hook events from the channel, retry pending window
@@ -391,7 +409,101 @@ impl ScrollTilingManager {
                     // windows to avoid re-classifying tracked ones.
                     self.on_window_name_change(hwnd);
                 }
+                HookEvent::LocationChange { hwnd } => {
+                    // A tracked active-workspace float moved. Store its new
+                    // rect so workspace round-trips restore the dragged
+                    // position. The handler re-checks the tracking flag and
+                    // float-set membership to close the stm-animation race.
+                    self.on_float_location_changed(hwnd);
+                }
             }
         }
+    }
+}
+
+/// Pure, clock-injectable form of [`ScrollTilingManager::compute_wait_timeout`].
+///
+/// Returns the smaller of the two finite deadlines:
+/// - `has_pending_creations` → [`PENDING_RETRY_TIMEOUT_MS`].
+/// - `float_resume_deadline` → milliseconds remaining until it's due (floored
+///   to 1 so a due deadline re-wakes the loop instead of busy-looping on 0).
+///
+/// Returns `u32::MAX` (`INFINITE`) when neither source is active. Extracted
+/// to a free function so the branching is unit-testable without constructing
+/// a full [`ScrollTilingManager`] (which needs Win32 + a hook thread).
+fn compute_wait_timeout_inner(
+    has_pending_creations: bool,
+    float_resume_deadline: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> u32 {
+    let mut best: Option<u32> = None;
+    if has_pending_creations {
+        best = Some(PENDING_RETRY_TIMEOUT_MS);
+    }
+    if let Some(deadline) = float_resume_deadline {
+        let remaining = deadline.saturating_duration_since(now);
+        let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
+        // Floor at 1 ms: a 0 would return immediately and busy-loop without
+        // reaching the resume handler. The top-of-loop resume check clears
+        // due deadlines before they can busy-spin.
+        let ms = ms.max(1);
+        best = Some(best.map_or(ms, |b| b.min(ms)));
+    }
+    best.unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn wait_timeout_infinite_when_idle() {
+        let now = Instant::now();
+        assert_eq!(compute_wait_timeout_inner(false, None, now), u32::MAX);
+    }
+
+    #[test]
+    fn wait_timeout_pending_creations_uses_retry_cadence() {
+        let now = Instant::now();
+        assert_eq!(
+            compute_wait_timeout_inner(true, None, now),
+            PENDING_RETRY_TIMEOUT_MS,
+        );
+    }
+
+    #[test]
+    fn wait_timeout_float_deadline_uses_remaining_ms() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(500);
+        assert_eq!(compute_wait_timeout_inner(false, Some(deadline), now), 500);
+    }
+
+    #[test]
+    fn wait_timeout_picks_sooner_when_deadline_under_pending_cadence() {
+        let now = Instant::now();
+        // Pending = 100 ms cadence; deadline in 50 ms → 50 wins.
+        let deadline = now + Duration::from_millis(50);
+        assert_eq!(compute_wait_timeout_inner(true, Some(deadline), now), 50);
+    }
+
+    #[test]
+    fn wait_timeout_pending_cadence_wins_when_deadline_is_farther() {
+        let now = Instant::now();
+        // Pending = 100 ms; deadline in 5 s → 100 wins.
+        let deadline = now + Duration::from_secs(5);
+        assert_eq!(
+            compute_wait_timeout_inner(true, Some(deadline), now),
+            PENDING_RETRY_TIMEOUT_MS,
+        );
+    }
+
+    #[test]
+    fn wait_timeout_due_deadline_floors_to_one_ms() {
+        let now = Instant::now();
+        // Already past: saturating_duration_since is 0 → floor to 1 so the
+        // loop re-wakes and runs the resume handler instead of busy-spinning.
+        let deadline = now - Duration::from_millis(10);
+        assert_eq!(compute_wait_timeout_inner(false, Some(deadline), now), 1);
     }
 }
