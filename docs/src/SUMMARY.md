@@ -25,6 +25,7 @@
 ## Subsystems
 
 - [Workspace Hierarchy](./dev-guide/workspace.md)
+- [Floating Space](./dev-guide/floating-space.md)
 - [Window Registry](./dev-guide/window-registry.md)
 - [Animation](./dev-guide/animation.md)
 - [IPC & Watchdog](./dev-guide/ipc-and-watchdog.md)

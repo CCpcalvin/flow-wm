@@ -211,7 +211,12 @@ impl ScrollTilingManager {
 
         Ok(Self {
             registry,
-            monitors: vec![Monitor::new(geometry.screen_rect, monitor.work_area, workspaces, 0)],
+            monitors: vec![Monitor::new(
+                geometry.screen_rect,
+                monitor.work_area,
+                workspaces,
+                0,
+            )],
             active_monitor: 0,
             animator,
             server,
@@ -222,6 +227,7 @@ impl ScrollTilingManager {
             hook_signal,
             shutting_down: false,
             pending_creations: Vec::new(),
+            float_resume_deadline: None,
         })
     }
 }

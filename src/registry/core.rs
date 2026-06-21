@@ -325,6 +325,19 @@ impl WindowRegistry {
         }
     }
 
+    /// Returns the OS-focused window, if any.
+    ///
+    /// This is the registry-level focus owned by the OS foreground event
+    /// handler (`set_focused`), distinct from the per-space tiled history
+    /// cursor in `ScrollingSpace::last_focused_window`. Returns `None`
+    /// when no tracked window is focused.
+    ///
+    /// See the Window Registry chapter (`docs/src/dev-guide/window-registry.md`).
+    #[must_use]
+    pub fn focused(&self) -> Option<crate::common::WindowId> {
+        self.focused.map(crate::common::WindowId)
+    }
+
     /// Transitions a window to minimized state.
     ///
     /// Called when `EVENT_SYSTEM_MINIMIZESTART` is received. The transition
@@ -508,6 +521,15 @@ impl WindowRegistry {
     #[must_use]
     pub fn get_window(&self, hwnd: HWND) -> Option<&Window> {
         self.windows.get(&hwnd_key(hwnd))
+    }
+
+    /// Returns a mutable reference to a tracked window.
+    ///
+    /// Used by the daemon to transition a window between Tiling and Floating
+    /// states (`docs/src/dev-guide/floating-space.md`).
+    #[must_use]
+    pub fn get_window_mut(&mut self, hwnd: HWND) -> Option<&mut Window> {
+        self.windows.get_mut(&hwnd_key(hwnd))
     }
 
     /// Returns an iterator over all tracked windows.
@@ -1593,6 +1615,113 @@ mod tests {
 
         reg.set_focused(20);
         assert_eq!(reg.focused, Some(20));
+    }
+
+    // ── focused() getter tests ──────────────────────────────────────
+
+    #[test]
+    fn focused_returns_none_by_default() {
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        assert!(reg.focused().is_none());
+    }
+
+    #[test]
+    fn focused_returns_set_value() {
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        reg.set_focused(42);
+        assert_eq!(reg.focused(), Some(crate::common::WindowId(42)));
+    }
+
+    #[test]
+    fn focused_returns_none_after_clear() {
+        // Removing the focused window clears focus — getter must reflect that.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        reg.set_focused(42);
+        assert_eq!(reg.focused(), Some(crate::common::WindowId(42)));
+
+        reg.remove_window(42);
+        assert!(reg.focused().is_none());
+    }
+
+    // ── get_window_mut tests ─────────────────────────────────────────
+    //
+    // get_window_mut is the mutable accessor used by the daemon to transition
+    // a window between Tiling and Floating states (dispatch_set_window). It is
+    // a pure HashMap lookup — no Win32 — so it is fully unit-testable using
+    // the same insert_test_window helper as the focused() tests above.
+
+    #[test]
+    fn get_window_mut_returns_some_and_allows_mutation_for_existing() {
+        // Positive: an existing window is returned as Some, and mutating
+        // through the reference persists in the registry. This mirrors how
+        // dispatch_set_window writes a new WindowState (Tiling → Floating).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+
+        // Act: mutate the window's state through the mutable reference.
+        let window = reg
+            .get_window_mut(HWND(42 as *mut _))
+            .expect("existing window should be Some");
+        window.state = WindowState::Floating(FloatingState::Active {
+            rect: crate::common::Rect {
+                x: 10,
+                y: 10,
+                width: 800,
+                height: 600,
+            },
+        });
+
+        // Assert: the mutation persisted.
+        let after = reg.get_window(HWND(42 as *mut _)).unwrap();
+        assert!(
+            matches!(
+                after.state,
+                WindowState::Floating(FloatingState::Active { .. })
+            ),
+            "state mutation via get_window_mut should persist"
+        );
+    }
+
+    #[test]
+    fn get_window_mut_returns_none_for_absent_hwnd() {
+        // Negative: an HWND never inserted returns None — the daemon relies on
+        // this (it guards the mutation with `if let Some(window) = ...` in
+        // set_window_to_float, so a None must not panic).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        // Empty registry.
+        assert!(reg.get_window_mut(HWND(99999 as *mut _)).is_none());
+
+        // Non-empty registry but absent hwnd.
+        insert_test_window(
+            &mut reg,
+            10,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        assert!(reg.get_window_mut(HWND(77777 as *mut _)).is_none());
+
+        // After removal, a previously-present hwnd returns None.
+        reg.remove_window(10);
+        assert!(reg.get_window_mut(HWND(10 as *mut _)).is_none());
     }
 
     // ── register_window_from_info tests ──────────────────────────────

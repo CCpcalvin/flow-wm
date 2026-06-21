@@ -11,7 +11,7 @@
 //!
 //! See the [module-level docs](super) for the full hierarchy diagram.
 
-use super::{ScrollingSpace, Workspace, WorkspaceId};
+use super::{FloatingSpace, ScrollingSpace, Workspace, WorkspaceId};
 use crate::common::Rect;
 
 /// A physical monitor and the workspaces it can show.
@@ -149,6 +149,29 @@ impl Monitor {
     #[must_use]
     pub fn active_scrolling_mut(&mut self) -> &mut ScrollingSpace {
         &mut self.active_workspace_mut().scrolling
+    }
+
+    /// Borrow the active workspace's floating space.
+    ///
+    /// Convenience for `self.active_workspace().floating` — the daemon routes
+    /// float/tile transitions through this accessor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the monitor has no workspaces.
+    #[must_use]
+    pub fn active_floating(&self) -> &FloatingSpace {
+        &self.active_workspace().floating
+    }
+
+    /// Mutably borrow the active workspace's floating space.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the monitor has no workspaces.
+    #[must_use]
+    pub fn active_floating_mut(&mut self) -> &mut FloatingSpace {
+        &mut self.active_workspace_mut().floating
     }
 
     // ---- Workspace lookup-by-id ------------------------------------------
@@ -448,6 +471,9 @@ mod tests {
         };
         let monitor = Monitor::new(screen, work, Vec::new(), 0);
         assert_ne!(monitor.screen_rect(), monitor.work_area());
-        assert_eq!(monitor.screen_rect().height - monitor.work_area().height, 40);
+        assert_eq!(
+            monitor.screen_rect().height - monitor.work_area().height,
+            40
+        );
     }
 }
