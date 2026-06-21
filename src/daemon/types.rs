@@ -160,6 +160,15 @@ pub struct ScrollTilingManager {
     /// on `WaitForMultipleObjects` instead of `INFINITE`. This ensures
     /// pending windows are retried even if no new hook events arrive.
     pub(super) pending_creations: Vec<(isize, u8)>,
+
+    /// Deadline at which float-location tracking resumes after stm suppresses
+    /// it for a float animation.
+    ///
+    /// `None` when no suppression is active — `FLOAT_TRACKING_ACTIVE` stays on
+    /// and `EVENT_OBJECT_LOCATIONCHANGE` from floats is captured live. Set by
+    /// [`arm_float_tracking_suppression`](super::ScrollTilingManager::arm_float_tracking_suppression)
+    /// and cleared by the resume poll in the main loop.
+    pub(super) float_resume_deadline: Option<std::time::Instant>,
 }
 
 impl ScrollTilingManager {

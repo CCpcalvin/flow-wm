@@ -21,6 +21,7 @@
 //! [`mutations::next_available_window`] (left column, then right).
 
 use crate::common::WindowId;
+use crate::registry::hooks::remove_float_hwnd;
 use crate::registry::types::{ReclassifyResult, VisibilityChange};
 use crate::registry::win32 as registry_win32;
 
@@ -98,6 +99,10 @@ impl ScrollTilingManager {
         if was_tiling {
             self.remove_from_layout_and_refocus(WindowId(hwnd));
         }
+
+        // A destroyed float must leave the tracking set so the LOCATIONCHANGE
+        // callback stops forwarding it. Harmless no-op for tiled/ignored windows.
+        remove_float_hwnd(hwnd);
 
         self.registry.remove_window(hwnd);
     }

@@ -41,6 +41,7 @@
 mod animation;
 mod config_derive;
 mod dispatch;
+mod floating_sync;
 mod hooks;
 mod new;
 mod query;

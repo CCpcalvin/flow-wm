@@ -227,6 +227,7 @@ impl ScrollTilingManager {
             hook_signal,
             shutting_down: false,
             pending_creations: Vec::new(),
+            float_resume_deadline: None,
         })
     }
 }

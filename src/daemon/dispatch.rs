@@ -10,6 +10,7 @@
 use crate::common::{Direction, Size, WindowId};
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
 use crate::layout::types::ActualLayout;
+use crate::registry::hooks::{add_float_hwnd, remove_float_hwnd, set_float_hwnds};
 use crate::registry::types::{FloatingState, TilingState, WindowState};
 use crate::registry::win32 as registry_win32;
 use crate::workspace::{FloatingSpace, WorkspaceId, workspace_y_offset};
@@ -502,6 +503,20 @@ impl ScrollTilingManager {
             return false;
         }
 
+        // The float-tracking set must hold only the NEW active workspace's
+        // floats. Parked workspaces' floats can never be dragged (they're
+        // off-screen), and excluding them guarantees a stray LOCATIONCHANGE
+        // during the switch animation cannot corrupt a parked workspace's rect.
+        let new_active_float_hwnds: Vec<isize> = self
+            .active_monitor()
+            .active_workspace()
+            .floating
+            .windows()
+            .iter()
+            .map(|entry| entry.window_id.0)
+            .collect();
+        set_float_hwnds(&new_active_float_hwnds);
+
         // Partition every non-empty workspace into the animate / teleport /
         // skip buckets described in the method-level docs.
         let mut animate_batches: Vec<(ActualLayout, i32)> = Vec::new();
@@ -829,6 +844,11 @@ impl ScrollTilingManager {
             window.state = WindowState::Floating(FloatingState::Active { rect: float_rect });
         }
 
+        // Track this window as an active-workspace float so the
+        // LOCATIONCHANGE callback forwards its future user drags. Done before
+        // the animate so the (Batch 2) float-suppression can detect it.
+        add_float_hwnd(focused.0);
+
         // f) Animate: single batch, both at y_offset 0 (same workspace).
         let batches = [(source_actual, 0), (float_actual, 0)];
         self.animate_workspaces(&batches);
@@ -848,6 +868,10 @@ impl ScrollTilingManager {
     fn set_window_to_tile(&mut self, focused: WindowId) -> SocketResponse {
         // a) Remove from floating space.
         self.active_workspace_mut().floating.remove(focused);
+
+        // Drop from the float-tracking set so the LOCATIONCHANGE callback no
+        // longer forwards this window (it is becoming a tiled window).
+        remove_float_hwnd(focused.0);
 
         // b) Insert into scrolling. insert_window places after
         //    last_focused_window, shifts right, sets last_focused_window,
