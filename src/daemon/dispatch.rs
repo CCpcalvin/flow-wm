@@ -11,7 +11,7 @@ use crate::common::{Direction, WindowId};
 use crate::ipc::message::{SocketMessage, SocketResponse};
 use crate::layout::types::ActualLayout;
 use crate::registry::win32 as registry_win32;
-use crate::workspace::{workspace_y_offset, WorkspaceId};
+use crate::workspace::{WorkspaceId, workspace_y_offset};
 
 use super::types::ScrollTilingManager;
 

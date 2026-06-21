@@ -1049,7 +1049,7 @@ pub struct MonitorGeometry {
 /// ```
 pub fn get_primary_monitor_info() -> Result<MonitorGeometry, String> {
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+        GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow,
     };
 
     // NULL hwnd + MONITOR_DEFAULTTOPRIMARY → primary display monitor.

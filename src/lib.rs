@@ -37,6 +37,7 @@
 //! documentation strategy used throughout the crate.
 
 pub mod animation;
+pub mod borders;
 pub mod common;
 pub mod config;
 pub mod daemon;

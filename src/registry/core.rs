@@ -325,6 +325,16 @@ impl WindowRegistry {
         }
     }
 
+    /// Returns the currently focused window's HWND value, if any.
+    ///
+    /// The daemon uses this to resolve per-window border colors (focused vs
+    /// unfocused) without re-querying the OS — `set_focused` already filters
+    /// out untracked windows, so this value is always a tracked HWND or `None`.
+    #[must_use]
+    pub fn focused(&self) -> Option<isize> {
+        self.focused
+    }
+
     /// Transitions a window to minimized state.
     ///
     /// Called when `EVENT_SYSTEM_MINIMIZESTART` is received. The transition
@@ -1593,6 +1603,66 @@ mod tests {
 
         reg.set_focused(20);
         assert_eq!(reg.focused, Some(20));
+    }
+
+    // ── focused() getter tests ───────────────────────────────────────
+    //
+    // The `focused()` method is the public API contract that external modules
+    // (notably `daemon/borders.rs::border_style_for`) rely on to resolve
+    // focused-vs-unfocused border colors. Existing tests above exercise the
+    // underlying `focused` field directly (same module → private access);
+    // these tests pin the public getter so the contract holds even if the
+    // field is later made private.
+
+    #[test]
+    fn focused_getter_returns_none_on_fresh_registry() {
+        // Arrange: brand-new registry has never seen a focus event.
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+
+        // Act + Assert: public getter must report no focus.
+        assert!(reg.focused().is_none());
+    }
+
+    #[test]
+    fn focused_getter_returns_value_set_via_set_focused() {
+        // Arrange: insert a tracked window and mark it focused.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        let hwnd_val = 31415isize;
+        insert_test_window(
+            &mut reg,
+            hwnd_val,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        reg.set_focused(hwnd_val);
+
+        // Act: read through the public getter.
+        // Assert: must match what `set_focused` recorded.
+        assert_eq!(reg.focused(), Some(hwnd_val));
+    }
+
+    #[test]
+    fn focused_getter_clears_when_focused_window_is_removed() {
+        // Arrange: tracked + focused window, then removed via `remove_window`.
+        // `remove_window` clears `focused` if it pointed at the removed HWND
+        // (see `core.rs` line ~299) — the public getter must reflect this.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        let hwnd_val = 2718isize;
+        insert_test_window(
+            &mut reg,
+            hwnd_val,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        reg.set_focused(hwnd_val);
+        assert_eq!(reg.focused(), Some(hwnd_val));
+
+        // Act: remove the focused window.
+        reg.remove_window(hwnd_val);
+
+        // Assert: getter now reports no focus — border subsystem must detach.
+        assert!(reg.focused().is_none());
     }
 
     // ── register_window_from_info tests ──────────────────────────────

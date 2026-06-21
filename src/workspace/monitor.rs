@@ -448,6 +448,9 @@ mod tests {
         };
         let monitor = Monitor::new(screen, work, Vec::new(), 0);
         assert_ne!(monitor.screen_rect(), monitor.work_area());
-        assert_eq!(monitor.screen_rect().height - monitor.work_area().height, 40);
+        assert_eq!(
+            monitor.screen_rect().height - monitor.work_area().height,
+            40
+        );
     }
 }

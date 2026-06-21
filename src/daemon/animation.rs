@@ -83,6 +83,11 @@ impl ScrollTilingManager {
             return;
         }
 
+        // Border thickness inset — shrinks each window's rect by this many
+        // pixels on every edge so the border overlay (drawn outside the
+        // content rect) is visible without occluding the window.
+        let border_thickness = self.config.borders.thickness as i32;
+
         let targets: Vec<WindowTarget> = layout
             .actual_layout
             .entries
@@ -100,8 +105,12 @@ impl ScrollTilingManager {
                 // Translate the layout engine's visible rect into a Win32
                 // window rect. This compensates for invisible borders so
                 // that SetWindowPos places the window's visible content
-                // exactly where the layout engine intended.
-                let window_rect = invisible_bounds.visible_to_window(entry.rect);
+                // exactly where the layout engine intended. Then shrink by
+                // the configured border thickness to leave room for the
+                // colored overlay ring.
+                let window_rect = invisible_bounds
+                    .visible_to_window(entry.rect)
+                    .inset(border_thickness);
 
                 log::debug!(
                     "animate: hwnd={} target ({},{},{},{}) [visible] \
@@ -181,6 +190,8 @@ impl ScrollTilingManager {
             return;
         }
 
+        let border_thickness = self.config.borders.thickness as i32;
+
         // Build the combined target list. Iterating with explicit loops
         // (rather than `flat_map`) lets us hold one `&self.registry` borrow
         // at a time without entangling the borrow checker across closures.
@@ -193,13 +204,16 @@ impl ScrollTilingManager {
                     .map(|w| w.invisible_bounds)
                     .unwrap_or_default();
 
-                // Translate visible-rect → window-rect, then apply the
-                // vertical offset. The order doesn't matter mathematically
-                // (offset is a pure y translation, invisible_bounds adjusts
-                // y by a fixed `-top`), but applying the offset last keeps
+                // Translate visible-rect → window-rect, shrink by the border
+                // thickness to make room for the overlay ring, then apply the
+                // vertical offset. Order doesn't matter mathematically (offset
+                // is a pure y translation, invisible_bounds adjusts y by a
+                // fixed `-top`, inset is uniform), but the chosen order keeps
                 // the "workspace-local rect first, workspace stack second"
                 // mental model clear.
-                let window_rect = invisible_bounds.visible_to_window(entry.rect);
+                let window_rect = invisible_bounds
+                    .visible_to_window(entry.rect)
+                    .inset(border_thickness);
                 targets.push(WindowTarget::new(
                     WindowRef(entry.window_id.0),
                     IVec2::new(window_rect.x, window_rect.y + y_offset),
@@ -256,6 +270,7 @@ impl ScrollTilingManager {
     /// A failed teleport leaves a window at its old position — a minor
     /// visual inconsistency on a non-visible workspace, not a crash.
     pub(super) fn teleport_workspaces(&self, batches: &[(ActualLayout, i32)]) {
+        let border_thickness = self.config.borders.thickness as i32;
         for (layout, y_offset) in batches {
             for entry in &layout.entries {
                 let invisible_bounds = self
@@ -264,7 +279,9 @@ impl ScrollTilingManager {
                     .map(|w| w.invisible_bounds)
                     .unwrap_or_default();
 
-                let window_rect = invisible_bounds.visible_to_window(entry.rect);
+                let window_rect = invisible_bounds
+                    .visible_to_window(entry.rect)
+                    .inset(border_thickness);
                 let target_y = window_rect.y + y_offset;
 
                 // Direct SetWindowPos — bypass the animator entirely.
@@ -297,10 +314,18 @@ impl ScrollTilingManager {
 /// [`InvisibleBounds`](crate::common::InvisibleBounds). This is necessary even
 /// during the initial snap so that windows land at the correct position from
 /// the very first frame.
+///
+/// # Border Thickness
+///
+/// `border_thickness` is passed explicitly because this function runs before
+/// `ScrollTilingManager` exists — the caller reads it from the config and
+/// forwards it. Same per-edge shrink semantics as
+/// [`ScrollTilingManager::animate_layout`].
 pub(super) fn animate_layout_raw(
     animator: &mut WindowAnimator,
     layout: &AppliedLayout,
     registry: &WindowRegistry,
+    border_thickness: i32,
 ) {
     if layout.actual_layout.entries.is_empty() {
         return;
@@ -316,7 +341,9 @@ pub(super) fn animate_layout_raw(
                 .map(|w| w.invisible_bounds)
                 .unwrap_or_default();
 
-            let window_rect = invisible_bounds.visible_to_window(entry.rect);
+            let window_rect = invisible_bounds
+                .visible_to_window(entry.rect)
+                .inset(border_thickness);
 
             WindowTarget::new(
                 WindowRef(entry.window_id.0),

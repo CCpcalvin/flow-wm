@@ -124,6 +124,37 @@ impl Rect {
             && self.y < other.bottom()
             && self.bottom() > other.y
     }
+
+    /// Shrinks this rectangle by `amount` on every edge.
+    ///
+    /// Used by the border overlay subsystem to make room for the colored ring
+    /// around each managed window: the daemon issues `SetWindowPos` with the
+    /// inset rect so the overlay (drawn slightly outside the content rect)
+    /// remains visible without covering the window.
+    ///
+    /// Clamps each dimension to a minimum of 1×1 when `2 * amount` would
+    /// empty or invert the rect — this is a defensive floor so a misconfigured
+    /// `thickness` (e.g. 50 px on a 30 px window) never produces a negative-
+    /// size rect that would confuse `SetWindowPos`.
+    ///
+    /// # Negative values
+    ///
+    /// A negative `amount` would *outset* the rect. Callers within stm always
+    /// pass `u32 as i32` (capped at 50 by `BorderConfig::validate`), so this
+    /// is unreachable in practice. The multiplication uses `saturating_mul`
+    /// defensively so an accidental huge value cannot debug-panic.
+    #[must_use]
+    pub fn inset(self, amount: i32) -> Rect {
+        let shrink = amount.saturating_mul(2);
+        let new_width = (self.width - shrink).max(1);
+        let new_height = (self.height - shrink).max(1);
+        Rect {
+            x: self.x + amount,
+            y: self.y + amount,
+            width: new_width,
+            height: new_height,
+        }
+    }
 }
 
 /// Pixel offsets between the full window rect and the visible rect.
@@ -349,6 +380,76 @@ mod tests {
             }
             .bottom(),
             220
+        );
+    }
+
+    #[test]
+    fn rect_inset_basic() {
+        let r = Rect {
+            x: 100,
+            y: 200,
+            width: 300,
+            height: 400,
+        };
+        assert_eq!(
+            r.inset(5),
+            Rect {
+                x: 105,
+                y: 205,
+                width: 290,
+                height: 390,
+            }
+        );
+    }
+
+    #[test]
+    fn rect_inset_zero_is_identity() {
+        let r = Rect {
+            x: 7,
+            y: 11,
+            width: 42,
+            height: 53,
+        };
+        assert_eq!(r.inset(0), r);
+    }
+
+    #[test]
+    fn rect_inset_clamps_to_min_1x1() {
+        // 2*amount (30) exceeds width (20) and height (15) — clamp applies.
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 15,
+        };
+        assert_eq!(
+            r.inset(15),
+            Rect {
+                x: 15,
+                y: 15,
+                width: 1,
+                height: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rect_inset_exact_half_produces_1x1() {
+        // 2*amount == width and height → result is exactly 1×1 (not 0×0).
+        let r = Rect {
+            x: 10,
+            y: 10,
+            width: 10,
+            height: 10,
+        };
+        assert_eq!(
+            r.inset(5),
+            Rect {
+                x: 15,
+                y: 15,
+                width: 1,
+                height: 1,
+            }
         );
     }
 

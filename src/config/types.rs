@@ -42,6 +42,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::color::Color;
+
 /// Top-level application configuration structure.
 ///
 /// Loaded from `%USERPROFILE%\.config\stm\stm.toml` (see [`config::dirs`](crate::config::dirs)
@@ -119,6 +121,9 @@ pub struct StmConfig {
 
     /// Behavior when a minimized tiling window is restored.
     pub minimize_restore: MinimizeRestore,
+
+    /// Window border overlay configuration.
+    pub borders: BorderConfig,
 }
 
 fn default_window_action() -> WindowAction {
@@ -134,6 +139,7 @@ impl Default for StmConfig {
             padding: Padding::default(),
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
+            borders: BorderConfig::default(),
         }
     }
 }
@@ -231,6 +237,7 @@ impl StmConfig {
     /// daemon computes the actual width from `columns_per_screen`).
     pub fn validate(&self) -> Result<(), String> {
         self.padding.validate()?;
+        self.borders.validate()?;
         if self.columns_per_screen == 0 {
             return Err("columns_per_screen must be at least 1, got 0".into());
         }
@@ -571,6 +578,74 @@ pub enum MinimizeRestoreStrategy {
     AppendRight,
 }
 
+/// Window border overlay configuration.
+///
+/// The border crate draws a thin colored ring around each managed window as a
+/// separate layered overlay window that follows the target HWND's geometry
+/// (driven by `EVENT_OBJECT_LOCATIONCHANGE`). The daemon shrinks the actual
+/// window rect by `thickness` pixels on each side so the colored ring sits
+/// *outside* the visible content without obscuring it.
+///
+/// # Example
+///
+/// ```toml
+/// [borders]
+/// enabled = true
+/// thickness = 3
+/// focused_color = "#00AAFF"
+/// unfocused_color = "#555555"
+/// floating_color = "#AA00FF"
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct BorderConfig {
+    /// Master switch. When `false`, no overlay windows are created and any
+    /// existing overlays are detached.
+    pub enabled: bool,
+    /// Border ring thickness in pixels, applied uniformly on all four sides.
+    ///
+    /// The layout engine shrinks each window's HWND rect by this amount on
+    /// every edge before issuing `SetWindowPos`, leaving room for the overlay
+    /// to occupy the surrounding ring.
+    pub thickness: u32,
+    /// Border color for the focused/active window.
+    pub focused_color: Color,
+    /// Border color for tiled-but-not-focused windows.
+    pub unfocused_color: Color,
+    /// Border color for floating windows.
+    pub floating_color: Color,
+}
+
+impl Default for BorderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            thickness: 3,
+            focused_color: Color::rgb(0x00, 0xAA, 0xFF),
+            unfocused_color: Color::rgb(0x55, 0x55, 0x55),
+            floating_color: Color::rgb(0xAA, 0x00, 0xFF),
+        }
+    }
+}
+
+impl BorderConfig {
+    /// Validate that field values are within sane bounds.
+    ///
+    /// `thickness` is capped at 50 px — anything wider is almost certainly a
+    /// misconfiguration that would shrink windows into nothing. Color values
+    /// are parsed at TOML load time, so they are already well-formed here.
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_THICKNESS: u32 = 50;
+        if self.thickness > MAX_THICKNESS {
+            return Err(format!(
+                "borders.thickness must be at most {MAX_THICKNESS} px, got {}",
+                self.thickness
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +799,13 @@ strategy = "original_slot"
             minimize_restore: MinimizeRestore {
                 strategy: MinimizeRestoreStrategy::AppendRight,
             },
+            borders: BorderConfig {
+                enabled: false,
+                thickness: 7,
+                focused_color: Color::rgb(0x10, 0x20, 0x30),
+                unfocused_color: Color::rgb(0x40, 0x50, 0x60),
+                floating_color: Color::rgb(0x70, 0x80, 0x90),
+            },
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
@@ -742,6 +824,11 @@ strategy = "original_slot"
             parsed.minimize_restore.strategy,
             MinimizeRestoreStrategy::AppendRight
         );
+        assert!(!parsed.borders.enabled);
+        assert_eq!(parsed.borders.thickness, 7);
+        assert_eq!(parsed.borders.focused_color, Color::rgb(0x10, 0x20, 0x30));
+        assert_eq!(parsed.borders.unfocused_color, Color::rgb(0x40, 0x50, 0x60));
+        assert_eq!(parsed.borders.floating_color, Color::rgb(0x70, 0x80, 0x90));
     }
 
     #[test]

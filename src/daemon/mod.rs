@@ -29,6 +29,7 @@
 //! - [`new`] — constructor ([`ScrollTilingManager::new`])
 //! - [`run`] — main event loop ([`ScrollTilingManager::run`] and event routing)
 //! - [`hooks`] — Win32 hook event handlers
+//! - [`borders`] — border overlay lifecycle (attach/detach/recolor helpers)
 //! - [`dispatch`] — IPC command dispatch router and action handlers
 //! - [`query`] — query handlers (extracted from dispatch)
 //! - [`animation`] — animation bridge ([`ScrollTilingManager::animate_layout`])
@@ -39,6 +40,7 @@
 //! (`docs/src/dev-guide/threading-model.md` and `event-pipelines.md`).
 
 mod animation;
+mod borders;
 mod config_derive;
 mod dispatch;
 mod hooks;

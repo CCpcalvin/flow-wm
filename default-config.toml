@@ -47,3 +47,23 @@ easing = "ease-out-expo"
 # Options: original_slot, right_of_focused, append_right
 [minimize_restore]
 strategy = "original_slot"
+
+# Window border overlay settings.
+#
+# Each managed window gets a thin colored ring drawn as a separate layered
+# overlay window that follows the target's HWND geometry. This produces sharp
+# komorebi/Hyprland-style borders that the default Windows drop-shadow cannot.
+#
+# - enabled:        master switch (false = no overlays created)
+# - thickness:      border ring width in pixels (applied on all four sides)
+# - focused_color:  border color for the focused/active window
+# - unfocused_color: border color for tiled-but-not-focused windows
+# - floating_color: border color for floating windows
+#
+# Colors are hex strings of the form "#RRGGBB".
+[borders]
+enabled = true
+thickness = 3
+focused_color = "#00AAFF"
+unfocused_color = "#555555"
+floating_color = "#AA00FF"

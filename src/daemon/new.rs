@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use crate::animation::WindowAnimator;
 use crate::animation::backend::win32::Win32Backend;
+use crate::borders::BorderManager;
 use crate::common::WindowId;
 use crate::config::types::{StmConfig, WindowRulesConfig};
 use crate::ipc::transport::PipeServer;
@@ -154,7 +155,12 @@ impl ScrollTilingManager {
                 "init: submitting {} targets to animator",
                 diff.actual_layout.entries.len()
             );
-            animate_layout_raw(&mut animator, diff, &registry);
+            animate_layout_raw(
+                &mut animator,
+                diff,
+                &registry,
+                app_config.borders.thickness as i32,
+            );
 
             // Sync registry tiling state from the initial layout so that
             // queries return correct col/row and tiled_rect immediately.
@@ -171,6 +177,17 @@ impl ScrollTilingManager {
         // 10. Create IPC server.
         let server = PipeServer::create()
             .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
+
+        // 11. Construct border manager + spawn its hook thread.
+        //     Constructed unconditionally (even if `borders.enabled = false`)
+        //     so the daemon's call sites can stay branch-free — the manager
+        //     self-no-ops when disabled. `start_hooks` registers the
+        //     process-global `BORDER_INNER` OnceLock (single-use) and spawns
+        //     the background `EVENT_OBJECT_LOCATIONCHANGE` thread.
+        //     Initial attach for windows found during scan happens after Self
+        //     is built — see `refresh_all_border_styles`.
+        let borders = BorderManager::new(app_config.borders.clone());
+        borders.start_hooks()?;
 
         log::info!("stmd: daemon initialized successfully");
 
@@ -209,11 +226,17 @@ impl ScrollTilingManager {
             workspaces.push(Workspace::new(WorkspaceId(id), empty_scrolling));
         }
 
-        Ok(Self {
+        let manager = Self {
             registry,
-            monitors: vec![Monitor::new(geometry.screen_rect, monitor.work_area, workspaces, 0)],
+            monitors: vec![Monitor::new(
+                geometry.screen_rect,
+                monitor.work_area,
+                workspaces,
+                0,
+            )],
             active_monitor: 0,
             animator,
+            borders,
             server,
             config: app_config,
             config_dir,
@@ -222,6 +245,10 @@ impl ScrollTilingManager {
             hook_signal,
             shutting_down: false,
             pending_creations: Vec::new(),
-        })
+        };
+        // Initial border overlay attach for windows found during the scan.
+        // Idempotent and O(N) where N = tracked windows.
+        manager.refresh_all_border_styles();
+        Ok(manager)
     }
 }

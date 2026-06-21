@@ -3,39 +3,55 @@
 //! This module contains:
 //!
 //! - [`ScrollTilingManager::run`] — the event-driven main loop that uses
-//!   `WaitForMultipleObjects` to wait on both hook events and IPC client
-//!   connections simultaneously.
+//!   `MsgWaitForMultipleObjects` to wait on hook events, IPC client
+//!   connections, and the Win32 message queue simultaneously.
 //! - [`ScrollTilingManager::process_hook_events`] — drains pending hook
 //!   events from the channel and routes them to individual handlers.
+//! - [`ScrollTilingManager::pump_messages`] — drains the Win32 message
+//!   queue so cross-thread `SendMessage` calls from the border hook thread
+//!   can complete. Required because the main thread creates overlay windows
+//!   and is therefore a GUI thread that must pump messages.
 //!
 //! # Event-Driven Architecture
 //!
-//! The main loop blocks on `WaitForMultipleObjects` with two wait handles:
+//! The main loop blocks on `MsgWaitForMultipleObjects` with two wait handles
+//! plus the message queue (`QS_ALLINPUT`):
 //!
 //! 1. **Hook signal event** (index 0, highest priority) — signaled by the
 //!    hook callback thread after each `sender.send(HookEvent)`.
 //! 2. **Pipe connected event** (index 1) — signaled by the background accept
 //!    thread when a CLI client connects via named pipe.
+//! 3. **Win32 message queue** (index 2) — new window messages for any
+//!    window owned by this thread (the border overlays). The border hook
+//!    thread's `SetWindowPos` / `UpdateLayeredWindow` calls on overlays
+//!    sync-dispatch `WM_*` messages here; pumping them lets those calls
+//!    complete and prevents the border subsystem from deadlocking.
 //!
-//! When either event fires, the loop:
-//! 1. Resets the hook signal (`ResetEvent`) — **before** draining, to close
+//! When the wait returns, the loop:
+//! 1. Pumps ALL pending window messages (`PeekMessage` loop) — every wake,
+//!    regardless of which handle fired. This is critical: even on hook or
+//!    IPC wakes, deferred border `SendMessage` calls need servicing.
+//! 2. Resets the hook signal (`ResetEvent`) — **before** draining, to close
 //!    the race window (see below).
-//! 2. Drains ALL pending hook events via `try_recv()` loop.
-//! 3. If the pipe event was signaled, processes the IPC session (read,
-//!    dispatch, write, disconnect, re-accept).
-//! 4. Returns to `WaitForMultipleObjects`.
+//! 3. Drains ALL pending hook events via `try_recv()` loop.
+//! 4. If the pipe event was signaled, processes the IPC session (read,
+//!    dispatch, write, disconnect, re-accept), pumping messages between
+//!    each read so border sync-dispatch never blocks on an IPC-blocked main
+//!    thread.
+//! 5. Returns to `MsgWaitForMultipleObjects`.
 //!
 //! # Race-Free Hook Drain
 //!
 //! The critical ordering is **ResetEvent before drain**:
 //!
-//! 1. `WaitForMultipleObjects` wakes (hook signal is set).
-//! 2. `ResetEvent(hook_signal)` — clear the signal.
-//! 3. `try_recv()` loop — drain ALL events from the channel.
+//! 1. `MsgWaitForMultipleObjects` wakes (hook signal is set).
+//! 2. `pump_messages()` — service border overlay messages first.
+//! 3. `ResetEvent(hook_signal)` — clear the signal.
+//! 4. `try_recv()` loop — drain ALL events from the channel.
 //!
 //! Any event pushed between ResetEvent and try_recv is caught by try_recv.
 //! Any event pushed after the try_recv loop calls `SetEvent`, so the next
-//! `WaitForMultipleObjects` wakes immediately. **No events are lost.**
+//! `MsgWaitForMultipleObjects` wakes immediately. **No events are lost.**
 //!
 //! # Pending-Creations Retry
 //!
@@ -49,13 +65,17 @@
 //! To handle this, windows that fail classification are added to
 //! [`pending_creations`](super::types::ScrollTilingManager::pending_creations).
 //! On every `process_hook_events` call, pending windows are retried. When the
-//! list is non-empty, `WaitForMultipleObjects` uses a finite timeout (100 ms)
+//! list is non-empty, `MsgWaitForMultipleObjects` uses a finite timeout (100 ms)
 //! instead of `INFINITE`, ensuring retries happen even without new hook events.
 //!
 //! This approach is event-driven by default (zero CPU while idle) with a
 //! bounded timer fallback only when windows are pending classification.
 
-use windows::Win32::System::Threading::{ResetEvent, WaitForMultipleObjects};
+use windows::Win32::System::Threading::ResetEvent;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+    TranslateMessage,
+};
 
 use crate::registry::HookEvent;
 
@@ -87,15 +107,18 @@ impl ScrollTilingManager {
     /// start_accept()                          // Spawn background accept thread
     /// loop {
     ///     timeout = pending_creations.is_empty() ? INFINITE : 100ms
-    ///     WaitForMultipleObjects(             // Sleep until something happens
+    ///     MsgWaitForMultipleObjects(          // Sleep until something happens
     ///         [hook_signal, connected_event],
-    ///         timeout
+    ///         timeout,
+    ///         QS_ALLINPUT                     // Also wake for window messages
     ///     )
+    ///     pump_messages()                     // Service border overlay messages
     ///     ResetEvent(hook_signal)             // Race-free: reset BEFORE drain
     ///     process_hook_events()               // Drain hooks + retry pending
     ///
     ///     if connected_event was signaled:
     ///         loop {                           // IPC session with this client
+    ///             pump_messages()              // Don't starve border thread
     ///             process_hook_events()
     ///             read_message()              // Blocking (client is active)
     ///             dispatch(msg)
@@ -112,13 +135,25 @@ impl ScrollTilingManager {
     /// The previous implementation blocked the main thread in
     /// `ConnectNamedPipe`, preventing hook events from being processed until
     /// a CLI client connected. By moving `ConnectNamedPipe` to a background
-    /// thread and using `WaitForMultipleObjects`, hook events are now
+    /// thread and using `MsgWaitForMultipleObjects`, hook events are now
     /// processed immediately — window creation/removal/focus changes reflect
     /// in the layout without requiring an IPC dispatch.
     ///
     /// The inner loop (blocking `read_message`) is acceptable because the CLI
     /// is one-shot: connect → send one command → read response → disconnect.
     /// The entire IPC transaction completes in under 1 ms.
+    ///
+    /// # Why a Message Pump Is Required
+    ///
+    /// The border subsystem creates overlay windows on this thread (via
+    /// `CreateWindowExW` in [`crate::borders::BorderOverlay::create`]). Per
+    /// Win32 rules, any thread that creates windows becomes a GUI thread and
+    /// must pump messages — otherwise cross-thread `SendMessage` blocks
+    /// indefinitely. The border hook thread's `SetWindowPos` /
+    /// `UpdateLayeredWindow` calls sync-dispatch `WM_*` messages to these
+    /// overlay windows. Without a pump, those calls would deadlock and so
+    /// would every border operation (and, eventually, every IPC dispatch).
+    /// See `docs/src/dev-guide/borders.md` (planned).
     pub fn run(&mut self) {
         log::info!("stmd: daemon started, event-driven loop on named pipe");
 
@@ -126,21 +161,23 @@ impl ScrollTilingManager {
         // ConnectNamedPipe until a client connects.
         self.server.start_accept();
 
-        // Event handles for WaitForMultipleObjects.
+        // Event handles for MsgWaitForMultipleObjects.
         // Index 0 = hook_signal (highest priority — hooks drained first)
         // Index 1 = connected_event (IPC client connected)
+        // Index 2 = wake-by-message-queue (implicit, from QS_ALLINPUT)
         let hook_handle = self.hook_signal.raw();
         let connect_handle = self.server.connected_event_handle();
         let wait_handles = [hook_handle, connect_handle];
 
         loop {
-            // Block until either a hook event or an IPC client connection
-            // arrives. When there are pending window creations, use a finite
-            // timeout so they're retried even without new hook events.
+            // Block until a hook event, an IPC client connection, OR a Win32
+            // window message arrives. When there are pending window creations,
+            // use a finite timeout so they're retried even without new wakes.
             //
-            // WaitForMultipleObjects returns WAIT_EVENT whose inner u32 is:
+            // MsgWaitForMultipleObjects returns WAIT_EVENT whose inner u32 is:
             //   0     = WAIT_OBJECT_0 (first handle = hook_signal)
             //   1     = WAIT_OBJECT_0 + 1 (second handle = connected_event)
+            //   2     = WAIT_OBJECT_0 + 2 (new input in queue — needs pumping)
             //   258   = WAIT_TIMEOUT (retry pending creations)
             //   u32::MAX = WAIT_FAILED (fatal — break)
             let timeout = if self.pending_creations.is_empty() {
@@ -149,11 +186,13 @@ impl ScrollTilingManager {
                 PENDING_RETRY_TIMEOUT_MS
             };
 
-            let wait_result = unsafe { WaitForMultipleObjects(&wait_handles, false, timeout) };
+            let wait_result = unsafe {
+                MsgWaitForMultipleObjects(Some(&wait_handles), false, timeout, QS_ALLINPUT)
+            };
 
             // Check for WAIT_FAILED (0xFFFFFFFF).
             if wait_result.0 == u32::MAX {
-                log::error!("stmd: WaitForMultipleObjects failed");
+                log::error!("stmd: MsgWaitForMultipleObjects failed");
                 break;
             }
 
@@ -161,10 +200,17 @@ impl ScrollTilingManager {
             // WAIT_TIMEOUT (258) if the timeout expired.
             let signaled = wait_result.0;
 
+            // Pump ALL pending window messages BEFORE doing anything else.
+            // This must run on every wake — hook signal, IPC connect, message
+            // queue, or timeout — so the border hook thread's sync-dispatch
+            // `SendMessage` calls to overlay windows complete promptly.
+            // Without this, border operations (and eventually IPC) deadlock.
+            self.pump_messages();
+
             // Always reset hook signal FIRST (race-free pattern), then drain.
             // Any event pushed between ResetEvent and try_recv is caught by
             // try_recv. Any event pushed after the drain calls SetEvent, so
-            // the next WaitForMultipleObjects wakes immediately.
+            // the next MsgWaitForMultipleObjects wakes immediately.
             // On WAIT_TIMEOUT this is a harmless no-op (event is unsignaled).
             unsafe {
                 let _ = ResetEvent(hook_handle);
@@ -175,14 +221,18 @@ impl ScrollTilingManager {
             self.process_hook_events();
 
             // Check if an IPC client connected (index 1 = WAIT_OBJECT_0 + 1).
-            // On WAIT_TIMEOUT (258) or hook-only wake (0), this is false and
-            // we skip the IPC inner loop.
+            // On WAIT_TIMEOUT (258), hook-only wake (0), or message wake (2),
+            // this is false and we skip the IPC inner loop.
             if signaled == 1 {
                 // Inner loop: handle this client's messages.
                 // The CLI is one-shot (connect → send → read response →
                 // disconnect), so this loop typically runs once before the
-                // client disconnects. Hook events are drained between reads.
+                // client disconnects. Hook events AND window messages are
+                // drained between reads so neither subsystem starves.
                 loop {
+                    // Service border overlay messages before each IPC read.
+                    self.pump_messages();
+
                     // Drain hook events before each IPC message.
                     self.process_hook_events();
 
@@ -216,6 +266,39 @@ impl ScrollTilingManager {
 
                 // Start accepting the next client on a background thread.
                 self.server.start_accept();
+            }
+        }
+    }
+
+    /// Drain ALL pending Win32 window messages from this thread's queue.
+    ///
+    /// Required because the main thread creates border overlay windows
+    /// (via `CreateWindowExW`), which makes it a GUI thread under Win32
+    /// rules. GUI threads MUST pump messages or cross-thread `SendMessage`
+    /// blocks indefinitely. The border hook thread's `SetWindowPos` /
+    /// `UpdateLayeredWindow` calls on overlays sync-dispatch `WM_*`
+    /// messages here; pumping them lets those calls complete.
+    ///
+    /// Uses `PeekMessageW(PM_REMOVE)` until empty rather than the blocking
+    /// `GetMessageW` because the main loop still needs to wait on hook
+    /// events and IPC connections between message batches.
+    ///
+    /// Window messages are dispatched to the overlay window procedure
+    /// (`overlay_wnd_proc`), which currently just calls `DefWindowProcW`.
+    /// The border crate does not handle any messages itself — `WM_PAINT`,
+    /// `WM_NCHITTEST`, etc. all flow to `DefWindowProcW`. The pump's only
+    /// job is to unblock cross-thread senders.
+    fn pump_messages(&mut self) {
+        let mut msg = MSG::default();
+        // PeekMessageW returns BOOL — true if a message was available.
+        // PM_REMOVE removes it from the queue; the loop ends once empty.
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
+            // TranslateMessage (virtual-key → character) and DispatchMessageW
+            // (invoke the target window's wndproc) are both infallible in
+            // practice for these message types — ignore their return values.
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                let _ = DispatchMessageW(&msg);
             }
         }
     }

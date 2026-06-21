@@ -20,6 +20,8 @@
 //! The successor window is chosen by [`ScrollingSpace::remove_window`](crate::workspace::ScrollingSpace::remove_window) via
 //! [`mutations::next_available_window`] (left column, then right).
 
+use windows::Win32::Foundation::HWND;
+
 use crate::common::WindowId;
 use crate::registry::types::{ReclassifyResult, VisibilityChange};
 use crate::registry::win32 as registry_win32;
@@ -69,6 +71,9 @@ impl ScrollTilingManager {
         if let Some(window_id) = self.registry.handle_created(hwnd) {
             let applied = self.active_scrolling_mut().insert_window(window_id);
             self.animate_layout(&applied);
+            // Border overlay: attach (or skip) based on the freshly-classified
+            // state. Tiling/Floating → attach; Ignored → no-op.
+            self.refresh_border_for(hwnd);
             true
         } else {
             // Classification failed — either the window isn't ready yet
@@ -100,6 +105,10 @@ impl ScrollTilingManager {
         }
 
         self.registry.remove_window(hwnd);
+        // Border overlay: detach explicitly — `refresh_border_for` would also
+        // work (window no longer in registry ⇒ returns None ⇒ detaches) but
+        // the intent is clearer here.
+        self.borders.detach(HWND(hwnd as *mut _));
     }
 
     /// Handle a window minimize event.
@@ -116,6 +125,8 @@ impl ScrollTilingManager {
         if was_tiling {
             self.remove_from_layout_and_refocus(WindowId(hwnd));
         }
+        // Border overlay: registry now records Minimized ⇒ refresh detaches.
+        self.refresh_border_for(hwnd);
     }
 
     /// Handle `EVENT_OBJECT_HIDE` for a window that may have been tray-hidden
@@ -149,6 +160,8 @@ impl ScrollTilingManager {
         if change == VisibilityChange::Hidden && was_active_tiling {
             self.remove_from_layout_and_refocus(WindowId(hwnd));
         }
+        // Border overlay: registry now records Hidden ⇒ refresh detaches.
+        self.refresh_border_for(hwnd);
     }
 
     /// Shared window-removal pipeline for destroy and minimize events.
@@ -210,6 +223,8 @@ impl ScrollTilingManager {
             let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }
+        // Border overlay: registry now records Active ⇒ refresh re-attaches.
+        self.refresh_border_for(hwnd);
     }
 
     /// Handle `EVENT_OBJECT_SHOW`.
@@ -290,6 +305,11 @@ impl ScrollTilingManager {
             let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }
+        // Border overlay: registry now records Active ⇒ refresh re-attaches.
+        // (The untracked-recovery branch above early-returns after
+        // on_window_created, which performs its own refresh_border_for; this
+        // line only runs for the tracked-reveal path.)
+        self.refresh_border_for(hwnd);
     }
 
     /// Handle a focus change event.
@@ -308,6 +328,10 @@ impl ScrollTilingManager {
         if self.registry.is_tiling(hwnd) {
             self.active_scrolling_mut().set_focus(WindowId(hwnd));
         }
+        // Border overlay: focused-vs-unfocused colors are resolved per-window,
+        // so the simplest correct strategy is to recolor every overlay. N is
+        // tiny (typically <20 windows), and the call is idempotent.
+        self.refresh_all_border_styles();
     }
 
     /// Handle `EVENT_OBJECT_STATECHANGE` — Option D recovery for windows that
@@ -337,6 +361,9 @@ impl ScrollTilingManager {
             let applied = self.active_scrolling_mut().add_window(WindowId(hwnd));
             self.animate_layout(&applied);
         }
+        // Border overlay: covers all transitions — Ignored→Tiling (attach),
+        // Tiling→Ignored (detach), and no-op cases.
+        self.refresh_border_for(hwnd);
     }
 
     /// Handle `EVENT_OBJECT_NAMECHANGE` — Option A recovery for windows whose
