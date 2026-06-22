@@ -22,62 +22,89 @@ The daemon entry point is [`src/main.rs`](../../src/main.rs); the other two live
 
 ## Subsystem Map
 
-Every subsystem lives inside the `stmd` process. The `stm` CLI and `stm-watchdog`
-only share the library's IPC message types and utility code — they never hold
-application state.
+Everything runs inside the `stmd` process. Two **inputs** feed events into one
+**orchestrator** — the `ScrollTilingManager` main loop — which routes each event to
+the right **subsystem**. No subsystem knows about any other; the orchestrator is the
+only glue. The `stm` CLI and `stm-watchdog` are external binaries that share the
+library's IPC types but hold no application state.
 
 ```mermaid
 flowchart TB
-    subgraph stmd["stmd daemon"]
-        IPC["IPC Server<br/>(src/ipc)"]
-        Hook["Win32 Hook Thread<br/>(src/registry/hooks.rs)"]
-        Registry["WindowRegistry<br/>(src/registry)"]
-        Monitors["Vec&lt;Monitor&gt;<br/>(src/workspace)"]
-        Animator["WindowAnimator<br/>(src/animation)"]
-        Config["AppConfig<br/>(src/config)"]
-        Persist["Persist<br/>(src/persist)"]
+    subgraph inputs["Inputs — where events enter the daemon"]
+        IPC["IPC Server<br/>stm CLI → Windows named pipe<br/>src/ipc"]
+        Hook["Win32 Hook Thread<br/>background thread:<br/>SetWinEventHook → HookEvent<br/>src/registry/hooks.rs"]
     end
 
-    subgraph shared_lib["shared library (src/lib.rs)"]
-        Layout["Layout Math<br/>(src/layout)"]
+    Daemon["ScrollTilingManager (orchestrator)<br/>main loop routes every event<br/>src/daemon"]
+
+    subgraph core["Subsystems — all owned by ScrollTilingManager"]
+        Registry["WindowRegistry<br/>window state"]
+        Workspace["Workspace Hierarchy<br/>Monitor → Workspace →<br/>ScrollingSpace + FloatingSpace"]
+        Layout["Layout Math (pure)<br/>mutation + projection"]
+        Animator["WindowAnimator<br/>SetWindowPos tweens"]
+        Config["Config + HistoryStore"]
     end
 
-    subgraph external["external binaries"]
-        CLI["stm CLI"]
-        Watchdog["stm-watchdog"]
-    end
-
-    Hook -- "mpsc channel" --> IPC
-    IPC --> Registry
-    IPC --> Monitors
-    Hook --> Registry
-    Registry -- "WindowId" --> Monitors
-    Monitors --> Animator
-    Monitors -. "uses" .-> Layout
-    CLI -. "named pipe" .-> IPC
-    Watchdog -. "reads" .-> Persist
+    IPC  -- "SocketMessage" --> Daemon
+    Hook -- "HookEvent (mpsc)" --> Daemon
+    Daemon --> Registry
+    Daemon --> Workspace
+    Daemon --> Animator
+    Daemon --> Config
+    Registry -- "WindowId lookup" --> Workspace
+    Workspace -. "delegates pure math" .-> Layout
+    Workspace -- "AppliedLayout" --> Animator
 ```
 
-### Subsystem Roles
+Read the diagram top-down: an event comes in from either input, the orchestrator
+decides which subsystem(s) to touch, the registry feeds `WindowId`s into the
+workspace, the workspace computes a layout using the pure math in `src/layout`, and
+the resulting `AppliedLayout` becomes the animator's move targets.
+
+### Inputs
 
 - **IPC Server** (`src/ipc`) — accepts commands from the `stm` CLI over a Windows
-  named pipe. Parses `SocketMessage` frames and dispatches to the orchestrator.
-- **Win32 Hook Thread** (`src/registry/hooks.rs`) — a background thread that registers
-  `SetWinEventHook` callbacks for window create/destroy/minimize/focus events. Sends
-  lightweight `HookEvent` structs through an `mpsc` channel; never touches daemon
-  state directly. See [Threading Model](./threading-model.md).
+  named pipe, parses each `SocketMessage` frame, and hands it to the orchestrator's
+  `dispatch()`.
+- **Win32 Hook Thread** (`src/registry/hooks.rs`) — a background thread that
+  subscribes to `SetWinEventHook` for window create / destroy / focus / minimize /
+  show / location events. It **never touches daemon state**: it only pushes
+  lightweight `HookEvent` structs through an `mpsc` channel that the main loop
+  drains. See [Threading Model](./threading-model.md).
+
+### Core subsystems
+
 - **WindowRegistry** (`src/registry`) — the authoritative source of truth for every
-  tracked window: HWND-to-`WindowId` mapping, title, class, tile/float/ignore
-  classification, and recovery state. See [Window Registry](./window-registry.md).
-- **Monitors / Workspaces** (`src/workspace`) — the hierarchy
-  `Vec<Monitor>` -> `Vec<Workspace>` -> `ScrollingSpace` + `FloatingSpace`.
-  The daemon tracks which monitor is active and routes all commands to the active
-  workspace's scrolling space. See [Workspace Hierarchy](./workspace.md).
-- **WindowAnimator** (`src/animation`) — animates window rectangles from their
-  current on-screen position to the target position computed by the layout engine.
-  See [Animation](./animation.md).
-- **Config** (`src/config`) — loads `stm.toml`, applies defaults, derives layout
-  parameters. See [Config & Persistence](./config-and-persistence.md).
+  tracked window: `HWND` ↔ `WindowId`, title, class, the tile / float / ignore
+  classification, and recovery state. Hook events that create or destroy a window
+  update this first; the resulting `WindowId` is what every other subsystem refers
+  to. See [Window Registry](./window-registry.md).
+- **Workspace Hierarchy** (`src/workspace`) — the nested layout state:
+  `Vec<Monitor>` → `Vec<Workspace>` → one `ScrollingSpace` + one `FloatingSpace` per
+  workspace. `ScrollingSpace` is the tiled half — the same thing that used to be
+  called the `LayoutEngine`; it owns the list of columns and delegates the actual
+  math to `src/layout`. `FloatingSpace` keeps non-tiled windows at literal pixel
+  coordinates. The orchestrator always operates on the **active** monitor's
+  **active** workspace. See [Workspace Hierarchy](./workspace.md).
+- **Layout Math** (`src/layout`) — pure mutation and projection functions with **zero
+  Win32 dependencies**. `ScrollingSpace` calls these to mutate the virtual layout and
+  project it into concrete pixel rects (`AppliedLayout`). Being pure means it is fully
+  unit-testable on any platform. See [Layout Overview](./layout/overview.md).
+- **WindowAnimator** (`src/animation`) — takes an `AppliedLayout` (a target rect per
+  window) and animates each window from its current on-screen rect to that target via
+  `SetWindowPos` tweens paced by `DwmFlush`. See [Animation](./animation.md).
+
+### Supporting subsystems
+
+- **Config** (`src/config`) — loads `stm.toml` into [`StmConfig`](../../src/config/types.rs),
+  applies defaults (code is the single source of truth), and derives layout
+  parameters at startup. See [Config & Persistence](./config-and-persistence.md).
+- **HistoryStore** (`src/config/history.rs`) — persists the user's explicit
+  `setwindow` decisions (learned rules) to `history-stm-rules.toml` so the next
+  window of the same app is classified automatically. See
+  [Classification & Learned Rules](./classification.md). (The recovery-snapshot
+  persistence planned for `stm-watchdog` is not yet implemented — there is no
+  separate `persist` module today.)
 
 ## Ownership Model
 

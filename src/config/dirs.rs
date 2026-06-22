@@ -183,6 +183,40 @@ pub fn user_rules_path_in(dir: &Path) -> PathBuf {
     dir.join("stm-rules.toml")
 }
 
+/// Returns the path to the user's `history-stm-rules.toml` file using the default
+/// config directory resolution.
+///
+/// The path is resolved via [`resolve_config_dir`]`(None)`, then
+/// `history-stm-rules.toml` is appended. This file stores machine-learned
+/// window classification rules (see [`crate::config::history::HistoryStore`]).
+///
+/// # Returns
+///
+/// Full path to `history-stm-rules.toml` as a [`PathBuf`].
+#[must_use]
+pub fn history_rules_path() -> PathBuf {
+    resolve_config_dir(None).join("history-stm-rules.toml")
+}
+
+/// Returns the path to the user's `history-stm-rules.toml` file in an explicitly
+/// provided config directory.
+///
+/// This is used when the config directory has already been resolved
+/// elsewhere (e.g., via a CLI flag) and the caller wants the history rules path
+/// without re-resolving.
+///
+/// # Arguments
+///
+/// * `dir` — The config directory to use. Typically from [`resolve_config_dir`].
+///
+/// # Returns
+///
+/// `dir.join("history-stm-rules.toml")` as a [`PathBuf`].
+#[must_use]
+pub fn history_rules_path_in(dir: &Path) -> PathBuf {
+    dir.join("history-stm-rules.toml")
+}
+
 /// Returns the path to the user's `stm.toml` app config file in an explicitly
 /// provided config directory.
 ///
@@ -578,5 +612,25 @@ mod tests {
         let a = log_file_path_in(dir, "2026-06-17");
         let b = log_file_path_in(dir, "2026-06-18");
         assert_ne!(a, b, "different dates must produce different paths");
+    }
+
+    // ── History rules path tests ─────────────────────────────────────────
+
+    /// Positive: `history_rules_path` ends with the expected filename.
+    #[test]
+    fn history_rules_path_ends_with_history_stm_rules_toml() {
+        let path = history_rules_path();
+        assert!(
+            path.ends_with("history-stm-rules.toml"),
+            "path was: {path:?}"
+        );
+    }
+
+    /// Positive: `history_rules_path_in` appends correctly.
+    #[test]
+    fn history_rules_path_in_returns_correct_path() {
+        let dir = Path::new("C:\\test\\config");
+        let path = history_rules_path_in(dir);
+        assert_eq!(path, dir.join("history-stm-rules.toml"));
     }
 }

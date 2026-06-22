@@ -96,18 +96,23 @@ format with a `"type"` field and snake_case variant names.
 | Scroll | `ScrollLeft`, `ScrollRight` | Slide the viewport |
 | Column resize | `ExpandColumn`, `ShrinkColumn`, `SetColumnWidth { width_px }` | Adjust column widths |
 | Window state | `ToggleFloat`, `ToggleMonocle`, `PlaceAbove`, `Promote`, `CloseWindow` | Per-window operations |
-| Workspace | `SwitchWorkspace { id }`, `SwapWorkspace { id }`, `MoveToWorkspace { id }` | niri-style virtual desktops (stub) |
+| Workspace | `SwitchWorkspace { workspace_id }`, `SwapWorkspace { workspace_id }`, `MoveWindowToWorkspace { workspace_id }` | niri-style virtual desktops (`Switch`/`Move` implemented; `Swap` stub) |
 | Query | `QueryWindowsAll`, `QueryLayoutVirtual`, `QueryLayoutActual`, `QueryState` | Read-only introspection |
 | Config mutation | `SetConfigValue { key, value }` | Runtime config change |
 | App preferences | `ForgetApp { exe }`, `ForgetAllApps` | Clear per-app learned state |
 
 The `MoveWindow` variant is deliberately semantic: for tiled windows moving
 left or right it delegates to `SwapColumn`, but the daemon owns the translation
-so keybindings stay stable as floating support lands. Vertical movement and
-floating-window nudging are deferred. The three workspace variants currently
-return `unimplemented_command` -- their protocol shape is locked in now so the
-CLI, keybindings, and documentation can stabilise while the workspace animation
-design is finalised.
+so keybindings stay stable as floating support lands. Vertical movement
+(within-column swap) and floating-window nudging are deferred — only the
+tiled left/right path is wired today.
+
+Of the three workspace variants, `SwitchWorkspace` and `MoveWindowToWorkspace`
+are fully implemented (see [Workspace Hierarchy](./workspace.md) for the
+vertical-packing switch animation). Only `SwapWorkspace` returns
+`unimplemented_command` — its protocol shape is locked in, but its animation
+model (two workspaces exchanging positions in the packed stack) is still
+undecided.
 
 ### SocketResponse (Daemon -> CLI)
 
@@ -174,9 +179,9 @@ daemon. The config directory resolution chain is documented in
 | `stm dispatch expandcolumn` | `ExpandColumn` |
 | `stm dispatch shrinkcolumn` | `ShrinkColumn` |
 | `stm dispatch closewindow` | `CloseWindow` |
-| `stm dispatch switchworkspace <id>` | `SwitchWorkspace` (stub) |
+| `stm dispatch switchworkspace <id>` | `SwitchWorkspace` |
 | `stm dispatch swapworkspace <id>` | `SwapWorkspace` (stub) |
-| `stm dispatch movetoworkspace <id>` | `MoveToWorkspace` (stub) |
+| `stm dispatch movetoworkspace <id>` | `MoveWindowToWorkspace` |
 
 The dispatch commands that change layout flow through the daemon's 3-stage
 pipeline (mutate, project, animate) as described in

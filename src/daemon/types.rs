@@ -8,6 +8,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::animation::WindowAnimator;
 use crate::borders::BorderManager;
+use crate::config::history::HistoryStore;
 use crate::config::types::StmConfig;
 use crate::ipc::transport::PipeServer;
 use crate::registry::WindowRegistry;
@@ -54,8 +55,8 @@ pub(super) struct LayoutConfig {
 /// │  └────────────────┘  │  Scrolling + │  └──────────────────────────┘  │
 /// │                      │  Floating)   │                                 │
 /// │  ┌────────────────┐  └──────────────┘  ┌──────────────────────────┐  │
-/// │  │ PipeServer     │  ┌──────────────┐  │ (FloatingManager now     │  │
-/// │  │ (IPC transport)│  │ AppConfig    │  │  lives inside Workspace) │  │
+/// │  │ PipeServer     │  ┌──────────────┐  │ HistoryStore             │  │
+/// │  │ (IPC transport)│  │ AppConfig    │  │ (learned rules)          │  │
 /// │  └────────────────┘  └──────────────┘  └──────────────────────────┘  │
 /// │                                                                      │
 /// │  Routes:                                                             │
@@ -86,6 +87,13 @@ pub(super) struct LayoutConfig {
 pub struct ScrollTilingManager {
     /// Window registry — authoritative source of truth for all tracked windows.
     pub(super) registry: WindowRegistry,
+
+    /// Per-app learned window modes, persisted to `history-stm-rules.toml`.
+    ///
+    /// Records the user's explicit `setwindow float|tile` decisions so the
+    /// next window of the same app is classified automatically. See
+    /// (`docs/src/dev-guide/classification.md`) for the priority chain.
+    pub(super) history: HistoryStore,
 
     /// The monitor stack — one [`Monitor`] per physical display, each owning
     /// its own vertical stack of [`Workspace`]s.
@@ -213,10 +221,9 @@ impl ScrollTilingManager {
     /// active monitor.
     ///
     /// This is the workspace every IPC command and hook event operates on
-    /// today. Once workspace-switching is implemented, commands will be able
-    /// to target other workspaces explicitly.
+    /// by default. Workspace-switching commands (`switchworkspace`,
+    /// `movetoworkspace`) reassign the active index before animating.
     #[must_use]
-    #[allow(dead_code)] // API surface for the upcoming workspace-switch commands.
     pub(super) fn active_workspace(&self) -> &Workspace {
         self.active_monitor().active_workspace()
     }

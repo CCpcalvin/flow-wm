@@ -19,7 +19,7 @@
 //! visible, no owner) have already eliminated obvious non-candidates in the
 //! registry layer. Then, in order: maximized → `Ignored(Maximized)`; fullscreen
 //! → `Ignored(Fullscreen)`; otherwise the [`ClassificationPipeline`] runs user
-//! rules, then (future) learned rules, then default rules — first match wins,
+//! rules, then learned rules, then default rules — first match wins,
 //! falling back to the default action. All regex patterns are pre-compiled at
 //! construction time. The [`matches_rule`] function is kept public for testing
 //! individual rule-matching logic.
@@ -414,7 +414,7 @@ fn compile_rules(rules: Vec<WindowRule>) -> Vec<CompiledRule> {
 /// Evaluates rule layers in priority order (first match wins):
 ///
 /// 1. **User rules** — from `stm-rules.toml` (highest priority).
-/// 2. **Learned rules** — machine-learned (future; currently empty).
+/// 2. **Learned rules** — persisted user decisions from `setwindow` (`history-stm-rules.toml`).
 /// 3. **Default rules** — bundled at compile time (lowest rule priority).
 /// 4. **Default action** — fallback when no rule matches at any layer.
 ///
@@ -426,7 +426,8 @@ pub struct ClassificationPipeline {
     user_rules: Vec<CompiledRule>,
     /// Default rules bundled with the application (lowest rule priority).
     default_rules: Vec<CompiledRule>,
-    /// Machine-learned rules from user behavior (future; currently empty).
+    /// Learned rules — persisted user decisions, populated at runtime via
+    /// [`set_learned_rules`](Self::set_learned_rules).
     learned_rules: Vec<CompiledRule>,
     /// Fallback action when no rule matches at any layer.
     default_action: WindowAction,
@@ -478,7 +479,7 @@ impl ClassificationPipeline {
             }
         }
 
-        // 2. Learned rules (currently empty, first match wins)
+        // 2. Learned rules (first match wins)
         for compiled in &self.learned_rules {
             if matches_compiled_rule(candidate, compiled) {
                 return compiled.rule.action;
@@ -494,6 +495,20 @@ impl ClassificationPipeline {
 
         // 4. Fallback
         self.default_action
+    }
+
+    /// Replace the learned-rules layer with recompiled versions of `rules`.
+    ///
+    /// Learned rules sit between user rules and default rules in the priority
+    /// chain — see (`docs/src/dev-guide/classification.md`). Call this after
+    /// the daemon records a new user decision (e.g. via `setwindow tile`)
+    /// so the next window of the same app is classified to the learned mode.
+    ///
+    /// Recompiles all regex patterns (cheap at human-frequency update rates).
+    /// Invalid regex patterns are logged and treated as non-matching at
+    /// classification time, identical to [`new`](Self::new).
+    pub fn set_learned_rules(&mut self, rules: Vec<WindowRule>) {
+        self.learned_rules = compile_rules(rules);
     }
 }
 
@@ -1204,13 +1219,13 @@ mod tests {
 
     // --- Pipeline learned rules slot tests ---
 
-    /// The pipeline's learned rules layer is currently always empty, but
-    /// we verify the slot works: when user rules don't match and default
-    /// rules don't match, the pipeline falls through to default_action
-    /// even though a "learned" layer exists (it's empty).
+    /// The pipeline's learned rules layer is initially empty — when user rules
+    /// don't match and default rules don't match, the pipeline falls through to
+    /// default_action even though a learned layer exists (it's empty).
     ///
     /// This test documents that the pipeline has 4 layers (user → learned →
-    /// default → fallback) and that the learned layer is a no-op today.
+    /// default → fallback) and that the learned layer is a no-op until
+    /// populated via `set_learned_rules`.
     #[test]
     fn pipeline_learned_rules_slot_is_noop_when_empty() {
         let user_rules = WindowRulesConfig {
@@ -1226,6 +1241,146 @@ mod tests {
         let c = candidate("anything.exe", "", "", "");
         // No rules at any layer → should fall through to user's default_action.
         assert_eq!(pipeline.classify(&c), WindowAction::Float);
+    }
+
+    /// Positive: `set_learned_rules` compiles and installs rules so that
+    /// a matching candidate is classified using the learned layer.
+    #[test]
+    fn set_learned_rules_classifies_with_learned_rule() {
+        let user_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![],
+        };
+        let default_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![],
+        };
+
+        let mut pipeline = ClassificationPipeline::new(user_rules, default_rules);
+        pipeline.set_learned_rules(vec![rule(
+            MatchRule {
+                exe: Some("test.exe".into()),
+                ..Default::default()
+            },
+            WindowAction::Float,
+        )]);
+
+        let c = candidate("test.exe", "", "", "");
+        assert_eq!(
+            pipeline.classify(&c),
+            WindowAction::Float,
+            "learned rule should classify test.exe as Float"
+        );
+    }
+
+    /// Priority: user rules beat learned rules for the same candidate.
+    #[test]
+    fn set_learned_rules_user_rules_still_win() {
+        let user_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![rule(
+                MatchRule {
+                    exe: Some("test.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Tile,
+            )],
+        };
+        let default_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![],
+        };
+
+        let mut pipeline = ClassificationPipeline::new(user_rules, default_rules);
+        pipeline.set_learned_rules(vec![rule(
+            MatchRule {
+                exe: Some("test.exe".into()),
+                ..Default::default()
+            },
+            WindowAction::Float,
+        )]);
+
+        let c = candidate("test.exe", "", "", "");
+        assert_eq!(
+            pipeline.classify(&c),
+            WindowAction::Tile,
+            "user rules should take priority over learned rules"
+        );
+    }
+
+    /// Priority: learned rules beat default rules for the same candidate.
+    #[test]
+    fn set_learned_rules_beats_default_rules() {
+        let user_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![],
+        };
+        let default_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![rule(
+                MatchRule {
+                    exe: Some("test.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Ignore,
+            )],
+        };
+
+        let mut pipeline = ClassificationPipeline::new(user_rules, default_rules);
+        pipeline.set_learned_rules(vec![rule(
+            MatchRule {
+                exe: Some("test.exe".into()),
+                ..Default::default()
+            },
+            WindowAction::Float,
+        )]);
+
+        let c = candidate("test.exe", "", "", "");
+        assert_eq!(
+            pipeline.classify(&c),
+            WindowAction::Float,
+            "learned rules should take priority over default rules"
+        );
+    }
+
+    /// Replacement: calling `set_learned_rules` twice fully replaces, not appends.
+    #[test]
+    fn set_learned_rules_replaces_previous() {
+        let user_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![],
+        };
+        let default_rules = WindowRulesConfig {
+            default_action: WindowAction::Ignore,
+            rules: vec![],
+        };
+
+        let mut pipeline = ClassificationPipeline::new(user_rules, default_rules);
+
+        // First call: Float
+        pipeline.set_learned_rules(vec![rule(
+            MatchRule {
+                exe: Some("test.exe".into()),
+                ..Default::default()
+            },
+            WindowAction::Float,
+        )]);
+        let c = candidate("test.exe", "", "", "");
+        assert_eq!(pipeline.classify(&c), WindowAction::Float);
+
+        // Second call: Tile (same exe, different action)
+        pipeline.set_learned_rules(vec![rule(
+            MatchRule {
+                exe: Some("test.exe".into()),
+                ..Default::default()
+            },
+            WindowAction::Tile,
+        )]);
+        assert_eq!(
+            pipeline.classify(&c),
+            WindowAction::Tile,
+            "second set_learned_rules should fully replace the first"
+        );
     }
 
     /// Regression: verify that the pipeline with both user and default rules

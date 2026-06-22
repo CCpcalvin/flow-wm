@@ -29,6 +29,7 @@
 
 pub mod color;
 pub mod dirs;
+pub mod history;
 pub mod lifecycle;
 pub mod schema;
 pub mod types;

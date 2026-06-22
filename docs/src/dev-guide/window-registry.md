@@ -112,11 +112,19 @@ stateDiagram-v2
     Removed --> [*]
 ```
 
-Three things are not yet implemented: transitions between `Tiling`,
-`Floating`, and `Ignored` via user commands (toggle float, maximize while tiled),
-and the reverse direction from `Ignored(Maximized)` back to tiling (a tiled window
-becoming maximized). Only the recovery direction works: an `Ignored(Maximized)`
-window restored by the user is re-classified via `STATECHANGE`.
+User-driven tile ↔ float transitions **are** implemented via
+`stm dispatch setwindow float|tile|cycle` — see [Floating Space](./floating-space.md)
+for the full transition table and animation. Two directions remain unimplemented:
+
+- **Tiling → `Ignored(Maximized)`** — a tiled window the user then maximizes is
+  not yet reclassified out of the layout. The state diagram above has no
+  `TilingActive → IgnoredMaximized` edge.
+- **`Ignored(Maximized)` → tiling via a user command** — only the OS-driven
+  *recovery* direction works: an `Ignored(Maximized)` window restored by the
+  user is re-classified into the layout via `STATECHANGE` (see
+  [Event Pipelines](./event-pipelines.md)).
+
+`Ignored(Fullscreen)` follows the same recovery rule.
 
 ## The Classification Algorithm — Deep Dive
 
@@ -193,7 +201,7 @@ flowchart TB
 
     subgraph PIPE["Multi-layer rule pipeline"]
         UR["User rules<br/>(from stm-rules.toml)<br/>first match wins"]
-        LR["Learned rules<br/>(future: empty)<br/>first match wins"]
+        LR["Learned rules<br/>(history-stm-rules.toml)<br/>first match wins"]
         DR["Default rules<br/>(embedded at compile time)<br/>first match wins"]
         FALL["Default action<br/>(fallback)"]
         UR -- no match --> LR

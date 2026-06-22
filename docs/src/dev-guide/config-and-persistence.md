@@ -136,7 +136,7 @@ The primary sizing mode uses `columns_per_screen`: the daemon computes the actua
 
 ## Window Classification Rules
 
-Rules are defined in `stm-rules.toml` and evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, `default_action` (default: `tile`) is used. See [window registry](window-registry.md) for how rules feed the classification pipeline.
+Rules are defined in `stm-rules.toml` and evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, `default_action` (default: `float`) is used. See [window registry](window-registry.md) for how rules feed the classification pipeline, and [classification & learned rules](classification.md) for the whitelist model and the machine-written `history-stm-rules.toml`.
 
 ### Match Criteria
 

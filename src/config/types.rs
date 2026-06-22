@@ -127,7 +127,7 @@ pub struct StmConfig {
 }
 
 fn default_window_action() -> WindowAction {
-    WindowAction::Tile
+    WindowAction::Float
 }
 
 impl Default for StmConfig {
@@ -387,12 +387,12 @@ pub enum WindowAction {
 ///
 /// Loaded from `%USERPROFILE%\.config\stm\stm-rules.toml` (see [`config::dirs`](crate::config::dirs)
 /// for overrides). If the file doesn't exist,
-/// defaults to an empty rule list with `default_action: tile`.
+/// defaults to an empty rule list with `default_action: float`.
 ///
 /// # Example
 ///
 /// ```toml
-/// default_action = "tile"
+/// default_action = "float"
 ///
 /// [[rules]]
 /// match = { exe = "explorer.exe", title_contains = "Open" }
@@ -414,7 +414,7 @@ pub struct WindowRulesConfig {
 }
 
 impl Default for WindowRulesConfig {
-    /// Returns a default config with `tile` as the default action and no rules.
+    /// Returns a default config with `float` as the default action and no rules.
     fn default() -> Self {
         Self {
             default_action: default_window_action(),
@@ -968,7 +968,7 @@ strategy = "original_slot"
         let config = WindowRulesConfig::default();
         let toml_str = toml::to_string(&config).expect("serialize");
         let parsed: WindowRulesConfig = toml::from_str(&toml_str).expect("deserialize");
-        assert_eq!(parsed.default_action, WindowAction::Tile);
+        assert_eq!(parsed.default_action, WindowAction::Float);
         assert!(parsed.rules.is_empty());
     }
 
@@ -996,9 +996,9 @@ initial_width_px = 960
     /// Positive: TOML with only `default_action` parses correctly (rules defaults to empty).
     #[test]
     fn window_rules_config_minimal_toml() {
-        let toml_str = "default_action = \"tile\"\n";
+        let toml_str = "default_action = \"float\"\n";
         let config: WindowRulesConfig = toml::from_str(toml_str).expect("parse");
-        assert_eq!(config.default_action, WindowAction::Tile);
+        assert_eq!(config.default_action, WindowAction::Float);
         assert!(config.rules.is_empty());
     }
 

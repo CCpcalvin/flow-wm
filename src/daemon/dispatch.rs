@@ -8,6 +8,8 @@
 //! - Helper functions for unimplemented commands.
 
 use crate::common::{Direction, Size, WindowId};
+use crate::config::dirs::history_rules_path_in;
+use crate::config::types::WindowAction;
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
 use crate::layout::projection;
 use crate::layout::types::ActualLayout;
@@ -455,10 +457,12 @@ impl ScrollTilingManager {
     /// The caller MUST (a) validate that `target_id` exists on the active
     /// monitor before calling, and (b) capture `prev_active_id` before the
     /// active index changes. This method does **not** re-validate — it trusts
-    /// the caller. It also does **not** sync the registry: a workspace switch
-    /// changes only y-offsets, not workspace-local positions, so the
-    /// registry's tiled rects stay valid. (A window *move* caller syncs the
-    /// registry for both workspaces before calling this.)
+    /// the caller. It syncs the registry's **focus** (OS foreground + the
+    /// `focused` field) to the new active workspace's `last_focused_window`,
+    /// but does not touch tiled rects: a switch changes only y-offsets, not
+    /// workspace-local positions, so the registry's tiled rects stay valid.
+    /// (A window *move* caller syncs the registry's tiled rects for both
+    /// workspaces before calling this.)
     ///
     /// # Returns
     ///
@@ -487,6 +491,22 @@ impl ScrollTilingManager {
             .is_none()
         {
             return false;
+        }
+
+        // Auto-focus: each workspace remembers its own tiled focus cursor
+        // (`last_focused_window`), so a switch must re-establish OS focus on
+        // the window the user was last interacting with in the now-active
+        // workspace. Without this the registry's `focused` could keep pointing
+        // at a window in the (now parked) previous workspace — e.g. when the
+        // pre-switch foreground was a floating window. Mirrors `dispatch_focus`.
+        if let Some(target) = self.active_scrolling().last_focused_window() {
+            let target_hwnd = target.0;
+            if !registry_win32::set_foreground_window(target_hwnd) {
+                log::warn!(
+                    "switch_active_workspace: SetForegroundWindow failed for hwnd {target_hwnd}"
+                );
+            }
+            self.registry.set_focused(target_hwnd);
         }
 
         // The float-tracking set must hold only the NEW active workspace's
@@ -726,6 +746,10 @@ impl ScrollTilingManager {
     /// - **Cycle**: toggles based on current state (tile→float, float→tile).
     /// - Already in the desired state → no-op `Ok`.
     ///
+    /// On a successful non-no-op transition, also records the decision to
+    /// `history-stm-rules.toml` so the next window of the same app is
+    /// classified automatically. See (`docs/src/dev-guide/classification.md`).
+    ///
     /// # Animation
     ///
     /// Both directions submit a single coordinated batch to
@@ -770,6 +794,13 @@ impl ScrollTilingManager {
             WindowState::Floating(FloatingState::Active { .. })
         );
 
+        // Capture the window's identity for history recording before the
+        // immutable borrow of `self.registry` (via `win`) ends — the
+        // transition and recording calls below need `&mut self`. Cloning two
+        // short strings is negligible. See (`docs/src/dev-guide/classification.md`).
+        let exe = win.exe.clone();
+        let class = win.class.clone();
+
         // 3. Resolve the effective action via the pure decision helper. This is
         //    the only non-trivial branching in the handler — extracting it
         //    makes the full mode × state table unit-testable without
@@ -788,11 +819,40 @@ impl ScrollTilingManager {
 
         // 4. Execute the transition (NoOp short-circuits to Ok without
         //    touching the layout engine or the animator).
-        match action {
+        let response = match action {
             SetWindowAction::NoOp => SocketResponse::Ok,
             SetWindowAction::MakeFloating => self.set_window_to_float(focused),
             SetWindowAction::MakeTiling => self.set_window_to_tile(focused),
+        };
+
+        // 5. Record the user's explicit decision so the next window of the
+        //    same app is auto-classified. See `record_learned_transition` for
+        //    the idempotent save + pipeline-refresh logic.
+        if matches!(response, SocketResponse::Ok) {
+            self.record_learned_transition(action, &exe, &class);
         }
+
+        response
+    }
+
+    /// Persist a `setwindow` transition to `history-stm-rules.toml`.
+    ///
+    /// `NoOp` transitions are ignored (no user intent to record). The store is
+    /// saved only when `record` reports a change, so repeated identical
+    /// commands are a no-op on disk. After a save the classification pipeline
+    /// is refreshed so the next window of the same app auto-classifies.
+    fn record_learned_transition(&mut self, action: SetWindowAction, exe: &str, class: &str) {
+        let Some(learned) = action_to_learned(action) else {
+            return;
+        };
+        if !self.history.record(learned, exe, Some(class)) {
+            return;
+        }
+        if let Err(e) = self.history.save(&history_rules_path_in(&self.config_dir)) {
+            log::warn!("failed to persist history-stm-rules.toml: {e}");
+        }
+        self.registry
+            .set_learned_rules(self.history.rules().to_vec());
     }
 
     /// Transition a window from tiling to floating.
@@ -972,6 +1032,22 @@ const fn resolve_set_window_action(
     }
 }
 
+/// Map a resolved transition to the learned-rule action it should produce.
+///
+/// Returns `None` for [`SetWindowAction::NoOp`] — a no-op transition carries
+/// no user intent (the window was already in the requested mode) and must not
+/// be recorded. Extracted as a pure `const fn` so the mapping is unit-testable
+/// without constructing the daemon (same rationale as `resolve_set_window_action`).
+///
+/// See (`docs/src/dev-guide/classification.md`) for the history model.
+const fn action_to_learned(action: SetWindowAction) -> Option<WindowAction> {
+    match action {
+        SetWindowAction::MakeFloating => Some(WindowAction::Float),
+        SetWindowAction::MakeTiling => Some(WindowAction::Tile),
+        SetWindowAction::NoOp => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,5 +1143,35 @@ mod tests {
                 "ignored window must always be Err for {mode:?}"
             );
         }
+    }
+
+    // ── action_to_learned: transition → recorded action ────────────────
+    //
+    // These tests pin the mapping used by `dispatch_set_window` to decide
+    // whether a transition should be persisted to `history-stm-rules.toml`.
+    // Like the resolve tests above, they run with NO daemon and NO Win32.
+
+    #[test]
+    fn action_to_learned_make_floating_maps_to_float() {
+        assert_eq!(
+            action_to_learned(SetWindowAction::MakeFloating),
+            Some(WindowAction::Float)
+        );
+    }
+
+    #[test]
+    fn action_to_learned_make_tiling_maps_to_tile() {
+        assert_eq!(
+            action_to_learned(SetWindowAction::MakeTiling),
+            Some(WindowAction::Tile)
+        );
+    }
+
+    #[test]
+    fn action_to_learned_noop_maps_to_none() {
+        // NoOp carries no user intent (window was already in the requested
+        // mode) and must not be recorded — otherwise every idempotent
+        // `setwindow` call would write to disk.
+        assert_eq!(action_to_learned(SetWindowAction::NoOp), None);
     }
 }
