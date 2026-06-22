@@ -457,10 +457,12 @@ impl ScrollTilingManager {
     /// The caller MUST (a) validate that `target_id` exists on the active
     /// monitor before calling, and (b) capture `prev_active_id` before the
     /// active index changes. This method does **not** re-validate — it trusts
-    /// the caller. It also does **not** sync the registry: a workspace switch
-    /// changes only y-offsets, not workspace-local positions, so the
-    /// registry's tiled rects stay valid. (A window *move* caller syncs the
-    /// registry for both workspaces before calling this.)
+    /// the caller. It syncs the registry's **focus** (OS foreground + the
+    /// `focused` field) to the new active workspace's `last_focused_window`,
+    /// but does not touch tiled rects: a switch changes only y-offsets, not
+    /// workspace-local positions, so the registry's tiled rects stay valid.
+    /// (A window *move* caller syncs the registry's tiled rects for both
+    /// workspaces before calling this.)
     ///
     /// # Returns
     ///
@@ -489,6 +491,22 @@ impl ScrollTilingManager {
             .is_none()
         {
             return false;
+        }
+
+        // Auto-focus: each workspace remembers its own tiled focus cursor
+        // (`last_focused_window`), so a switch must re-establish OS focus on
+        // the window the user was last interacting with in the now-active
+        // workspace. Without this the registry's `focused` could keep pointing
+        // at a window in the (now parked) previous workspace — e.g. when the
+        // pre-switch foreground was a floating window. Mirrors `dispatch_focus`.
+        if let Some(target) = self.active_scrolling().last_focused_window() {
+            let target_hwnd = target.0;
+            if !registry_win32::set_foreground_window(target_hwnd) {
+                log::warn!(
+                    "switch_active_workspace: SetForegroundWindow failed for hwnd {target_hwnd}"
+                );
+            }
+            self.registry.set_focused(target_hwnd);
         }
 
         // The float-tracking set must hold only the NEW active workspace's
