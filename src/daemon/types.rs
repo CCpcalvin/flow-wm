@@ -212,10 +212,9 @@ impl ScrollTilingManager {
     /// active monitor.
     ///
     /// This is the workspace every IPC command and hook event operates on
-    /// today. Once workspace-switching is implemented, commands will be able
-    /// to target other workspaces explicitly.
+    /// by default. Workspace-switching commands (`switchworkspace`,
+    /// `movetoworkspace`) reassign the active index before animating.
     #[must_use]
-    #[allow(dead_code)] // API surface for the upcoming workspace-switch commands.
     pub(super) fn active_workspace(&self) -> &Workspace {
         self.active_monitor().active_workspace()
     }

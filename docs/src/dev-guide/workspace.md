@@ -47,12 +47,23 @@ for the implementation.
 
 ## Current Skeleton Invariant
 
-At this stage the daemon creates exactly one monitor and one workspace (id 1)
-at startup. Multi-monitor and multi-workspace support are future work. The
-monitor's `work_area` is read once from Win32 (`GetMonitorInfoW`) and passed
-down to both `Monitor` and `ScrollingSpace` (the latter stores it inside a
-`MonitorInfo` struct for the projection pipeline). The duplication is benign
-with a single monitor and will be rationalised when multi-monitor lands.
+At this stage the daemon creates exactly **one monitor** (the primary
+display) carrying a fixed stack of **ten workspaces** (id `1..=10`,
+1-indexed, default active = workspace 1). Multi-monitor support is future
+work. Workspace 1 inherits the scrolling space built from the windows that
+were already open at startup; workspaces 2..=10 start empty. All ten
+workspaces share the same layout parameters so columns size consistently
+when the user switches between them or moves windows across. The count is
+hard-coded in [`src/daemon/new.rs`](../../src/daemon/new.rs)
+(`WORKSPACE_COUNT = 10`) rather than read from config.
+
+The monitor carries two rectangles: the full physical `screen_rect`
+(taskbar included, used for parking non-active workspaces off-screen) and
+the taskbar-excluded `work_area` (used for in-workspace tiling). The
+`work_area` is also copied into each workspace's `ScrollingSpace`
+(inside its `MonitorInfo`) for the projection pipeline. The duplication is
+benign with a single monitor and will be rationalised when multi-monitor
+lands.
 
 ## Two Coordinate Spaces
 
@@ -77,24 +88,49 @@ level. When the daemon submits an animation batch, each workspace's scrolling
 layout and floating layout are **merged** into a single `ActualLayout` so that
 both tiles and floats ride together in the same `animate_workspaces` call.
 
-## Future Direction: Vertical Scrolling Between Workspaces
+## Vertical Scrolling Between Workspaces
 
 The horizontal scrolling inside a `ScrollingSpace` (left/right across columns)
-has a planned vertical analogue. Workspaces will be stacked "above" and "below"
-the active one, the same packing idea used horizontally between columns but
-applied vertically between workspaces. Switching workspaces will animate the
+has a vertical analogue. Workspaces are stacked "above" and "below" the
+active one — the same packing idea used horizontally between columns but
+applied vertically between workspaces. Switching workspaces animates the
 whole stack vertically.
 
-Three IPC commands are already wired as stubs for this:
+Three IPC commands implement this surface:
 
 - `stm dispatch switchworkspace <id>` — switch the active workspace.
-- `stm dispatch swapworkspace <id>` — swap the active workspace with another.
+  **Implemented.** Animates a vertical-packing switch: the source and
+  destination workspaces slide between their parked y-offsets in a single
+  coordinated animation batch.
 - `stm dispatch movetoworkspace <id>` — move the focused window to another
-  workspace.
+  workspace. **Implemented.** Mutates both the source and destination
+  layouts, then switches the camera to the destination so the moved window
+  is brought into view.
+- `stm dispatch swapworkspace <id>` — swap the active workspace with another.
+  **Stub.** Its protocol shape is locked in, but its animation model (two
+  workspaces exchanging positions in the packed stack) is not yet decided,
+  so it currently returns `unimplemented_command`.
 
-The animation design for workspace transitions is not yet finalised. Until it
-is, the stubs return success without moving anything. See [roadmap](./roadmap.md)
-for the timeline.
+### Switch animation: animate / teleport / skip
+
+Every non-empty workspace on the active monitor is classified into exactly
+one of three buckets during a switch:
+
+| Bucket | Workspaces | Action |
+|--------|------------|--------|
+| **Animate** | source (previously active) + destination | submitted to `animate_workspaces` as a single coordinated batch |
+| **Teleport** | bystanders whose parked side changed (e.g. ws 3-7 when switching 2 → 8) | submitted to `teleport_workspaces` — instant `SetWindowPos`, no animator |
+| **Untouched** | bystanders whose parked side stayed the same | skipped entirely |
+
+Parked workspaces sit one full physical monitor height (plus one
+`window_gap`) above or below the active workspace — the full height keeps
+them completely off-screen past the taskbar strip. Teleport runs before
+animate so the bystander "backdrop" snaps into place before the participant
+transition begins. Floating windows merge with tiles per workspace and ride
+along in the same batch. See `switch_active_workspace` in
+[`src/daemon/dispatch.rs`](../../src/daemon/dispatch.rs) for the full
+algorithm, and [roadmap](./roadmap.md) for the remaining `SwapWorkspace`
+work.
 
 ## What Lives Here vs. What Doesn't
 

@@ -8,7 +8,7 @@
 //! | Lifecycle | `start`, `stop` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
 //! | Query | `query all` |
-//! | Dispatch | `dispatch focus\|swapcolumn\|movewindow\|expandcolumn\|shrinkcolumn\|closewindow`, plus stub `switchworkspace` / `swapworkspace` / `movetoworkspace` |
+//! | Dispatch | `dispatch focus\|swapcolumn\|movewindow\|expandcolumn\|shrinkcolumn\|closewindow\|switchworkspace\|movetoworkspace`, plus stub `swapworkspace` |
 //!
 //! See the developer guide's *IPC & Watchdog* chapter
 //! (`docs/src/dev-guide/ipc-and-watchdog.md`) for the full command reference.
@@ -210,9 +210,9 @@ enum DispatchCommands {
     /// Switch the active workspace.
     ///
     /// Maps to [`SocketMessage::SwitchWorkspace`]. Sends
-    /// `stm dispatch switchworkspace <id>` to the daemon, which will
-    /// (eventually) slide the requested workspace into the viewport and
-    /// freeze the previously active one above or below it.
+    /// `stm dispatch switchworkspace <id>` to the daemon, which slides the
+    /// requested workspace into the viewport and parks the previously active
+    /// one above or below it in a single coordinated animation.
     #[command(name = "switchworkspace")]
     SwitchWorkspace {
         /// Identifier of the workspace to switch to (niri-style `u32`).

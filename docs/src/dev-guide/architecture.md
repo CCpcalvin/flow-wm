@@ -35,7 +35,7 @@ flowchart TB
         Monitors["Vec&lt;Monitor&gt;<br/>(src/workspace)"]
         Animator["WindowAnimator<br/>(src/animation)"]
         Config["AppConfig<br/>(src/config)"]
-        Persist["Persist<br/>(src/persist)"]
+        History["HistoryStore<br/>(src/config/history.rs)"]
     end
 
     subgraph shared_lib["shared library (src/lib.rs)"]
@@ -44,18 +44,19 @@ flowchart TB
 
     subgraph external["external binaries"]
         CLI["stm CLI"]
-        Watchdog["stm-watchdog"]
+        Watchdog["stm-watchdog (stub)"]
     end
 
     Hook -- "mpsc channel" --> IPC
     IPC --> Registry
     IPC --> Monitors
+    IPC -- "learned rules" --> History
     Hook --> Registry
     Registry -- "WindowId" --> Monitors
     Monitors --> Animator
     Monitors -. "uses" .-> Layout
     CLI -. "named pipe" .-> IPC
-    Watchdog -. "reads" .-> Persist
+    Watchdog -. "planned: recovery snapshot" .-> History
 ```
 
 ### Subsystem Roles
@@ -78,6 +79,13 @@ flowchart TB
   See [Animation](./animation.md).
 - **Config** (`src/config`) — loads `stm.toml`, applies defaults, derives layout
   parameters. See [Config & Persistence](./config-and-persistence.md).
+- **HistoryStore** (`src/config/history.rs`) — persists the user's explicit
+  `setwindow` decisions (learned rules) to `history-stm-rules.toml` so the next
+  window of the same app is classified automatically. Owned as the `history`
+  field on `ScrollTilingManager`. See
+  [Classification & Learned Rules](./classification.md). (There is no separate
+  `persist` module; the recovery-snapshot persistence used by the planned
+  `stm-watchdog` is not yet implemented.)
 
 ## Ownership Model
 

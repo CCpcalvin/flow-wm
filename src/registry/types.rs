@@ -247,9 +247,12 @@ impl Window {
 /// | `Floating(Active)` | `EVENT_OBJECT_HIDE` | `Floating(Hidden)` |
 /// | `Floating(Hidden)` | `EVENT_OBJECT_SHOW` | `Floating(Active)` with `pre_manage_rect` |
 ///
-/// Note: transitions between `Tiling`, `Floating`, and `Ignored` (e.g., toggle
-/// float, maximize while tiled) are not yet implemented — they will be added
-/// when the layout engine integration is complete.
+/// Note: tile ↔ float transitions are implemented via `stm dispatch setwindow`
+/// (see `docs/src/dev-guide/floating-space.md`). The remaining unimplemented
+/// directions are user-driven tiling ↔ `Ignored(Maximized|Fullscreen)` (e.g.,
+/// maximizing a tiled window); only the OS-driven recovery direction works —
+/// a restored `Ignored(Maximized)` window is re-classified into the layout via
+/// `EVENT_OBJECT_STATECHANGE`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowState {
     /// Window is participating in the tiling layout.

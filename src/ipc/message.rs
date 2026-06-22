@@ -214,8 +214,8 @@ pub enum SocketMessage {
     /// The variant is named `MoveWindowToWorkspace` (rather than the shorter
     /// `MoveToWorkspace`) to mirror the sibling [`MoveWindow`](Self::MoveWindow)
     /// message: both operate on the focused *window*, and the longer name
-    /// disambiguates from future workspace-level moves. The CLI surface
-    /// keeps the shorter `movetoworkspace` for brevity.
+    /// makes the operand explicit. The CLI surface keeps the shorter
+    /// `movetoworkspace` for brevity.
     MoveWindowToWorkspace {
         /// Destination workspace identifier.
         workspace_id: u32,
