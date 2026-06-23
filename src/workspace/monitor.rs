@@ -28,9 +28,9 @@ use crate::common::{Rect, WindowId};
 ///
 /// Each [`Workspace`]'s [`ScrollingSpace`] *also* carries a copy of the work
 /// area (inside its `MonitorInfo`) for projection — the two are kept in sync
-/// by the daemon at construction time. For this skeleton there is exactly
-/// one monitor, so the duplication is benign; multi-monitor support lands
-/// later.
+/// by the daemon at construction time. The daemon today creates exactly one
+/// monitor, so the duplication is benign; multi-monitor support is future
+/// work.
 pub struct Monitor {
     /// Full physical screen geometry for this display, in screen
     /// coordinates. Taskbar and appbars are NOT excluded. Source of truth

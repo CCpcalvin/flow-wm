@@ -7,7 +7,7 @@
 //! # Where this lives
 //!
 //! A [`ScrollingSpace`] is the tiling half of a [`Workspace`](super::Workspace)
-//! (the other half being a [`FloatingSpace`](super::FloatingSpace) stub). Many
+//! (the other half being a [`FloatingSpace`](super::FloatingSpace)). Many
 //! workspaces can share a single monitor, but only the active one is visible;
 //! the rest are packed "above" and "below" — the same packing idea the scrolling
 //! space uses horizontally between columns, now applied vertically between

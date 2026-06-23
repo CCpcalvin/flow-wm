@@ -4,16 +4,15 @@
 //! module. Models a niri-style virtual desktop stack: a [`Monitor`] owns one or
 //! more [`Workspace`]s, and a workspace owns exactly one [`ScrollingSpace`] (tiled
 //! windows on an infinite horizontal canvas) plus one [`FloatingSpace`] (non-tiled
-//! windows — currently a stub).
+//! windows in literal pixel coordinates).
 //!
 //! # Vertical scrolling between workspaces
 //!
 //! The horizontal scrolling inside a [`ScrollingSpace`] (left/right across columns)
-//! will eventually have a vertical analogue: workspaces stacked "above" and "below"
-//! the active one, switched the same way columns scroll. **The animation design is
-//! not yet finalised**, so the workspace-switch IPC commands (`switchworkspace`,
-//! `swapworkspace`, `movetoworkspace`) are wired up as stubs — see the daemon
-//! dispatch module.
+//! has a vertical analogue: workspaces stacked "above" and "below" the active one,
+//! switched the same way columns scroll. `switchworkspace` and `movetoworkspace`
+//! animate a vertical-packing switch (see the daemon dispatch module); only
+//! `swapworkspace` remains a stub pending its own animation model.
 //!
 //! # What lives here vs. what doesn't
 //!
@@ -81,7 +80,7 @@ pub struct WorkspaceId(pub u32);
 /// - [`ScrollingSpace`] runs windows through the virtual → actual projection
 ///   pipeline (an infinite horizontal canvas clipped to the work area).
 /// - [`FloatingSpace`] keeps each window at the literal on-screen rectangle
-///   the user dragged it to. It is currently a stub.
+///   the user dragged it to (or a centered default when first floated).
 ///
 /// Because the two spaces never interact at the layout level, splitting them
 /// keeps the tiling math pure and leaves room for floating-window logic to
@@ -93,14 +92,14 @@ pub struct Workspace {
     pub id: WorkspaceId,
     /// The tiled windows on this workspace, laid out on the scrolling canvas.
     pub scrolling: ScrollingSpace,
-    /// The floating (non-tiled) windows on this workspace. Currently a stub.
+    /// The floating (non-tiled) windows on this workspace (literal pixel rects).
     pub floating: FloatingSpace,
 }
 
 impl Workspace {
     /// Create a new workspace with the given id and scrolling space.
     ///
-    /// The floating space starts empty (a fresh [`FloatingSpace`] stub). Use
+    /// The floating space starts empty. Use
     /// this at startup to wrap the [`ScrollingSpace`] built for the initial
     /// monitor.
     ///

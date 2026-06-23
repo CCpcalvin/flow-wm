@@ -1,191 +1,222 @@
 # Roadmap and Future Work
 
-Where stm is headed: near-term polish and workspace operations, mid-term multi-monitor
-and floating support, and the features deliberately deferred or removed.
+Where `stm` is headed. The core tiling engine, the scrolling canvas, the
+floating space, and niri-style workspace switching are all implemented and
+exercised end-to-end. What remains is polish, the long tail of IPC commands,
+multi-monitor support, and the aspirational input-driven features.
 
 ## Timeline Overview
 
 ```mermaid
 timeline
     title stm Roadmap
-    Near-term : Window lifecycle pipelines (create, remove, minimize, restore)
-    Near-term : Focus / swap-column / expand-shrink dispatch
-    Near-term : Initialization camera improvement
-    Near-term : Bug fixes (cloaked/hidden windows, legacy HWNDs)
-    Mid-term : Workspace switching (niri-style vertical scroll)
-    Mid-term : FloatingSpace implementation
+    Polish : SwapWorkspace animation
+    Polish : Remaining IPC (PlaceAbove, Promote, QueryState, config reload, ForgetApp)
+    Polish : Watchdog + recovery-snapshot persistence
+    Polish : Floating enhancements (smart placement, z-order, size memory)
+    Polish : MoveWindow up/down + floating nudge
     Mid-term : Multi-monitor support
     Mid-term : Performance (cloaking off-screen windows)
     Aspirational : InputInterceptor / DragSession / ResizeSession
     Aspirational : Super+LMB mouse gestures
 ```
 
-## Near-term: Completing the Core Pipelines
+## Implemented Baseline
 
-The daemon skeleton and the `mutate → project → animate` pipeline are in place.
-The remaining work is **wiring** — connecting hook events and IPC dispatch to the
-pure layout operations that already exist in `ScrollingSpace`.
+The `mutate → project → animate` pipeline, the window registry, and the
+Win32 hook thread are all in place and driving real window management:
 
-### Window Lifecycle Pipelines
+- **Window lifecycle**: create, destroy, minimize, restore, show/hide,
+  foreground, plus the `STATECHANGE` (maximize/fullscreen recovery) and
+  `NAMECHANGE` (late-title recovery) hooks. See
+  [Event Pipelines](./event-pipelines.md).
+- **Dispatch surface**: focus, per-window swap, column swap, semantic move,
+  scroll, expand/shrink/set column width, center, monocle toggle, close
+  window. See [IPC & Watchdog](./ipc-and-watchdog.md).
+- **Floating windows**: tile↔float transitions (`setwindow float|tile|cycle`),
+  centered default placement, and merged scroll+float animation batches. See
+  [Floating Space](./floating-space.md).
+- **Workspaces**: ten workspaces per monitor; `switchworkspace` and
+  `movetoworkspace` animate a vertical-packing switch (animate / teleport /
+  skip partitioning). See [Workspace Hierarchy](./workspace.md).
+- **Classification**: DWM-cloak, iconic, Alt-Tab visibility, and owner
+  pre-filters, plus the four-layer user/learned/default/`default_action`
+  rule pipeline. See [Classification & Learned Rules](./classification.md).
+- **Animation**: 31 named easing curves plus arbitrary CSS cubic-bezier,
+  `RetargetFromCurrent` mid-flight retargeting, and a `MockBackend` for
+  tests. See [Animation](./animation.md).
 
-Each of these follows the standard post-mutation pattern:
-`ensure_column_visible → actual_layout → laydiff → animate`.
+## Near-term: Polish and Completeness
 
-| Pipeline | Trigger | Key Logic |
-|---|---|---|
-| Create window | `HookEvent::Created` | Insert right of focused window, shift rightward columns by one `column_shift`, focus the new window |
-| Remove window | `HookEvent::Destroyed` | Shift rightward columns leftward, `next_available_window` to pick focus (prefer left, then right) |
-| Close window | `stm dispatch closewindow` | Equivalent to user clicking close — triggers destroy event |
-| Minimize | `HookEvent::MinimizeStart` | Remove from virtual layout (same as destroy) |
-| Restore | `HookEvent::MinimizeEnd` | Re-insert and animate back |
+The wiring-heavy work is finished. The remaining near-term items close gaps
+in the IPC surface and round out the floating and workspace feature sets.
 
-`stm dispatch movewindow left/right/up/down` translates its meaning based on
-context: on a tiled window, `left/right` maps to `swapcolumn`, `up/down` swaps
-within the same column. On a floating window, it shifts position by a
-user-defined amount.
+### Workspace: SwapWorkspace
 
-### Dispatch and CLI Polish
+`SwapWorkspace` is the only workspace command still routed to
+`unimplemented_command`. `SwitchWorkspace` and `MoveWindowToWorkspace` are
+fully implemented with a vertical-packing animation model; `SwapWorkspace`
+needs its own animation decision because it exchanges two workspaces'
+positions in the packed stack rather than sliding between them. Its protocol
+shape (`SwapWorkspace { workspace_id }`) is already locked in.
 
-The `stm dispatch` subcommand tree needs extension. Commands are nested
-(`stm dispatch focus left`, `stm dispatch swapcolumn right`) with per-subcommand
-help, so the CLI stays discoverable and extensible. See `TODO.md` for the full
-dispatch inventory including `expandcolumn`, `shrinkcolumn`, and `switchworkspace`.
+### Remaining IPC Commands
 
-### Initialization Camera
+Several `SocketMessage` variants are declared and parsed by the CLI but
+return `unimplemented_command` on the daemon side. Their wire formats are
+stable so external tooling and keybindings can target them now:
 
-When the number of tiling windows exceeds `columns_per_screen`, the startup
-camera should fill all visible columns rather than centering the focused window
-with blank columns. If the focused window is near the left edge, the viewport
-should start there; if near the right, it should end there. No blank columns
-should ever appear on screen during initialization.
+| Command | Purpose |
+|---|---|
+| `PlaceAbove` | Raise the focused floating window's z-order (`SetWindowPos` with `HWND_TOPMOST`/restore) |
+| `Promote` | Move the focused window to the master (first) position in its column |
+| `QueryState` | Read-only introspection of daemon/registry state beyond `QueryWindowsAll` |
+| `ReloadConfig` / `CheckConfig` / `SetConfigValue` | Runtime config mutation without a daemon restart |
+| `ForgetApp` / `ForgetAllApps` | Programmatic clearing of learned rules (today this requires hand-editing `history-stm-rules.toml`) |
 
-### Classification Fixes
+See [Classification & Learned Rules](./classification.md) for the learned-rules
+model that `ForgetApp` would expose programmatically.
 
-Several window-classification bugs need attention (see `TODO.md`):
+### Watchdog and Recovery-Snapshot Persistence
 
-- **Cloaked and hidden windows**: Apps like Discord "hide" rather than destroy
-  windows on close. The classification pipeline should check `DwmGetWindowAttribute`
-  (`DWMWA_CLOAKED`), `IsIconic`, and `IsWindowVisible` — the same heuristics
-  `komorebi` uses (tracked in komorebi issue #750).
-- **Legacy HWNDs**: Chrome and VS Code create invisible "Chrome Legacy Window"
-  / `Chrome_RenderWidgetHostHWND` secondary HWNDs. These are already classified
-  by the registry but should be verified.
-- **Windows Terminal**: Does not tile automatically — classification rule gap.
+`stm-watchdog` ([`src/bin/stm-watchdog.rs`](../../src/bin/stm-watchdog.rs))
+is still a stub — it prints `"stm-watchdog: not yet implemented"` and exits.
+The planned design: `stmd` spawns the watchdog with `--parent-pid` and
+`--recovery-path`; the watchdog polls the parent PID and, on exit, reads a
+`stm-recovery.json` snapshot and calls `SetWindowPos` to restore each window
+to its pre-manage geometry. The `Window` struct already carries
+`pre_manage_rect` for this purpose; the atomic write-to-temp-then-rename
+persistence path is what is missing. See
+[IPC & Watchdog](./ipc-and-watchdog.md).
 
-### Known Bugs
+### Floating Window Enhancements
 
-- `action_to_state()` hardcodes `col: 0, row: 0` — layout engine positions are
-  never written back to registry state. A regression test already catches this.
-- JSON round-trip in `visible_rect_json` serializes to JSON then immediately
-  deserializes back. A cleaner path would keep the `Rect` directly from
-  `get_window_rect`.
+The floating space is functional; the open work is quality-of-life. See the
+"Future Work" section of [Floating Space](./floating-space.md) for the full
+list, summarised here:
 
-## Mid-term: Workspace and Multi-Monitor
+- **Smart placement** — cascade or offset new floats so they don't fully
+  overlap.
+- **Per-window float size memory** — remember each window's last floating
+  rect and restore it on subsequent tile→float transitions.
+- **Z-order raising** — `PlaceAbove` to bring the focused float to the top
+  of the z-order (depends on the IPC command above).
+- **Floating gap management** — reserve padding around floats at workspace
+  edges.
 
-### Workspace Switching (niri-style)
+### Semantic Move: Up/Down and Floating Nudge
 
-The workspace hierarchy (`Vec<Monitor>` → `Vec<Workspace>` → `ScrollingSpace` +
-`FloatingSpace`) is already scaffolded. See the [workspace chapter](workspace.md)
-for the current skeleton invariant: exactly **one** monitor, **one** workspace
-(`WorkspaceId(1)`).
+`MoveWindow` currently resolves only the tiled left/right path (delegating
+to `SwapColumn`). Two deferred paths remain:
 
-The planned workspace operations are:
+- **Tiled up/down** — a within-column window swap (delegates to
+  `dispatch_swap_window`).
+- **Floating, any direction** — a pixel nudge by a configurable shift.
 
-- `stm dispatch switchworkspace <id>` — animate vertical slide between workspaces
-- `stm dispatch movetoworkspace <id>` — move focused window to another workspace
-- `stm dispatch swapworkspace <id>` — swap two workspaces' content (rarely offered
-  by other tiling managers)
+The branching structure already lives behind a single delegation point in
+`dispatch_move_window`, so these land without changing the IPC protocol or
+keybindings.
 
-The animation design uses a vertical offset: inactive workspaces above the active
-one sit at `y = -(monitor_height + gap)`, those below at `y = +(monitor_height + gap)`.
-A workspace switch computes `ActualLayout` for both the source and target
-workspaces, applies the offset, and feeds both sets of window targets to the
-animator in a single batch. See `TODO.md` for the full `MoveToWorkspace` animation
-algorithm (which also mutates both virtual layouts before projecting).
-
-### FloatingSpace
-
-Currently an empty stub in [`src/workspace/floating_space.rs`](../../src/workspace/floating_space.rs).
-Floating windows are tracked by the registry but positioned by the OS. Future work
-may add smart placement, stacking order, and `movewindow` support for floating
-windows.
+## Mid-term
 
 ### Multi-Monitor Support
 
-The hierarchy already supports `Vec<Monitor>` with `active_monitor: usize`. The
-current skeleton hard-codes a single monitor derived from `SystemParametersInfoW(
-SPI_GETWORKAREA)`. Expanding to multiple monitors requires replacing that call
-with `MonitorFromPoint` + `GetMonitorInfoW` and per-monitor work areas.
+The workspace hierarchy already models `Vec<Monitor>` with
+`active_monitor: usize`, and every IPC command routes through
+`active_scrolling()` so multi-monitor can land without touching call sites.
+The current constructor hard-codes a single monitor derived from
+`get_primary_monitor_info()` ([`src/daemon/new.rs`](../../src/daemon/new.rs)).
+Expanding to multiple monitors requires iterating `EnumDisplayMonitors` /
+`MonitorFromPoint` + `GetMonitorInfoW`, building a `Monitor` per display,
+and adding `stm dispatch focusmonitor` / `movetoworkspace <id> <monitor>`
+plumbing.
+
+### Performance: Cloaking Off-Screen Windows
+
+Parked (off-screen) tiled windows are kept one column-width beyond the
+nearest viewport edge so they animate smoothly when scrolled into view.
+They are, however, still rendered. A future optimisation can apply
+`DWMWA_CLOAK` (`SetWindowCompositionAttribute`) to parked windows so the
+DWM skips compositing them, reducing GPU work on large canvases. The
+classification pipeline already inspects `DWMWA_CLOAKED`; the write side
+is the new work.
 
 ## Aspirational: Deliberately Deferred
 
-These features are acknowledged as valuable but **not planned** for the current
-development cycle.
+These features are acknowledged as valuable but **not planned** for the
+current development cycle.
 
 ### InputInterceptor, DragSession, ResizeSession
 
-Full mouse-driven tiling where `Super + Left Mouse Button` initiates a drag or
-resize session with layout snapping. This was described in the original spec
-(Phase 5) but has no active implementation work. The Win32 input hooks module
-(`src/input/`) is also unimplemented.
+Full mouse-driven tiling where `Super + Left Mouse Button` initiates a drag
+or resize session with layout snapping. This was described in the original
+spec but has no active implementation work — the `src/input/` module does
+not exist. The daemon's input surface today is the IPC pipe; mouse-driven
+tiling would add an in-process global input hook alongside the existing
+WinEvent hooks.
 
-### Additional Animation Easings
+### Super+LMB Mouse Gestures
 
-Only `ease-out-expo` is supported today. The schema should eventually support
-`ease-in`, `ease-out`, `ease-in-out`, and `linear`, but this is a polish item
-with no timeline.
+Mouse gestures (drag to tile, drag to edge to snap, etc.) build on the
+`DragSession` infrastructure above and share its dependency on an
+unimplemented input hook.
 
 ## Explicitly Removed: Keybindings
 
-Keybinding handling was **intentionally removed** from both the config and the
-codebase. The rationale: external tools like AutoHotkey, PowerToys, or
-Komorebi's keybinding layer are better at translating physical keypresses into
-IPC commands than a re-implemented keyboard hook. stm's role is the layout
-engine and window manager — not the input layer. See [design decisions](design-decisions.md)
-for more on this separation of concerns.
+Keybinding handling was **intentionally removed** from both the config and
+the codebase. The rationale: external tools like AutoHotkey, PowerToys, or
+Komorebi's keybinding layer are better at translating physical keypresses
+into IPC commands than a re-implemented keyboard hook. `stm`'s role is the
+layout engine and window manager — not the input layer. See
+[Design Decisions](./design-decisions.md) for more on this separation of
+concerns.
 
-Users map their preferred hotkeys to `stm dispatch` CLI calls via their chosen
-keybinding tool. This keeps stm's attack surface small and avoids duplicating
-well-tested input infrastructure.
+Users map their preferred hotkeys to `stm dispatch` CLI calls via their
+chosen keybinding tool. This keeps `stm`'s attack surface small and avoids
+duplicating well-tested input infrastructure.
 
 ## Known Win32 Limitations
 
-These are not bugs — they are inherent properties of the Windows rendering model.
+These are not bugs — they are inherent properties of the Windows rendering
+model.
 
 ### SetWindowPos vs DeferWindowPos
 
-stm uses `SetWindowPos` (immediate positioning) rather than `DeferWindowPos`
-(batch positioning). `DeferWindowPos` batches multiple repositions into a single
-repaint, but not all windows are deferrable, and applications own their own
-render. For a tiling manager that needs guaranteed immediate placement,
-`SetWindowPos` is the safer choice. See [`src/win32.rs`](../../src/win32.rs).
+`stm` uses `SetWindowPos` (immediate positioning) rather than
+`DeferWindowPos` (batch positioning). `DeferWindowPos` batches multiple
+repositions into a single repaint, but it is atomic: a single elevated
+admin window (protected by UIPI) fails the entire batch with
+`ERROR_ACCESS_DENIED`. Individual `SetWindowPos` calls mean one failure
+logs a warning but does not block the remaining windows. See
+[Animation](./animation.md) for the per-backend rationale.
 
 ### GetWindowRect Includes Invisible Borders
 
-`GetWindowRect` returns a rect that includes a hidden 7px border on the left,
-right, and bottom edges. This is not the visual rect of the window. stm works
-around this via the `InvisibleBounds` tracking in the registry. See the
-[window registry chapter](window-registry.md) for how invisible bounds are
-measured and how `window_to_visible()` compensates.
+`GetWindowRect` returns a rect that includes a hidden ~7px border on the
+left, right, and bottom edges. This is not the visual rect of the window.
+`stm` works around this via the `InvisibleBounds` tracking in the registry.
+See the [Window Registry](./window-registry.md) chapter for how invisible
+bounds are measured and how `visible_to_window()` compensates.
 
 ### Applications Own Their Render
 
-stm can request a window position via `SetWindowPos`, but the application controls
-its own rendering. Some apps (especially UWP and Electron-based) may not
-immediately respect position changes or may reposition themselves autonomously.
-This is a fundamental constraint of the Windows windowing model.
+`stm` can request a window position via `SetWindowPos`, but the application
+controls its own rendering. Some apps (especially UWP and Electron-based)
+may not immediately respect position changes or may reposition themselves
+autonomously. This is a fundamental constraint of the Windows windowing
+model.
 
 ## Warning System (Planned)
 
 If `komorebi`, `GlazeWM`, or another tiling window manager is detected as
-running, stm should display a warning and ask the user to close the conflicting
-manager before using stm. Coexistence with another WM that also moves windows
-will produce unpredictable results.
+running, `stm` should display a warning and ask the user to close the
+conflicting manager before using `stm`. Coexistence with another WM that
+also moves windows will produce unpredictable results.
 
 ## Window Restoration
 
-When stm exits (gracefully or via crash), tiled windows may be positioned off-
-screen. A standalone `stm restore` CLI command should query all window positions
-and move any off-screen windows to the nearest screen edge using `SetWindowPos`
-(no animation needed). This same function runs automatically on graceful
-shutdown.
+When `stm` exits (gracefully or via crash), tiled windows may be positioned
+off-screen. The planned `stm-watchdog` (see above) handles crash recovery;
+on graceful shutdown the daemon performs the equivalent restore inline —
+querying all window positions and moving any off-screen windows to the
+nearest screen edge using `SetWindowPos` (no animation needed).
