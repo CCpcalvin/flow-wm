@@ -297,21 +297,38 @@ impl ScrollTilingManager {
         }
     }
 
-    /// Handle a focus change event.
-    ///
-    /// Pipeline:
-    /// 1. `registry.set_focused(hwnd)` — updates focused window in registry.
-    /// 2. If the focused window is tiling:
-    ///    - `layout.set_focus(id)` — updates layout focus state.
-    ///
-    /// Note: `set_focus` does not produce an [`AppliedLayout`] — it only updates
-    /// internal focus tracking. The next layout mutation will use the correct
-    /// focus.
+    /// Handle `EVENT_SYSTEM_FOREGROUND` — the single sink for all foreground
+    /// changes, both external (alt-tab, PowerToys, clicks) and self-induced
+    /// (`set_foreground_window` from `dispatch_focus` /
+    /// `switch_active_workspace`). For self-induced changes the method is a
+    /// natural no-op: the focused column is already visible, so
+    /// `ensure_focused_visible` returns `None`.
     pub(super) fn on_focus_changed(&mut self, hwnd: isize) {
         self.registry.set_focused(hwnd);
 
+        let target = WindowId(hwnd);
+
+        // Bail for untracked/ignored windows (taskbar, tray, off-monitor).
+        let Some(home_ws) = self.active_monitor().find_workspace_containing(target) else {
+            return;
+        };
+
+        // If the window lives on a different workspace, switch there. Use the
+        // pure layout variant — the OS already foregrounded hwnd, so re-pushing
+        // would steal focus from a floating window the user alt-tabbed to.
+        let active_id = self.active_monitor().active_workspace_id();
+        if home_ws != active_id {
+            self.switch_workspace_layout(home_ws, active_id);
+        }
+
+        // For tiling windows: update the layout cursor and scroll the camera to
+        // reveal the column. Floating windows only need the workspace switch
+        // above — they float above all columns.
         if self.registry.is_tiling(hwnd) {
-            self.active_scrolling_mut().set_focus(WindowId(hwnd));
+            self.active_scrolling_mut().set_focus(target);
+            if let Some(diff) = self.active_scrolling_mut().ensure_focused_visible() {
+                self.animate_layout(&diff);
+            }
         }
     }
 

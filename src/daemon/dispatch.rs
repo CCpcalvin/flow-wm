@@ -423,10 +423,10 @@ impl ScrollTilingManager {
     /// the active workspace, and only the source (previously active) and
     /// destination (newly active) workspaces animate during a switch.
     ///
-    /// Shared by [`dispatch_switch_workspace`] (a pure switch) and
-    /// [`dispatch_move_window_to_workspace`] (which mutates both layouts
-    /// first, then switches the camera to the destination so the moved
-    /// window is brought into view).
+    /// Called by [`switch_active_workspace`] (the IPC-path wrapper that also
+    /// re-establishes tiling focus) and by `on_focus_changed` (the foreground
+    /// hook, which must not re-push foreground — the OS already chose the
+    /// window).
     ///
     /// # Animation partitioning
     ///
@@ -457,19 +457,19 @@ impl ScrollTilingManager {
     /// The caller MUST (a) validate that `target_id` exists on the active
     /// monitor before calling, and (b) capture `prev_active_id` before the
     /// active index changes. This method does **not** re-validate — it trusts
-    /// the caller. It syncs the registry's **focus** (OS foreground + the
-    /// `focused` field) to the new active workspace's `last_focused_window`,
-    /// but does not touch tiled rects: a switch changes only y-offsets, not
-    /// workspace-local positions, so the registry's tiled rects stay valid.
-    /// (A window *move* caller syncs the registry's tiled rects for both
-    /// workspaces before calling this.)
+    /// the caller. It does **not** touch the OS foreground or the registry's
+    /// `focused` field — that is the caller's responsibility (see
+    /// [`switch_active_workspace`] for the IPC-path wrapper that re-establishes
+    /// tiling focus). Tiled rects are also untouched: a switch changes only
+    /// y-offsets, not workspace-local positions. (A window *move* caller syncs
+    /// the registry's tiled rects for both workspaces before calling this.)
     ///
     /// # Returns
     ///
     /// `false` only if `target_id` could not be set active (impossible after
     /// caller validation — guarded to keep the codebase `.unwrap()`-free per
     /// AGENTS.md).
-    fn switch_active_workspace(
+    pub(super) fn switch_workspace_layout(
         &mut self,
         target_id: WorkspaceId,
         prev_active_id: WorkspaceId,
@@ -491,22 +491,6 @@ impl ScrollTilingManager {
             .is_none()
         {
             return false;
-        }
-
-        // Auto-focus: each workspace remembers its own tiled focus cursor
-        // (`last_focused_window`), so a switch must re-establish OS focus on
-        // the window the user was last interacting with in the now-active
-        // workspace. Without this the registry's `focused` could keep pointing
-        // at a window in the (now parked) previous workspace — e.g. when the
-        // pre-switch foreground was a floating window. Mirrors `dispatch_focus`.
-        if let Some(target) = self.active_scrolling().last_focused_window() {
-            let target_hwnd = target.0;
-            if !registry_win32::set_foreground_window(target_hwnd) {
-                log::warn!(
-                    "switch_active_workspace: SetForegroundWindow failed for hwnd {target_hwnd}"
-                );
-            }
-            self.registry.set_focused(target_hwnd);
         }
 
         // The float-tracking set must hold only the NEW active workspace's
@@ -563,6 +547,39 @@ impl ScrollTilingManager {
         // (single coordinated batch — source and dest transition in lockstep).
         self.teleport_workspaces(&teleport_batches);
         self.animate_workspaces(&animate_batches);
+
+        true
+    }
+
+    /// IPC-path workspace switch: layout/animation plus tiling-focus push.
+    ///
+    /// Wraps [`switch_workspace_layout`] and then re-establishes OS foreground
+    /// on the destination's `last_focused_window`, mirroring [`dispatch_focus`].
+    /// Used by [`dispatch_switch_workspace`] and
+    /// [`dispatch_move_window_to_workspace`]. The foreground hook
+    /// (`on_focus_changed`) calls [`switch_workspace_layout`] directly — it
+    /// must not re-push foreground because the OS already chose the window.
+    fn switch_active_workspace(
+        &mut self,
+        target_id: WorkspaceId,
+        prev_active_id: WorkspaceId,
+    ) -> bool {
+        if !self.switch_workspace_layout(target_id, prev_active_id) {
+            return false;
+        }
+
+        // Re-establish tiling focus on the destination. Without this the
+        // registry's `focused` could keep pointing at a window in the (now
+        // parked) previous workspace. Mirrors `dispatch_focus`.
+        if let Some(target) = self.active_scrolling().last_focused_window() {
+            let target_hwnd = target.0;
+            if !registry_win32::set_foreground_window(target_hwnd) {
+                log::warn!(
+                    "switch_active_workspace: SetForegroundWindow failed for hwnd {target_hwnd}"
+                );
+            }
+            self.registry.set_focused(target_hwnd);
+        }
 
         true
     }
