@@ -55,7 +55,7 @@ use std::collections::HashMap;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GW_OWNER, GetWindow};
 
-use crate::common::Rect;
+use crate::common::{InvisibleBounds, Rect};
 use crate::config::types::{WindowRule, WindowRulesConfig};
 
 use super::classification;
@@ -736,6 +736,32 @@ impl WindowRegistry {
             .collect();
         entries.sort_by_key(|(_, x, _)| *x);
         entries.into_iter().map(|(id, _, w)| (id, w)).collect()
+    }
+
+    /// Returns `(hwnd_key, pre_manage_rect, invisible_bounds)` for every window
+    /// STM is actively positioning — those in a `Tiling(Active)` or
+    /// `Floating(Active)` state.
+    ///
+    /// `Minimized`/`Hidden` windows are excluded: STM does not actively place
+    /// them, so their position is the OS's/user's concern and the rescue pass
+    /// leaves them alone. `Ignored` windows are excluded for the same reason.
+    /// The rescue pass uses `pre_manage_rect` as the on-screen anchor and
+    /// `invisible_bounds` to convert the window rect reported by `GetWindowRect`
+    /// back to the visible-content rect used for the visibility test.
+    ///
+    /// See `docs/src/dev-guide/ipc-and-watchdog.md` for the rescue contract.
+    #[must_use]
+    pub fn restorable_windows(&self) -> Vec<(isize, Rect, InvisibleBounds)> {
+        self.windows
+            .iter()
+            .filter_map(|(key, w)| match &w.state {
+                WindowState::Tiling(TilingState::Active { .. })
+                | WindowState::Floating(FloatingState::Active { .. }) => {
+                    Some((*key, w.pre_manage_rect, w.invisible_bounds))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Synchronize tiling state from the layout engine's virtual layout.
@@ -2709,5 +2735,292 @@ mod tests {
             ReclassifyResult::Recovered { now_tiling: true },
             ReclassifyResult::Recovered { now_tiling: false }
         );
+    }
+
+    // ── restorable_windows tests ───────────────────────────────────────
+
+    /// Collects `restorable_windows()` output into a `hwnd -> Rect` map so the
+    /// tests can look up by hwnd without depending on HashMap iteration order.
+    fn collect_restorable(
+        reg: &WindowRegistry,
+    ) -> std::collections::HashMap<isize, crate::common::Rect> {
+        reg.restorable_windows()
+            .into_iter()
+            .map(|(k, r, _)| (k, r))
+            .collect()
+    }
+
+    #[test]
+    fn restorable_windows_empty_registry() {
+        // Positive: an empty registry yields nothing to restore.
+        let (user, default) = default_rules();
+        let reg = WindowRegistry::new(&user, &default);
+        assert!(reg.restorable_windows().is_empty());
+    }
+
+    #[test]
+    fn restorable_windows_includes_only_active_tiling() {
+        // Only Active tiling windows are positioned by STM, so only they are
+        // rescue candidates. Minimized/Hidden windows are not actively placed
+        // and must be left alone on shutdown.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window_with_rect(
+            &mut reg,
+            101,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            10,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            102,
+            WindowState::Tiling(TilingState::Minimized),
+            20,
+        );
+        insert_test_window_with_rect(&mut reg, 103, WindowState::Tiling(TilingState::Hidden), 30);
+
+        let map = collect_restorable(&reg);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&101));
+        assert!(!map.contains_key(&102), "Minimized must not be restorable");
+        assert!(!map.contains_key(&103), "Hidden must not be restorable");
+    }
+
+    #[test]
+    fn restorable_windows_includes_only_active_floating() {
+        // Only Active floating windows are positioned by STM.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window_with_rect(
+            &mut reg,
+            201,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            }),
+            10,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            202,
+            WindowState::Floating(FloatingState::Minimized),
+            20,
+        );
+        insert_test_window_with_rect(
+            &mut reg,
+            203,
+            WindowState::Floating(FloatingState::Hidden),
+            30,
+        );
+
+        let map = collect_restorable(&reg);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&201));
+        assert!(!map.contains_key(&202), "Minimized must not be restorable");
+        assert!(!map.contains_key(&203), "Hidden must not be restorable");
+    }
+
+    #[test]
+    fn restorable_windows_excludes_all_ignored_variants() {
+        // Negative: every Ignored* variant is excluded — STM never moved them.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            301,
+            WindowState::Ignored(IgnoredReason::Maximized),
+        );
+        insert_test_window(
+            &mut reg,
+            302,
+            WindowState::Ignored(IgnoredReason::Fullscreen),
+        );
+        insert_test_window(
+            &mut reg,
+            303,
+            WindowState::Ignored(IgnoredReason::ExplicitRule),
+        );
+        // One controlled window to ensure the filter is the cause of exclusion,
+        // not just an empty registry.
+        insert_test_window(
+            &mut reg,
+            304,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+
+        let map = collect_restorable(&reg);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&304));
+        assert!(!map.contains_key(&301));
+        assert!(!map.contains_key(&302));
+        assert!(!map.contains_key(&303));
+    }
+
+    #[test]
+    fn restorable_windows_returns_pre_manage_rect_as_anchor() {
+        // Positive: the returned Rect is the window's pre_manage_rect (the
+        // pre-STM anchor), not some other rect field. We insert at a known x
+        // and check it round-trips.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        let anchor_x = 4242;
+        insert_test_window_with_rect(
+            &mut reg,
+            401,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            anchor_x,
+        );
+
+        let map = collect_restorable(&reg);
+        let rect = map
+            .get(&401)
+            .expect("controlled window should be present in restorable set");
+        assert_eq!(rect.x, anchor_x);
+        assert_eq!(rect.y, 0);
+        assert_eq!(rect.width, 100);
+        assert_eq!(rect.height, 100);
+    }
+
+    #[test]
+    fn restorable_windows_returns_pre_manage_rect_not_tiled_rect() {
+        // Positive: when both `pre_manage_rect` and `tiled_rect` are set (the
+        // realistic mid-session case), the rescue anchor MUST be
+        // `pre_manage_rect` — the position the window held *before* STM moved
+        // it. Returning `tiled_rect` instead would defeat the rescue: it would
+        // put the window back at the off-screen tiled position we are trying
+        // to rescue it from. The plain `insert_test_window_with_rect` helper
+        // leaves `tiled_rect = None`, so without this test a regression to
+        // `tiled_rect.unwrap_or(pre_manage_rect)` would pass every other test.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let pre_manage = crate::common::Rect {
+            x: 100,
+            y: 100,
+            width: 800,
+            height: 600,
+        };
+        // A wildly different "current tiled" rect — parked off-screen, where
+        // STM put it (e.g. a non-active workspace).
+        let tiled = crate::common::Rect {
+            x: 5000,
+            y: 5000,
+            width: 400,
+            height: 300,
+        };
+
+        let hwnd_val = 4242isize;
+        let mut window = Window::new(
+            HWND(hwnd_val as *mut _),
+            "anchor.exe".into(),
+            "Anchor".into(),
+            "AnchorClass".into(),
+            std::path::PathBuf::from("C:\\anchor.exe"),
+            pre_manage,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            crate::common::InvisibleBounds::zero(),
+        );
+        window.tiled_rect = Some(tiled);
+        reg.windows.insert(hwnd_val, window);
+
+        let map = collect_restorable(&reg);
+        let returned = map
+            .get(&hwnd_val)
+            .expect("controlled window should be present in restorable set");
+        assert_eq!(
+            *returned, pre_manage,
+            "rescue anchor must be pre_manage_rect, not tiled_rect"
+        );
+        assert_ne!(
+            *returned, tiled,
+            "rescue anchor must NOT be the current (off-screen) tiled rect"
+        );
+    }
+
+    #[test]
+    fn restorable_windows_returns_invisible_bounds() {
+        // Positive: the 3rd tuple element is the window's invisible_bounds, so
+        // the rescue pass can convert the window rect reported by GetWindowRect
+        // back to the visible-content rect for the visibility test. Without it,
+        // a parked window's invisible-border bleed into the work_area would
+        // fool the rescue pass into leaving it stranded.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let bounds = crate::common::InvisibleBounds {
+            left: 7,
+            top: 0,
+            right: 7,
+            bottom: 7,
+        };
+        let hwnd_val = 5001isize;
+        let window = Window::new(
+            HWND(hwnd_val as *mut _),
+            "bounded.exe".into(),
+            "Bounded".into(),
+            "BoundedClass".into(),
+            std::path::PathBuf::from("C:\\bounded.exe"),
+            crate::common::Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+            bounds,
+        );
+        reg.windows.insert(hwnd_val, window);
+
+        let got = reg.restorable_windows();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, hwnd_val);
+        assert_eq!(got[0].2, bounds, "invisible_bounds must round-trip");
+    }
+
+    #[test]
+    fn restorable_windows_mixed_registry_filters_correctly() {
+        // Realistic mix — only Active tile/float windows surface. Minimized,
+        // Hidden, and Ignored windows are all left alone on shutdown.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            1,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        insert_test_window(&mut reg, 2, WindowState::Tiling(TilingState::Minimized));
+        insert_test_window(
+            &mut reg,
+            3,
+            WindowState::Floating(FloatingState::Active {
+                rect: crate::common::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            }),
+        );
+        insert_test_window(&mut reg, 4, WindowState::Floating(FloatingState::Hidden));
+        insert_test_window(&mut reg, 5, WindowState::Ignored(IgnoredReason::Maximized));
+        insert_test_window(
+            &mut reg,
+            6,
+            WindowState::Ignored(IgnoredReason::ExplicitRule),
+        );
+
+        let map = collect_restorable(&reg);
+        // Only hwnds 1 and 3 are Active; the rest are minimized/hidden/ignored.
+        assert_eq!(map.len(), 2);
+        for key in [1, 3] {
+            assert!(map.contains_key(&key), "active hwnd {key} missing");
+        }
+        for key in [2, 4, 5, 6] {
+            assert!(!map.contains_key(&key), "non-active hwnd {key} leaked");
+        }
     }
 }

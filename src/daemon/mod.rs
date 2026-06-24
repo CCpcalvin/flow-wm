@@ -33,6 +33,8 @@
 //! - [`query`] — query handlers (extracted from dispatch)
 //! - [`animation`] — animation bridge ([`ScrollTilingManager::animate_layout`])
 //! - [`config_derive`] — configuration derivation helpers and tests
+//! - [`shutdown`] — graceful-shutdown window rescue
+//!   ([`ScrollTilingManager::rescue_stranded_windows`])
 //!
 //! The threading model, the hook/IPC event pipelines, and per-event behavior
 //! tables are documented with sequence diagrams in the developer guide
@@ -46,6 +48,7 @@ mod hooks;
 mod new;
 mod query;
 mod run;
+mod shutdown;
 mod types;
 
 pub use types::ScrollTilingManager;

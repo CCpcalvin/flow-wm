@@ -190,6 +190,110 @@ it only queues `WM_CLOSE` and lets the `EVENT_OBJECT_DESTROY` hook handle the
 actual layout removal, avoiding a race between the synchronous IPC response
 and the asynchronous window destruction.
 
+## Graceful-Shutdown Window Rescue
+
+`stm stop` sends the `Stop` command, the event loop exits, and then -- before the
+daemon process tears down -- [`ScrollTilingManager::rescue_stranded_windows`]
+runs once. Its job is to bring windows that became **physically inaccessible**
+during this STM session back onto the screen, without disturbing anything the
+user can currently see.
+
+### Why rescue is needed
+
+STM parks non-active workspaces off-screen (one monitor height above or below
+the active one) and scrolls windows horizontally across the infinite tiling
+canvas. If the daemon simply exited, every window on a non-active workspace --
+plus any window scrolled into the off-screen packing region of the active
+workspace -- would be left stranded where STM put it: visible to Win32 (so a
+future STM run would re-classify them as already-tiled) but unreachable to the
+user, who has no way to scroll to a workspace that no longer exists.
+
+### The visibility rule
+
+The rescue pass treats the **operating system as ground truth**, not STM's own
+bookkeeping. For each controlled window it calls `GetWindowRect` to find the
+window's current rect, then asks: does the window's **visible content** overlap
+the active monitor's `work_area`?
+
+- **Yes (visible)** -- the user can see this window right now. Leave it exactly
+  where it is. The user has almost certainly rearranged things by hand since STM
+  started; rewinding their work would be hostile.
+- **No (stranded)** -- the window is off-screen purely because STM moved it.
+  Bring it back.
+
+The visible-content rect is the raw `GetWindowRect` rect with the window's
+invisible borders stripped (`InvisibleBounds::window_to_visible`). This step is
+not cosmetic: `GetWindowRect` includes the ~7px invisible borders Windows 10/11
+draw for drop shadows, while the layout engine parks columns flush against the
+`work_area` edge in **visible** coordinates. Without the conversion, a window
+parked exactly at the edge would bleed a few pixels of invisible border into the
+`work_area` and read as "visible" -- so the rescue pass would leave it stranded
+in the packing region of the active workspace. Stripping the borders recovers
+the true visible rect, which only *touches* the edge and is correctly treated as
+stranded. See `roadmap.md` ("GetWindowRect Includes Invisible Borders") for
+background.
+
+Touching edges do not count as overlapping, matching Win32 `IntersectRect`
+semantics (see `Rect::overlaps`).
+
+```mermaid
+flowchart TD
+    A[For each controlled window] --> B[GetWindowRect]
+    B --> G[Strip invisible borders to visible-content rect]
+    G --> C{Visible content overlaps work_area?}
+    C -- yes: visible --> D[Leave it untouched]
+    C -- no: stranded --> E[Clamp pre_manage_rect into work_area]
+    E --> F[SetWindowPos to clamped anchor]
+```
+
+### The rescue target: `pre_manage_rect`
+
+Each controlled window remembers the rect it had **when STM first noticed it**
+(stored as `pre_manage_rect` at registration time). The rescue moves stranded
+windows back to that anchor, then clamps the anchor into the `work_area` in case
+the anchor itself is off-screen (e.g. the window came from a now-detached
+monitor, or the work area changed because the taskbar moved).
+
+Clamping shrinks-and-shifts rather than discards: a window larger than the work
+area collapses to the work area's size; otherwise the original size is preserved
+and only the position is nudged on-screen.
+
+### Tiles and floats are unified
+
+There is no special-casing between tiling and floating: every window STM is
+actively positioning -- a `Tiling(Active)` or `Floating(Active)` window -- goes
+through the same loop. `Minimized`, `Hidden`, and `Ignored` windows never reach
+it. STM does not actively place minimized/hidden windows, so their position is
+the OS's and the user's responsibility; leaving them alone on shutdown avoids
+surprising the user by moving windows they intentionally hid.
+
+### The "pre-this-run" contract
+
+`pre_manage_rect` is the position the window held **before this STM run**, not
+before the very first STM run in history. Consequences:
+
+- If the previous STM session was killed **uncleanly** (crash, `taskkill /f`,
+  Ctrl-C), windows it had tiled remain at their tiled positions. The next run
+  captures *those* as the new baseline. The desktop self-heals after **one
+  clean** `stm stop`.
+- Minimized/hidden windows are out of scope entirely (see above); float windows
+  lose any in-run drag history (acceptable for v1), restoring to their
+  registration-time anchor.
+
+The unclean-shutdown case -- where the daemon process is gone and cannot run the
+rescue pass -- is exactly what the [`stm-watchdog`](#stm-watchdog-stub) is
+planned for: it will restore from an on-disk snapshot without needing the daemon
+alive.
+
+### Code path
+
+| Step | Location |
+|------|----------|
+| Wired after the event loop exits | [`src/main.rs`](../../src/main.rs) -- `stm.run()` then `stm.rescue_stranded_windows()` |
+| The rescue loop | [`src/daemon/shutdown.rs`](../../src/daemon/shutdown.rs) |
+| Which windows are controlled | `WindowRegistry::restorable_windows` in [`src/registry/core.rs`](../../src/registry/core.rs) |
+| Clamp geometry | `Rect::clamped_into` in [`src/common/types.rs`](../../src/common/types.rs) |
+
 ## `stm-watchdog` (Stub)
 
 [`src/bin/stm-watchdog.rs`](../../src/bin/stm-watchdog.rs) is a planned crash-
