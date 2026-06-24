@@ -21,6 +21,48 @@ use windows::Win32::Foundation::HWND;
 
 use super::types::ScrollTilingManager;
 
+// Built-in fallback policy for a floating window's default size when the user
+// hasn't set `floating.default_width` / `floating.default_height`.
+//
+// Derived from a QHD reference (2560 × 1440) scaled to 60% × 80%, so ultrawide
+// / 4K monitors don't produce absurdly large popups. Every value is a named
+// constant — no magic numbers. Integer ratios (not `f32`) keep the caps
+// `const`-evaluable.
+
+/// Reference resolution bounding the fallback float size (QHD).
+const FALLBACK_REF_WIDTH: i32 = 2560;
+/// Reference resolution bounding the fallback float size (QHD).
+const FALLBACK_REF_HEIGHT: i32 = 1440;
+/// Fallback width = 60% of work-area width (`num / denom`).
+const FALLBACK_WIDTH_RATIO: (i32, i32) = (6, 10);
+/// Fallback height = 80% of work-area height (`num / denom`).
+const FALLBACK_HEIGHT_RATIO: (i32, i32) = (8, 10);
+/// Absolute pixel cap on a fallback float's width: `2560 × 0.6 = 1536`.
+const MAX_FLOAT_WIDTH: i32 = FALLBACK_REF_WIDTH * FALLBACK_WIDTH_RATIO.0 / FALLBACK_WIDTH_RATIO.1;
+/// Absolute pixel cap on a fallback float's height: `1440 × 0.8 = 1152`.
+const MAX_FLOAT_HEIGHT: i32 =
+    FALLBACK_REF_HEIGHT * FALLBACK_HEIGHT_RATIO.0 / FALLBACK_HEIGHT_RATIO.1;
+
+/// Compute the built-in fallback float size for the given work-area dimensions.
+///
+/// Each dimension is computed independently using the ratio + cap policy
+/// documented on `FloatingConfig` in `src/config/types.rs`: width is 60% of
+/// the work-area width capped at [`MAX_FLOAT_WIDTH`], height is 80% capped at
+/// [`MAX_FLOAT_HEIGHT`].
+///
+/// Extracted as a standalone pure fn so the integer arithmetic (ratios, cap
+/// clamping, per-dimension independence) is unit-testable without constructing
+/// a `ScrollTilingManager` (which owns Win32 handles and cannot be built in a
+/// unit test). The caller is still responsible for the per-dimension
+/// `Option::unwrap_or` choice between an explicit user value and the matching
+/// fallback component returned here.
+fn fallback_float_size(work_area: Size) -> Size {
+    Size {
+        w: (work_area.w * FALLBACK_WIDTH_RATIO.0 / FALLBACK_WIDTH_RATIO.1).min(MAX_FLOAT_WIDTH),
+        h: (work_area.h * FALLBACK_HEIGHT_RATIO.0 / FALLBACK_HEIGHT_RATIO.1).min(MAX_FLOAT_HEIGHT),
+    }
+}
+
 impl ScrollTilingManager {
     /// Dispatch a single IPC command and return the response.
     ///
@@ -859,7 +901,7 @@ impl ScrollTilingManager {
     ///
     /// Removes the window from the active [`ScrollingSpace`], computes a
     /// centered float rect (preferring the window's `last_natural_size`,
-    /// falling back to config fractions of the work area), adds it to the
+    /// falling back to the configured or built-in default), adds it to the
     /// active [`FloatingSpace`], and animates both the post-removal scrolling
     /// layout and the updated floating layout in a single batch.
     ///
@@ -883,9 +925,16 @@ impl ScrollTilingManager {
 
         // c) Compute the floating rect.
         let work_area = self.active_scrolling().monitor().work_area;
+        // Each dimension uses the user's explicit pixel value when set, else
+        // the built-in fallback (fraction of work area, capped). The cap only
+        // applies to the fallback path — explicit values are respected as-is.
+        let fallback = fallback_float_size(Size {
+            w: work_area.width,
+            h: work_area.height,
+        });
         let config_default = Size {
-            w: (work_area.width as f32 * self.config.floating.default_width) as i32,
-            h: (work_area.height as f32 * self.config.floating.default_height) as i32,
+            w: self.config.floating.default_width.unwrap_or(fallback.w),
+            h: self.config.floating.default_height.unwrap_or(fallback.h),
         };
         let preferred = match self
             .registry
@@ -1173,5 +1222,69 @@ mod tests {
         // mode) and must not be recorded — otherwise every idempotent
         // `setwindow` call would write to disk.
         assert_eq!(action_to_learned(SetWindowAction::NoOp), None);
+    }
+
+    // ── fallback_float_size: built-in default size for floating windows ──
+    //
+    // Pure integer arithmetic extracted from `set_window_to_float`. The policy
+    // is: width = 60% of work-area width capped at 1536; height = 80% of
+    // work-area height capped at 1152; each dimension clamps independently.
+    // These tests run with NO daemon and NO Win32 — that is the point of the
+    // extraction (mirrors `resolve_set_window_action` above).
+
+    /// Positive: a typical 1080p work area lands below the cap on both axes.
+    /// 1920 × 0.6 = 1152, 1080 × 0.8 = 864.
+    #[test]
+    fn fallback_float_size_small_work_area_uses_fraction_no_cap() {
+        let size = fallback_float_size(Size { w: 1920, h: 1080 });
+        assert_eq!(size, Size { w: 1152, h: 864 });
+    }
+
+    /// Positive: an ultrawide work area hits the cap on BOTH axes. Width
+    /// 3440 × 0.6 = 2064 clamps to 1536; height 1440 × 0.8 = 1152 is exactly
+    /// the cap. Verifies the cap clamps on large work areas.
+    #[test]
+    fn fallback_float_size_large_work_area_clamps_to_cap() {
+        let size = fallback_float_size(Size { w: 3440, h: 1440 });
+        assert_eq!(size, Size { w: 1536, h: 1152 });
+    }
+
+    /// Positive: the QHD reference resolution (2560 × 1440) lands exactly at
+    /// the cap on both axes — 2560 × 0.6 = 1536, 1440 × 0.8 = 1152. This is
+    /// the boundary case the caps were derived from.
+    #[test]
+    fn fallback_float_size_qhd_reference_hits_cap_exactly() {
+        let size = fallback_float_size(Size {
+            w: FALLBACK_REF_WIDTH,
+            h: FALLBACK_REF_HEIGHT,
+        });
+        assert_eq!(
+            size,
+            Size {
+                w: MAX_FLOAT_WIDTH,
+                h: MAX_FLOAT_HEIGHT,
+            }
+        );
+    }
+
+    /// Negative edge case: a zero-area work area yields a zero size. No
+    /// underflow, no panic — integer multiply by zero is zero, and `min` with
+    /// a positive cap keeps it zero.
+    #[test]
+    fn fallback_float_size_zero_work_area_returns_zero() {
+        let size = fallback_float_size(Size { w: 0, h: 0 });
+        assert_eq!(size, Size { w: 0, h: 0 });
+    }
+
+    /// Positive: the two dimensions clamp INDEPENDENTLY. A wide-but-short
+    /// work area (3440 × 800) caps the width at 1536 while the height stays
+    /// below its cap at 640 (800 × 0.8). Guards against a bug that clamps
+    /// both dimensions to the same scale factor.
+    #[test]
+    fn fallback_float_size_clamps_each_dimension_independently() {
+        let size = fallback_float_size(Size { w: 3440, h: 800 });
+        // Width: 3440 × 6/10 = 2064, clamped to 1536.
+        // Height: 800 × 8/10 = 640, below the 1152 cap → unchanged.
+        assert_eq!(size, Size { w: 1536, h: 640 });
     }
 }

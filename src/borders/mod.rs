@@ -1,40 +1,34 @@
 //! Window border overlay engine — komorebi/Hyprland-style colored borders.
 //!
-//! This module draws a thin colored ring around each managed window as a
-//! separate layered overlay window. The overlay **follows the target HWND's
-//! actual on-screen geometry** — driven by `EVENT_OBJECT_LOCATIONCHANGE` —
-//! rather than the daemon's intended rect. This makes borders robust to
-//! daemon lag, freeze, or crash: the border keeps tracking the real window
-//! until the application detaches it or the HWND dies.
+//! Each managed window can own a [`Border`] — a click-through, layered
+//! overlay window that draws a thin colored ring around the window's visible
+//! content edge. The border lives directly on the registry's [`Window`]
+//! struct as `Option<Border>`, so its Win32 lifecycle is coupled to the
+//! window's own (the overlay `HWND` is destroyed when the `Window` is
+//! dropped).
 //!
-//! # Architecture
+//! # Positioning model
 //!
-//! [`BorderManager`] owns:
+//! Unlike the previous design (which ran a private `EVENT_OBJECT_LOCATIONCHANGE`
+//! hook to follow the target HWND), the daemon now **commands** the border's
+//! position:
 //!
-//! - A background hook thread subscribed to `EVENT_OBJECT_LOCATIONCHANGE`
-//!   only. (The daemon's hook thread in `registry/hooks.rs` deliberately
-//!   excludes this event because it would flood the IPC channel; the border
-//!   crate installs its own independent hook on its own thread.)
-//! - A `Mutex<HashMap<HWND, BorderOverlay>>` mapping target HWNDs to their
-//!   overlay windows. Both the hook thread (sync-on-LOCATIONCHANGE) and the
-//!   IPC thread (`attach`/`detach`/`set_style`) touch this map.
+//! - **Tiled windows** — the border is flattened into the animator's target
+//!   list alongside the window itself, so it moves in lockstep during
+//!   animations. No extra hook traffic.
+//! - **Floating windows** — the existing `EVENT_OBJECT_LOCATIONCHANGE` path
+//!   (shared with float-rect tracking) calls `Border::set_geometry` after
+//!   updating the registry.
 //!
-//! # Threading
+//! This eliminates the duplicate location-change hook and the process-global
+//! `OnceLock` indirection. See `docs/src/dev-guide/borders.md`.
 //!
-//! Because `SetWinEventHook` callbacks cannot take userdata, the hook
-//! callback reaches the manager through a process-global
-//! `OnceLock<Arc<BorderManagerInner>>`. This limits the crate to one
-//! `BorderManager` per process, which is fine — the daemon is the only
-//! intended user.
-//!
-//! See `docs/src/dev-guide/borders.md` for design rationale and the
-//! "follow HWND, not intent" principle.
+//! [`Window`]: crate::registry::types::Window
 
-pub(crate) mod manager;
-pub(crate) mod overlay;
+pub(crate) mod border;
 pub(crate) mod style;
 
-pub use manager::BorderManager;
+pub use border::Border;
 pub use style::{BorderStyle, CornerPreference};
 
 use crate::config::BorderConfig;
@@ -44,7 +38,7 @@ use crate::config::BorderConfig;
 ///
 /// The daemon knows the window's state (focused / unfocused / floating) and
 /// calls this helper to resolve the user-configured color before passing the
-/// resulting [`BorderStyle`] to [`BorderManager::set_style`].
+/// resulting [`BorderStyle`] to [`Border::set_style`].
 ///
 /// (Phase 4 will wire this into the daemon; for now this is the contract.)
 #[must_use]

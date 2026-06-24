@@ -39,6 +39,7 @@
 
 use std::path::PathBuf;
 
+use crate::borders::Border;
 use crate::common::{InvisibleBounds, Rect, Size};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::HWND;
@@ -108,6 +109,12 @@ mod hwnd_serde {
 ///   This is distinct from `pre_manage_rect` (the position *before* stm
 ///   managed the window) — `tiled_rect` is always the *current* position.
 ///
+/// - **`border`** — The optional overlay border drawn around this window.
+///   Owned directly by the `Window` so its lifecycle is coupled to the
+///   window's own (dropped when the window leaves the registry). Skipped
+///   during serde because it is a live Win32 resource, not query state.
+///   See `docs/src/dev-guide/borders.md`.
+///
 /// # Send Safety
 ///
 /// `Window` contains `HWND` (a raw pointer), but we treat it as an opaque
@@ -163,6 +170,22 @@ pub struct Window {
     ///
     /// Defaults to [`InvisibleBounds::zero()`] if the measurement failed.
     pub invisible_bounds: InvisibleBounds,
+
+    /// Overlay border drawn around this window, if any.
+    ///
+    /// Owned directly by the `Window` so the border's Win32 lifecycle is
+    /// coupled to the window's own — when the `Window` is dropped, its
+    /// `Border` is dropped, which destroys the overlay HWND.
+    ///
+    /// The daemon positions this via [`Border::set_geometry`] using the
+    /// *visible* content rect (after removing `invisible_bounds`); for tiled
+    /// windows it is flattened into the animator's target list so it moves in
+    /// lockstep with the window itself.
+    ///
+    /// Skipped during serde because it is a live Win32 resource, not
+    /// query-relevant state.
+    #[serde(skip)]
+    pub border: Option<Border>,
 }
 
 // SAFETY: `Window` contains `HWND` (a raw pointer), but we treat it as an
@@ -217,6 +240,7 @@ impl Window {
             last_virtual_slot: None,
             tiled_rect: None,
             invisible_bounds,
+            border: None,
         }
     }
 }

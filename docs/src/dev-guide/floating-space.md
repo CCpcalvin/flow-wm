@@ -269,19 +269,22 @@ dimensions:
 
 ```toml
 [floating]
-default_width = 0.6   # fraction of work area width (0.0–1.0)
-default_height = 0.7  # fraction of work area height (0.0–1.0)
+# default_width = 1200    # explicit pixel width (optional)
+# default_height = 800    # explicit pixel height (optional)
 ```
 
-Defaults are 0.6 × 0.7 of the monitor's work area. Why fractions instead of
-pixel values? Fractions scale across different monitor resolutions — a 60%
-width on a 1920px monitor and a 60% width on a 2560px monitor both look
-proportionally correct without per-monitor config.
+Both fields are optional explicit pixel sizes (`Option<i32>`). When omitted
+(the default), the daemon uses a built-in fallback: 60% × 80% of the monitor's
+work area, capped at approximately 1536 × 1152 pixels (derived from a QHD
+2560×1440 reference). The cap ensures ultrawide and 4K monitors don't produce
+absurdly large popups. An explicit pixel value is always respected as-is — the
+cap applies only to the fallback. The fallback constants live in
+[`src/daemon/dispatch.rs`](../../src/daemon/dispatch.rs).
 
 These defaults are used as a **fallback** when a window has no
 `last_natural_size`. Most windows *do* have a natural size (measured from their
-DWM visible rect at registration time), so the config fractions are only
-consulted for edge cases where the natural size is zero or unavailable.
+DWM visible rect at registration time), so the fallback is only consulted for
+edge cases where the natural size is zero or unavailable.
 
 ### Config-defaults rule
 

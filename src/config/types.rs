@@ -124,6 +124,9 @@ pub struct StmConfig {
 
     /// Window border overlay configuration.
     pub borders: BorderConfig,
+
+    /// Floating window default-size configuration.
+    pub floating: FloatingConfig,
 }
 
 fn default_window_action() -> WindowAction {
@@ -140,6 +143,7 @@ impl Default for StmConfig {
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
             borders: BorderConfig::default(),
+            floating: FloatingConfig::default(),
         }
     }
 }
@@ -646,6 +650,26 @@ impl BorderConfig {
     }
 }
 
+/// Floating window size configuration.
+///
+/// Both fields are optional explicit pixel sizes. When a field is `None`, the
+/// daemon falls back to a built-in policy: 60% × 80% of the monitor work area,
+/// capped so ultrawide / 4K monitors don't produce absurdly large popups. The
+/// fallback constants live in `src/daemon/dispatch.rs` (the sole consumer).
+///
+/// An explicit pixel value is always respected as-is — the cap applies only to
+/// the fallback path.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FloatingConfig {
+    /// Explicit default float width in pixels. `None` → built-in fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_width: Option<i32>,
+    /// Explicit default float height in pixels. `None` → built-in fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_height: Option<i32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,6 +830,10 @@ strategy = "original_slot"
                 unfocused_color: Color::rgb(0x40, 0x50, 0x60),
                 floating_color: Color::rgb(0x70, 0x80, 0x90),
             },
+            floating: FloatingConfig {
+                default_width: Some(1200),
+                default_height: Some(800),
+            },
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
@@ -829,6 +857,8 @@ strategy = "original_slot"
         assert_eq!(parsed.borders.focused_color, Color::rgb(0x10, 0x20, 0x30));
         assert_eq!(parsed.borders.unfocused_color, Color::rgb(0x40, 0x50, 0x60));
         assert_eq!(parsed.borders.floating_color, Color::rgb(0x70, 0x80, 0x90));
+        assert_eq!(parsed.floating.default_width, Some(1200));
+        assert_eq!(parsed.floating.default_height, Some(800));
     }
 
     #[test]
@@ -1189,5 +1219,66 @@ default_action = "foobar"
             parsed.process_path_regex,
             Some(".*\\\\Microsoft\\\\Edge.*".into())
         );
+    }
+
+    // --- FloatingConfig tests ---
+    //
+    // `FloatingConfig` carries two optional explicit pixel sizes. When a field
+    // is `None`, the daemon falls back to a built-in fraction-of-work-area
+    // policy (tested in `src/daemon/dispatch.rs::fallback_float_size`). These
+    // tests pin the serde + Default contract: explicit values round-trip, and
+    // omitted keys parse to `None`.
+
+    /// Positive: `FloatingConfig::default()` is `{None, None}` — both fields
+    /// are optional, so the daemon's built-in fallback applies.
+    #[test]
+    fn floating_config_default_is_none_none() {
+        let cfg = FloatingConfig::default();
+        assert_eq!(cfg.default_width, None);
+        assert_eq!(cfg.default_height, None);
+    }
+
+    /// Positive: explicit `Some(pixel)` values survive TOML serialize →
+    /// deserialize without being altered or dropped.
+    #[test]
+    fn floating_config_explicit_values_roundtrip() {
+        let toml_str = r#"
+[floating]
+default_width = 1200
+default_height = 800
+"#;
+        let parsed: StmConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(parsed.floating.default_width, Some(1200));
+        assert_eq!(parsed.floating.default_height, Some(800));
+
+        // Re-serialize and parse once more to confirm a full round-trip.
+        let reserialized = toml::to_string(&parsed).expect("serialize");
+        let reparsed: StmConfig = toml::from_str(&reserialized).expect("deserialize");
+        assert_eq!(reparsed.floating.default_width, Some(1200));
+        assert_eq!(reparsed.floating.default_height, Some(800));
+    }
+
+    /// Positive: an empty `[floating]` block (both keys omitted) parses to
+    /// `{None, None}`. The daemon then applies the built-in fallback. This
+    /// matches what `default-config.toml` ships (commented-out keys).
+    #[test]
+    fn floating_config_omitted_keys_parse_to_none() {
+        let toml_str = "[floating]\n";
+        let parsed: StmConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(parsed.floating.default_width, None);
+        assert_eq!(parsed.floating.default_height, None);
+        // The rest of the config still comes from compiled defaults.
+        assert_eq!(parsed, StmConfig::default());
+    }
+
+    /// Positive: a partial `[floating]` block (only one key) fills the other
+    /// from the field's serde default (`None`). Guards against a regression
+    /// where setting one dimension would force the other to a non-None value.
+    #[test]
+    fn floating_config_partial_width_only_preserves_height_none() {
+        let toml_str = "[floating]\ndefault_width = 1000\n";
+        let parsed: StmConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(parsed.floating.default_width, Some(1000));
+        assert_eq!(parsed.floating.default_height, None);
     }
 }

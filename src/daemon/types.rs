@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use crate::animation::WindowAnimator;
-use crate::borders::BorderManager;
 use crate::config::history::HistoryStore;
 use crate::config::types::StmConfig;
 use crate::ipc::transport::PipeServer;
@@ -111,14 +110,6 @@ pub struct ScrollTilingManager {
 
     /// Window animator — background-threaded rect animation for smooth moves.
     pub(super) animator: WindowAnimator,
-
-    /// Window border overlay manager — colored rings around managed windows.
-    ///
-    /// Sibling to [`animator`](Self::animator). Created in `daemon/new.rs`,
-    /// dropped on shutdown (its `Drop` posts `WM_QUIT` to the hook thread and
-    /// destroys every overlay). The daemon attaches on window create, detaches
-    /// on destroy, recolors on focus change, and hides on minimize/restore.
-    pub(super) borders: BorderManager,
 
     /// IPC named pipe server — accepts commands from the `stm` CLI.
     pub(super) server: PipeServer,

@@ -43,7 +43,7 @@ impl Color {
     ///
     /// Win32 `RGB()` macro and most GDI APIs pack channels as
     /// low-order-byte red, mid green, high blue — the reverse of the usual
-    /// hex notation. (`docs/src/dev-guide/borders.md` will cover this.)
+    /// hex notation. See `docs/src/dev-guide/borders.md`.
     #[must_use]
     pub const fn to_colorref(self) -> u32 {
         (self.r as u32) | ((self.g as u32) << 8) | ((self.b as u32) << 16)

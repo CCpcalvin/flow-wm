@@ -103,6 +103,15 @@ impl ScrollTilingManager {
         // Mirror into the registry so the two copies never drift.
         if let Some(win) = self.registry.get_window_mut(hwnd_handle) {
             win.state = WindowState::Floating(FloatingState::Active { rect: visible_rect });
+            // Update the border overlay to match the new float position.
+            // The border follows the window's real OS-reported rect (via
+            // the LOCATIONCHANGE hook), not the layout engine's commanded
+            // rect — this is the float-side counterpart to the animator's
+            // tile-side border flattening. set_geometry takes &self
+            // (interior mutability) so this is sound through &mut Window.
+            if let Some(border) = win.border.as_ref() {
+                border.set_geometry(visible_rect);
+            }
         }
 
         log::trace!(

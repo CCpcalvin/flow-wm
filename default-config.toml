@@ -68,9 +68,12 @@ focused_color = "#00AAFF"
 unfocused_color = "#555555"
 floating_color = "#AA00FF"
 
-# Floating window configuration.
-# Dimensions are fractions of the monitor work area (0.0 to 1.0),
-# so the default popup size scales across different resolutions.
+# Floating window configuration (both fields optional).
+#
+# When unset, the daemon falls back to a built-in policy: 60% × 80% of the
+# monitor work area, capped at ~1536 × 1152 (QHD-derived) so ultrawide / 4K
+# monitors don't produce absurdly large popups. An explicit pixel value below
+# is always respected as-is — the cap applies only to the fallback path.
 [floating]
-default_width = 0.6
-default_height = 0.7
+# default_width = 1200    # (optional) explicit default float width in pixels
+# default_height = 800    # (optional) explicit default float height in pixels

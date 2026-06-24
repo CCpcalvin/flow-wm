@@ -5,9 +5,8 @@ use crate::config::Color;
 /// Per-window border styling.
 ///
 /// Constructed by the daemon (typically via [`crate::style_for_state`]) and
-/// passed to [`crate::BorderManager::attach`] /
-/// [`crate::BorderManager::set_style`]. The crate reads these values each
-/// time it redraws the overlay.
+/// passed to [`crate::Border::create`] / [`crate::Border::set_style`]. The
+/// border reads these values each time it redraws the overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BorderStyle {
     /// Border ring color.

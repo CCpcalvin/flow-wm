@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use crate::animation::WindowAnimator;
 use crate::animation::backend::win32::Win32Backend;
-use crate::borders::BorderManager;
 use crate::common::WindowId;
 use crate::config::dirs::history_rules_path_in;
 use crate::config::history::HistoryStore;
@@ -198,17 +197,6 @@ impl ScrollTilingManager {
         let server = PipeServer::create()
             .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
 
-        // 11. Construct border manager + spawn its hook thread.
-        //     Constructed unconditionally (even if `borders.enabled = false`)
-        //     so the daemon's call sites can stay branch-free — the manager
-        //     self-no-ops when disabled. `start_hooks` registers the
-        //     process-global `BORDER_INNER` OnceLock (single-use) and spawns
-        //     the background `EVENT_OBJECT_LOCATIONCHANGE` thread.
-        //     Initial attach for windows found during scan happens after Self
-        //     is built — see `refresh_all_border_styles`.
-        let borders = BorderManager::new(app_config.borders.clone());
-        borders.start_hooks()?;
-
         log::info!("stmd: daemon initialized successfully");
 
         // ---- Build the workspace stack -------------------------------------
@@ -246,7 +234,7 @@ impl ScrollTilingManager {
             workspaces.push(Workspace::new(WorkspaceId(id), empty_scrolling));
         }
 
-        let manager = Self {
+        let mut manager = Self {
             registry,
             history,
             monitors: vec![Monitor::new(
@@ -257,7 +245,6 @@ impl ScrollTilingManager {
             )],
             active_monitor: 0,
             animator,
-            borders,
             server,
             config: app_config,
             config_dir,

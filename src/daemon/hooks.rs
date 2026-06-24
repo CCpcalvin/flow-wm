@@ -20,8 +20,6 @@
 //! The successor window is chosen by [`ScrollingSpace::remove_window`](crate::workspace::ScrollingSpace::remove_window) via
 //! [`mutations::next_available_window`] (left column, then right).
 
-use windows::Win32::Foundation::HWND;
-
 use crate::common::WindowId;
 use crate::registry::hooks::remove_float_hwnd;
 use crate::registry::types::{ReclassifyResult, VisibilityChange};
@@ -110,10 +108,9 @@ impl ScrollTilingManager {
         remove_float_hwnd(hwnd);
 
         self.registry.remove_window(hwnd);
-        // Border overlay: detach explicitly — `refresh_border_for` would also
-        // work (window no longer in registry ⇒ returns None ⇒ detaches) but
-        // the intent is clearer here.
-        self.borders.detach(HWND(hwnd as *mut _));
+        // Border overlay: cleaned up automatically — `remove_window` drops the
+        // Window, whose `border: Option<Border>` field drops the Border, whose
+        // Drop impl calls DestroyWindow on the overlay HWND.
     }
 
     /// Handle a window minimize event.

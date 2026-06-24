@@ -17,6 +17,7 @@
 use windows::Win32::Foundation::HWND;
 
 use crate::animation::{IVec2, WindowAnimator, WindowRef, WindowTarget};
+use crate::common::Rect;
 use crate::layout::types::{ActualLayout, AppliedLayout};
 use crate::registry::WindowRegistry;
 
@@ -92,15 +93,14 @@ impl ScrollTilingManager {
             .actual_layout
             .entries
             .iter()
-            .map(|entry| {
-                // Look up this window's invisible bounds from the registry.
-                // Falls back to zero bounds if the window is not tracked
-                // (defensive — shouldn't happen in normal operation).
-                let invisible_bounds = self
-                    .registry
-                    .get_window(HWND(entry.window_id.0 as *mut _))
-                    .map(|w| w.invisible_bounds)
-                    .unwrap_or_default();
+            .flat_map(|entry| {
+                // Look up the window once; extract invisible bounds and the
+                // border overlay HWND from the shared reference. Option<&Window>
+                // is Copy (all &T are Copy), so both .map calls below take
+                // independent copies without invalidating `window`.
+                let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+                let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+                let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
 
                 // Translate the layout engine's visible rect into a Win32
                 // window rect. This compensates for invisible borders so
@@ -126,11 +126,28 @@ impl ScrollTilingManager {
                     window_rect.height,
                 );
 
-                WindowTarget::new(
+                let window_target = WindowTarget::new(
                     WindowRef(entry.window_id.0),
                     IVec2::new(window_rect.x, window_rect.y),
                     IVec2::new(window_rect.width, window_rect.height),
-                )
+                );
+
+                // Flatten the border overlay into the same target list so
+                // the animator moves it in lockstep with the window. Border
+                // overlays sit at the layout engine's visible rect — no
+                // invisible-bounds translation, no thickness inset — because
+                // the ring occupies the gap between entry.rect and the
+                // inset window_rect. The animator's SetWindowPos-based
+                // backend treats the overlay HWND like any other window.
+                let border_target = border_hwnd.map(|b_hwnd| {
+                    WindowTarget::new(
+                        WindowRef(b_hwnd),
+                        IVec2::new(entry.rect.x, entry.rect.y),
+                        IVec2::new(entry.rect.width, entry.rect.height),
+                    )
+                });
+
+                std::iter::once(window_target).chain(border_target)
             })
             .collect();
 
@@ -205,11 +222,9 @@ impl ScrollTilingManager {
                 if !has_float_target && crate::registry::hooks::is_float_hwnd(entry.window_id.0) {
                     has_float_target = true;
                 }
-                let invisible_bounds = self
-                    .registry
-                    .get_window(HWND(entry.window_id.0 as *mut _))
-                    .map(|w| w.invisible_bounds)
-                    .unwrap_or_default();
+                let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+                let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+                let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
 
                 // Translate visible-rect → window-rect, shrink by the border
                 // thickness to make room for the overlay ring, then apply the
@@ -226,6 +241,18 @@ impl ScrollTilingManager {
                     IVec2::new(window_rect.x, window_rect.y + y_offset),
                     IVec2::new(window_rect.width, window_rect.height),
                 ));
+
+                // Flatten the border overlay at the visible rect (same
+                // y_offset) so it moves in lockstep with the window across
+                // the workspace switch. See animate_layout for the rationale
+                // on why border targets use entry.rect directly.
+                if let Some(b_hwnd) = border_hwnd {
+                    targets.push(WindowTarget::new(
+                        WindowRef(b_hwnd),
+                        IVec2::new(entry.rect.x, entry.rect.y + y_offset),
+                        IVec2::new(entry.rect.width, entry.rect.height),
+                    ));
+                }
             }
         }
 
@@ -288,11 +315,8 @@ impl ScrollTilingManager {
         let border_thickness = self.config.borders.thickness as i32;
         for (layout, y_offset) in batches {
             for entry in &layout.entries {
-                let invisible_bounds = self
-                    .registry
-                    .get_window(HWND(entry.window_id.0 as *mut _))
-                    .map(|w| w.invisible_bounds)
-                    .unwrap_or_default();
+                let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+                let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
 
                 let window_rect = invisible_bounds
                     .visible_to_window(entry.rect)
@@ -309,6 +333,20 @@ impl ScrollTilingManager {
                     window_rect.width,
                     window_rect.height,
                 );
+
+                // Teleport the border overlay to match. Unlike the animator path
+                // (which only SetWindowPos-es), teleport calls set_geometry
+                // directly so the ring bitmap is rebuilt at the final size — no
+                // stale-ring artifact on instant repositioning. Option<&Window>
+                // is Copy so re-using `window` here is sound.
+                if let Some(border) = window.and_then(|w| w.border.as_ref()) {
+                    border.set_geometry(Rect {
+                        x: entry.rect.x,
+                        y: entry.rect.y + y_offset,
+                        width: entry.rect.width,
+                        height: entry.rect.height,
+                    });
+                }
             }
         }
     }
@@ -350,21 +388,34 @@ pub(super) fn animate_layout_raw(
         .actual_layout
         .entries
         .iter()
-        .map(|entry| {
-            let invisible_bounds = registry
-                .get_window(HWND(entry.window_id.0 as *mut _))
-                .map(|w| w.invisible_bounds)
-                .unwrap_or_default();
+        .flat_map(|entry| {
+            let window = registry.get_window(HWND(entry.window_id.0 as *mut _));
+            let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+            let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
 
             let window_rect = invisible_bounds
                 .visible_to_window(entry.rect)
                 .inset(border_thickness);
 
-            WindowTarget::new(
+            let window_target = WindowTarget::new(
                 WindowRef(entry.window_id.0),
                 IVec2::new(window_rect.x, window_rect.y),
                 IVec2::new(window_rect.width, window_rect.height),
-            )
+            );
+
+            // During initial construction borders are still None (they're
+            // created afterwards in refresh_all_border_styles), so this
+            // yields zero border targets on the first snap. Subsequent
+            // calls (if any) would include them. See animate_layout.
+            let border_target = border_hwnd.map(|b_hwnd| {
+                WindowTarget::new(
+                    WindowRef(b_hwnd),
+                    IVec2::new(entry.rect.x, entry.rect.y),
+                    IVec2::new(entry.rect.width, entry.rect.height),
+                )
+            });
+
+            std::iter::once(window_target).chain(border_target)
         })
         .collect();
 

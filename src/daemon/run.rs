@@ -147,14 +147,14 @@ impl ScrollTilingManager {
     /// # Why a Message Pump Is Required
     ///
     /// The border subsystem creates overlay windows on this thread (via
-    /// `CreateWindowExW` in [`crate::borders::BorderOverlay::create`]). Per
+    /// `CreateWindowExW` in [`crate::borders::Border::create`]). Per
     /// Win32 rules, any thread that creates windows becomes a GUI thread and
     /// must pump messages — otherwise cross-thread `SendMessage` blocks
     /// indefinitely. The border hook thread's `SetWindowPos` /
     /// `UpdateLayeredWindow` calls sync-dispatch `WM_*` messages to these
     /// overlay windows. Without a pump, those calls would deadlock and so
     /// would every border operation (and, eventually, every IPC dispatch).
-    /// See `docs/src/dev-guide/borders.md` (planned).
+    /// See `docs/src/dev-guide/borders.md`.
     pub fn run(&mut self) {
         log::info!("stmd: daemon started, event-driven loop on named pipe");
 
