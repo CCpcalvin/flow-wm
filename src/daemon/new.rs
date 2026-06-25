@@ -131,7 +131,19 @@ impl ScrollTilingManager {
             // Query the actual foreground window so init focuses the column
             // the user was last interacting with, rather than blindly picking
             // the rightmost window.
-            let focus_col = registry_win32::get_foreground_window().and_then(|hwnd| {
+            let fg_hwnd = registry_win32::get_foreground_window();
+            // Sync the registry's OS-focus tracker from the live foreground
+            // window. Without this, `registry.focused()` stays `None` until
+            // the first EVENT_SYSTEM_FOREGROUND arrives, so the initial
+            // `refresh_all_border_styles` pass resolves the Unfocused color
+            // for every border — including the real foreground window's.
+            // `set_focused` no-ops for HWNDs not in the registry, so this is
+            // safe even when the foreground is a non-managed window (taskbar,
+            // dialog). See `docs/src/dev-guide/borders.md`.
+            if let Some(hwnd) = fg_hwnd {
+                registry.set_focused(hwnd);
+            }
+            let focus_col = fg_hwnd.and_then(|hwnd| {
                 let wid = WindowId(hwnd);
                 tiling_ids.iter().position(|&id| id == wid)
             });

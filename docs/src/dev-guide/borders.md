@@ -1,9 +1,11 @@
 # Borders
 
 STM draws komorebi/Hyprland-style colored borders around managed windows using
-**click-through, topmost, layered overlay windows**. Each managed window can own
-a [`Border`] (`Option<Border>` on the registry's [`Window`] struct) that renders
-a thin colored ring just inside the window's visible content edge.
+**click-through, layered overlay windows**. Each border is seated *just above
+its target window* in z-order (not globally topmost), so overlapping windows —
+floats and ignored windows — correctly cover it. Each managed window can own a
+[`Border`] (`Option<Border>` on the registry's [`Window`] struct) that renders a
+thin colored ring just inside the window's visible content edge.
 
 This chapter covers the border subsystem's architecture: the positioning model,
 the coordinate-space fix, the lifecycle, and how borders participate in
@@ -125,14 +127,49 @@ single entry point for border lifecycle changes. It resolves the desired
 
 - **`None`** (minimized / hidden / ignored) → sets `window.border = None`,
   dropping the `Border` and triggering `DestroyWindow` via `Drop`.
-- **`Some(style)` + border exists** → calls `set_style(style)` to recolor
-  in-place (no window recreation).
-- **`Some(style)` + no border** → creates the overlay via `Border::create`,
-  immediately calls `set_geometry(rect)` so it doesn't flash at `(0,0)`
-  before the next animation frame, and assigns it to `window.border`.
+- **`Some(style)` + border exists** → re-seats the overlay just above its target
+  (`seat_above_target`), then calls `set_style(style)`. `set_style` compares the
+  new style against the current one and **short-circuits when they are equal** —
+  no `UpdateLayeredWindow`, no repaint. This makes no-op recolors free.
+- **`Some(style)` + no border** → creates the overlay via
+  `Border::create(style, target_hwnd)`, immediately calls `set_geometry(rect)`
+  so it doesn't flash at `(0,0)` before the next animation frame, and assigns it
+  to `window.border`. `create` seeds the z-order by seating the overlay just
+  above `target_hwnd`.
 
 That rect is read from the window's state: `tiled_rect` for active tiles, the
 stored `rect` for active floats.
+
+### Focus changes are O(1)
+
+A focus switch repaints **only the two affected overlays** — the window losing
+focus and the window gaining it — not every managed window. `on_focus_changed`
+captures the previous focused HWND, updates the registry's focus, then calls
+`refresh_border_for` on just those two HWNDs. Combined with the `set_style`
+short-circuit, a focus change that lands on an already-correctly-colored window
+costs nothing. (The full O(N) `refresh_all_border_styles` survives only for the
+one-time init pass.)
+
+### Init highlight
+
+At daemon startup, `new` queries the OS foreground window and calls
+`registry.set_focused(fg)` *before* the init `refresh_all_border_styles`. This
+ensures the window that was already foreground when the daemon launched is
+colored `Focused` from the first paint, rather than waiting for the first
+`EVENT_SYSTEM_FOREGROUND`.
+
+### Late-detected windows (Windows Terminal)
+
+Windows Terminal (and other late-titling apps) is not caught by
+`EVENT_OBJECT_CREATE`: its title arrives later, so classification defers to the
+`NAMECHANGE` / `SHOW` recovery path, which re-runs `on_window_created` (see
+[Event Pipelines](./event-pipelines.md)). The problem: by the time the window is
+finally tracked, its `EVENT_SYSTEM_FOREGROUND` has already fired, so the
+registry's `focused` HWND is stale and the freshly-created border paints
+`Unfocused`. `on_window_created` now reconciles: when a newly tracked window is
+the live OS foreground (`GetForegroundWindow()`), it calls
+`registry.set_focused(hwnd)` before `refresh_border_for`, so the recovery path
+paints `Focused` immediately.
 
 ### Destruction: `Drop`
 
@@ -200,14 +237,16 @@ But the animator only calls `SetWindowPos` on them — it never touches the
 ```mermaid
 classDiagram
     class Border {
-        +create(style) Result~Border~
+        +create(style, target_hwnd) Result~Border~
         +hwnd() isize
+        +seat_above_target()
         +set_geometry(visible_rect)
         +set_style(style)
         +set_visible(bool)
     }
     class BorderInner {
         -overlay: Mutex~isize~
+        -target: isize
         -style: Mutex~BorderStyle~
     }
     class BorderStyle {
@@ -232,6 +271,28 @@ bitmap *and* repositions the layered window, so feeding it a stale rect would
 snap the border back to its pre-animation location.) The border never queries
 the *target* window — only its own overlay.
 
+### Z-order: seated above the target
+
+The overlay is **not** `WS_EX_TOPMOST`. Instead, each `Border` remembers its
+target HWND (the `target` field on `BorderInner`) and seats itself *just above*
+that sibling via `SetWindowPos(overlay, hwndInsertAfter = target, …)` — see
+`seat_above_target`. `hwndInsertAfter` places the overlay immediately above the
+named sibling in z-order, which is exactly the relationship we want: the border
+rides on top of the one window it decorates.
+
+This matters because the border ring wraps the *outside* of the window — there
+is no overlap with the target itself — but other windows *do* overlap the ring
+region. With `WS_EX_TOPMOST` every border floated above float windows and
+ignored windows; a float dragged over a tiled border covered nothing. Seated
+above the target, a float (which is itself above the tiled window) correctly
+covers the tiled window's border.
+
+Z-order is established once at `create` / re-asserted at `set_geometry`
+(`seat_above_target`), and the animator preserves it: the animator's
+`SetWindowPos` uses `SWP_NOZORDER`, so it only translates the overlay without
+disturbing its place in the z-stack. `set_geometry` deliberately drops
+`SWP_NOZORDER` so it can re-assert the seat on every size/position command.
+
 ## Rendering Pipeline
 
 Each border overlay is a `WS_EX_LAYERED` window painted via
@@ -240,13 +301,47 @@ Each border overlay is a `WS_EX_LAYERED` window painted via
 1. **Build a 32-bit ARGB DIB section** sized to the current rect.
 2. **Fill the border ring** — `fill_border_ring` (a pure, unit-tested function)
    writes the configured `Color` × alpha into the outer `thickness`-px ring of
-   the pixel buffer, leaving the interior transparent.
+   the pixel buffer, leaving the interior transparent. On Windows 11 the ring is
+   **rounded to match the target window's corner preference** (queried via
+   `DwmGetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE)`), so the border hugs
+   the window's rounded corners instead of drawing a square halo. See
+   [Corner preference](#corner-preference).
 3. **Upload** via `UpdateLayeredWindow` with `ULW_ALPHA` + a `BLENDFUNCTION`
    that uses `AC_SRC_ALPHA` per-pixel alpha.
 
-The overlay's extended style makes it click-through (`WS_EX_TRANSPARENT`),
-topmost (`WS_EX_TOPMOST`), and invisible to the taskbar/Alt+Tab
-(`WS_EX_TOOLWINDOW`). It never takes focus (`WS_EX_NOACTIVATE`).
+The overlay's extended style makes it click-through (`WS_EX_TRANSPARENT`) and
+invisible to the taskbar/Alt+Tab (`WS_EX_TOOLWINDOW`). It never takes focus
+(`WS_EX_NOACTIVATE`) and is a plain `WS_POPUP` — it is *not* `WS_EX_TOPMOST`;
+its z-order comes from being [seated above its target](#z-order-seated-above-the-target),
+not from a global topmost flag.
+
+### Corner preference
+
+`BorderStyle` carries a `corner_preference: CornerPreference` (`Default` /
+`Square` / `Rounded` / `RoundedSmall`). Rather than expose this as a config
+knob, the daemon **auto-detects** it per window by reading the target's live DWM
+corner preference (`DwmGetWindowAttribute` with
+`DWMWA_WINDOW_CORNER_PREFERENCE`) inside `border_style_for`. This is intentionally
+"rendering-only" (Option A): the border *matches* whatever corner shape the
+window already has; it never forces a window square or rounded.
+
+`corner_radius_px` turns that preference into a pixel radius for the **outer**
+edge of the ring, then subtracts `thickness` for the inner edge so the ring
+stays a uniform `thickness` wide around a concentric arc:
+
+| Preference | Window radius | Ring outer radius |
+|------------|---------------|-------------------|
+| `Square`   | 0             | 0 (square fast-path) |
+| `Rounded`  | 8 px          | 8 + `thickness`    |
+| `RoundedSmall` | 4 px       | 4 + `thickness`    |
+| `Default`  | treated as 8 px (Win11 default) | 8 + `thickness` |
+
+`fill_border_ring` has a square fast-path (radius 0, the original slice-fill)
+and a rounded path that, per pixel, tests membership in the outer rounded
+rect *and not* the inner rounded rect — pure integer math, no allocations, so
+it is safe to call from the paint hot path. The DWM read fails open (returns
+`Default`) if the attribute can't be read. Microsoft does not document the exact
+pixel radii; 8 px / 4 px are the observed Win11 values.
 
 ## Configuration
 
@@ -268,6 +363,10 @@ floating_color = "#AA00FF"     # floating windows
 | `focused_color` | `Color` | `#00AAFF` | Color for the OS-foreground window. |
 | `unfocused_color` | `Color` | `#555555` | Color for tiled-but-not-focused windows. |
 | `floating_color` | `Color` | `#AA00FF` | Color for floating windows (komorebi convention: floats always use this regardless of focus). |
+
+> **No `corner_preference` field.** Corner shape is **auto-detected** per window
+> from DWM (see [Corner preference](#corner-preference)), not set in config. The
+> border always matches the window's existing corner shape.
 
 The daemon resolves which color applies via `style_for_state(cfg, state)`,
 mapping its internal `WindowState` onto the three-bucket `BorderState` enum

@@ -43,7 +43,16 @@ impl ScrollTilingManager {
             | WindowState::Floating(FloatingState::Minimized | FloatingState::Hidden)
             | WindowState::Ignored(_) => return None,
         };
-        Some(style_for_state(&self.config.borders, state))
+        let mut style = style_for_state(&self.config.borders, state);
+        // Resolve the target's Windows 11 corner preference so the border ring
+        // rounds to match the window (rounded window → rounded border; square
+        // window → square border). Falls back to `Default` (Win11 rounds
+        // top-level windows) if the DWM query fails or runs on pre-Win11.
+        // See `docs/src/dev-guide/borders.md`.
+        style.corner_preference =
+            crate::registry::win32::get_window_corner_preference(HWND(hwnd as *mut _))
+                .unwrap_or_default();
+        Some(style)
     }
 
     /// Re-sync a single window's border overlay against its current registry
@@ -60,18 +69,22 @@ impl ScrollTilingManager {
             }
             Some(style) => {
                 if let Some(border) = window.border.as_ref() {
-                    // Already has a border: just recolor.
+                    // Already has a border: re-assert z-order (focus and other
+                    // events can raise the target above its own overlay, which
+                    // would hide the border) then recolor.
+                    border.seat_above_target();
                     border.set_style(style);
                 } else {
                     // New border: create it and sync to the window's current
                     // position so it doesn't flash at (0,0) before the next
-                    // animation frame positions it.
+                    // animation frame positions it. `hwnd` is the target the
+                    // overlay is seated just above in z-order.
                     let current_rect = match &window.state {
                         WindowState::Tiling(TilingState::Active { .. }) => window.tiled_rect,
                         WindowState::Floating(FloatingState::Active { rect }) => Some(*rect),
                         _ => None,
                     };
-                    match Border::create(style) {
+                    match Border::create(style, hwnd) {
                         Ok(b) => {
                             if let Some(rect) = current_rect {
                                 b.set_geometry(rect);
@@ -90,9 +103,10 @@ impl ScrollTilingManager {
     /// Re-sync every tracked window's border overlay.
     ///
     /// Called once at the end of [`ScrollTilingManager::new`](Self::new) to
-    /// attach borders for windows found during the initial scan, and on every
-    /// focus change to recolor overlays (the focused-vs-unfocused distinction
-    /// is the only per-focus state).
+    /// attach borders for windows found during the initial scan. Per-event
+    /// recoloring (focus changes, creates, etc.) goes through
+    /// [`refresh_border_for`](Self::refresh_border_for) for the affected
+    /// windows, not this full sweep.
     ///
     /// Snapshots the hwnd list before mutating so we don't hold a registry
     /// borrow across the per-window `get_window_mut` calls.

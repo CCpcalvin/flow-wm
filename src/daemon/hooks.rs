@@ -70,9 +70,35 @@ impl ScrollTilingManager {
         if let Some(window_id) = self.registry.handle_created(hwnd) {
             let applied = self.active_scrolling_mut().insert_window(window_id);
             self.animate_layout(&applied);
+
+            // If this newly-registered window is the live OS foreground, sync
+            // the registry's focus tracker to it before refreshing its border.
+            // This fixes late-titled apps (Windows Terminal, recovered via
+            // NAMECHANGE/SHOW): their EVENT_SYSTEM_FOREGROUND either arrived
+            // before the window was tracked (so `set_focused` no-op'd on an
+            // untracked HWND) or hasn't arrived yet, leaving `focused()`
+            // pointing at the previous window and the new foreground border
+            // resolving to Unfocused. The live `GetForegroundWindow` query is
+            // authoritative and cheap.
+            let prev_focus = self.registry.focused().map(|id| id.0);
+            let now_foreground = registry_win32::get_foreground_window() == Some(hwnd);
+            if now_foreground {
+                self.registry.set_focused(hwnd);
+            }
+
             // Border overlay: attach (or skip) based on the freshly-classified
             // state. Tiling/Floating → attach; Ignored → no-op.
             self.refresh_border_for(hwnd);
+
+            // If focus moved to the new window, recolor the previous foreground
+            // (Focused → Unfocused). Mirrors `on_focus_changed`'s two-window
+            // refresh so the handoff is visually consistent.
+            if now_foreground
+                && let Some(prev) = prev_focus
+                && prev != hwnd
+            {
+                self.refresh_border_for(prev);
+            }
             true
         } else {
             // Classification failed — either the window isn't ready yet
@@ -325,15 +351,30 @@ impl ScrollTilingManager {
     /// internal focus tracking. The next layout mutation will use the correct
     /// focus.
     pub(super) fn on_focus_changed(&mut self, hwnd: isize) {
+        // Capture the previous focus BEFORE set_focused mutates it: only the
+        // previously-focused and newly-focused windows can change border
+        // color on a focus switch, so we refresh just those two instead of
+        // every overlay. Combined with `Border::set_style`'s unchanged-style
+        // short-circuit, this makes the focus path O(1) rather than O(N).
+        let prev_focus = self.registry.focused().map(|id| id.0);
+
         self.registry.set_focused(hwnd);
 
         if self.registry.is_tiling(hwnd) {
             self.active_scrolling_mut().set_focus(WindowId(hwnd));
         }
-        // Border overlay: focused-vs-unfocused colors are resolved per-window,
-        // so the simplest correct strategy is to recolor every overlay. N is
-        // tiny (typically <20 windows), and the call is idempotent.
-        self.refresh_all_border_styles();
+
+        // Refresh the new foreground first, then the previous one. `set_focused`
+        // ignores untracked HWNDs, so if `hwnd` is the taskbar / a dialog,
+        // `focused()` is unchanged and neither refresh recolors anything
+        // (short-circuit). If `hwnd` is newly-tracked, only it and the prior
+        // focus actually change color.
+        self.refresh_border_for(hwnd);
+        if let Some(prev) = prev_focus
+            && prev != hwnd
+        {
+            self.refresh_border_for(prev);
+        }
     }
 
     /// Handle `EVENT_OBJECT_STATECHANGE` — Option D recovery for windows that
