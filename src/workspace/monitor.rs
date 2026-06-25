@@ -12,7 +12,7 @@
 //! See the [module-level docs](super) for the full hierarchy diagram.
 
 use super::{FloatingSpace, ScrollingSpace, Workspace, WorkspaceId};
-use crate::common::Rect;
+use crate::common::{Rect, WindowId};
 
 /// A physical monitor and the workspaces it can show.
 ///
@@ -270,6 +270,29 @@ impl Monitor {
             None => None,
         }
     }
+
+    /// Find which workspace owns a window, by [`WindowId`].
+    ///
+    /// Linear scan over every workspace, checking both the tiling
+    /// ([`ScrollingSpace`] virtual layout) and floating ([`FloatingSpace`])
+    /// rosters. Returns the stable [`WorkspaceId`] of the first workspace
+    /// that contains the window, or `None` when the window is not managed by
+    /// any workspace on this monitor (ignored, untracked, or off-monitor).
+    ///
+    /// Used by the foreground hook (`on_focus_changed`) to discover which
+    /// workspace an externally-foregrounded window belongs to.
+    #[must_use]
+    pub fn find_workspace_containing(&self, window: WindowId) -> Option<WorkspaceId> {
+        self.workspaces.iter().find_map(|ws| {
+            let in_tiling = ws.scrolling.virtual_layout().find_window(window).is_some();
+            let in_floating = ws
+                .floating
+                .windows()
+                .iter()
+                .any(|entry| entry.window_id == window);
+            (in_tiling || in_floating).then_some(ws.id)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +449,39 @@ mod tests {
         let prev = monitor.set_active_workspace(WorkspaceId(1));
         assert_eq!(prev, Some(2));
         assert_eq!(monitor.active_workspace_index(), 0);
+    }
+
+    // ---- find_workspace_containing --------------------------------------
+
+    #[test]
+    fn find_workspace_containing_returns_none_for_empty_workspaces() {
+        let monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        assert_eq!(monitor.find_workspace_containing(WindowId(100)), None);
+    }
+
+    #[test]
+    fn find_workspace_containing_finds_tiling_window() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        monitor
+            .workspace_mut(WorkspaceId(2))
+            .expect("workspace 2 exists")
+            .scrolling
+            .add_window(WindowId(100));
+        assert_eq!(
+            monitor.find_workspace_containing(WindowId(100)),
+            Some(WorkspaceId(2))
+        );
+    }
+
+    #[test]
+    fn find_workspace_containing_returns_none_for_untracked_window() {
+        let mut monitor = make_monitor_with_ids(&[1, 2, 3], 0);
+        monitor
+            .workspace_mut(WorkspaceId(1))
+            .expect("workspace 1 exists")
+            .scrolling
+            .add_window(WindowId(100));
+        assert_eq!(monitor.find_workspace_containing(WindowId(999)), None);
     }
 
     // ---- screen_rect / work_area storage --------------------------------

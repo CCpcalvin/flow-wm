@@ -644,8 +644,14 @@ impl ScrollingSpace {
             return None;
         }
         let focus_col = self.focus_col_index();
+        let prev_offset = self.virtual_layout.viewport_offset;
         let new_layout =
             mutations::ensure_column_visible(&self.virtual_layout, focus_col, &self.config);
+        // Already visible — no scroll, no diff. This makes the method a natural
+        // no-op for self-induced foreground changes re-entering via the hook.
+        if new_layout.viewport_offset == prev_offset {
+            return None;
+        }
         Some(self.apply_mutation(new_layout))
     }
 
@@ -1948,25 +1954,22 @@ mod tests {
     #[test]
     fn engine_ensure_focused_visible_no_change_when_already_visible() {
         // Positive: 2 cols × 400px fit easily in 1920px viewport at offset 0.
-        // Focused col already visible → no viewport shift.
+        // Focused col already visible → no viewport shift, no diff (idempotency).
         let mut engine = center_test_engine();
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.set_focus(WindowId(1));
         let before = engine.virtual_layout().viewport_offset;
 
-        let diff = engine.ensure_focused_visible().expect("non-empty layout");
+        let diff = engine.ensure_focused_visible();
 
-        assert_eq!(
-            engine.virtual_layout().viewport_offset,
-            before,
-            "no shift when focused col is already visible"
+        assert!(
+            diff.is_none(),
+            "no diff when focused col is already visible (idempotency)"
         );
-        // diff is still returned (apply_mutation always returns Some) — the
-        // caller decides whether to animate based on actual_layout changes.
         assert_eq!(
-            diff.virtual_layout.viewport_offset, before,
-            "diff offset must also be unchanged"
+            engine.virtual_layout().viewport_offset, before,
+            "no shift when focused col is already visible"
         );
     }
 
@@ -2007,39 +2010,45 @@ mod tests {
     fn engine_ensure_focused_visible_uses_col0_fallback_when_focus_is_none() {
         // Contract: when self.last_focused_window is None, focus_col_index returns 0 and
         // ensure_focused_visible targets col 0. With col 0 already visible
-        // from offset 0, this is a no-op on the viewport offset.
+        // from offset 0, this is a no-op (returns None — idempotency).
         let mut engine = center_test_engine();
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.last_focused_window = None; // bypass set_focus (which writes Some)
         let before = engine.virtual_layout().viewport_offset;
 
-        let _ = engine.ensure_focused_visible().expect("non-empty layout");
+        let diff = engine.ensure_focused_visible();
 
+        assert!(
+            diff.is_none(),
+            "no-focus path falls back to col 0; col 0 visible → no diff"
+        );
         assert_eq!(
-            engine.virtual_layout().viewport_offset,
-            before,
-            "no-focus path falls back to col 0; col 0 visible from offset 0 → no shift"
+            engine.virtual_layout().viewport_offset, before,
+            "no shift when col 0 is already visible"
         );
     }
 
     #[test]
     fn engine_ensure_focused_visible_uses_col0_fallback_when_focus_is_stale() {
         // Contract: when self.last_focused_window points at a window no longer in the
-        // layout, focus_col_index falls back to 0. Use a layout where col 0
-        // is visible (so the fallback is a no-op on offset, but the call
-        // still succeeds and is not None).
+        // layout, focus_col_index falls back to 0. With col 0 visible the
+        // fallback is a no-op (returns None — idempotency).
         let mut engine = center_test_engine();
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.set_focus(WindowId(99)); // not in layout
         let before = engine.virtual_layout().viewport_offset;
 
-        let diff = engine.ensure_focused_visible().expect("non-empty layout");
+        let diff = engine.ensure_focused_visible();
 
+        assert!(
+            diff.is_none(),
+            "stale focus falls back to col 0; col 0 visible → no diff"
+        );
         assert_eq!(
-            diff.virtual_layout.viewport_offset, before,
-            "stale focus falls back to col 0; col 0 visible → no shift"
+            engine.virtual_layout().viewport_offset, before,
+            "no shift when col 0 is already visible"
         );
     }
 }

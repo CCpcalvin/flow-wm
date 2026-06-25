@@ -155,6 +155,38 @@ impl Rect {
             height: new_height,
         }
     }
+    /// Returns a rect positioned to fit inside `bounds`, preserving size where
+    /// possible.
+    ///
+    /// If this rect is larger than `bounds` in either dimension it is shrunk
+    /// to `bounds`' size (a window wider than the work area cannot fit). The
+    /// position is then clamped so the result lies wholly inside `bounds`:
+    /// shifted right if its left edge is left of `bounds`, left if its right
+    /// edge is past `bounds.right()`, and similarly on the vertical axis.
+    ///
+    /// Used by the shutdown rescue pass
+    /// (`docs/src/dev-guide/ipc-and-watchdog.md`) to bring an off-screen
+    /// `pre_manage_rect` anchor into the active monitor's `work_area`.
+    #[must_use]
+    pub fn clamped_into(self, bounds: Rect) -> Rect {
+        // Shrink-to-fit first so the clamp range is non-empty (max >= min);
+        // otherwise i32::clamp would panic in debug builds for a window
+        // larger than bounds.
+        let width = self.width.min(bounds.width).max(0);
+        let height = self.height.min(bounds.height).max(0);
+        let x = self
+            .x
+            .clamp(bounds.x, (bounds.right() - width).max(bounds.x));
+        let y = self
+            .y
+            .clamp(bounds.y, (bounds.bottom() - height).max(bounds.y));
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
 }
 
 /// Pixel offsets between the full window rect and the visible rect.
@@ -309,24 +341,20 @@ mod tests {
 
     #[test]
     fn rect_is_empty() {
-        assert!(
-            Rect {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 10
-            }
-            .is_empty()
-        );
-        assert!(
-            !Rect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1
-            }
-            .is_empty()
-        );
+        assert!(Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 10
+        }
+        .is_empty());
+        assert!(!Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1
+        }
+        .is_empty());
     }
 
     // --- Additional common type tests ---
@@ -334,29 +362,25 @@ mod tests {
     #[test]
     fn rect_is_empty_negative_width() {
         // Negative: negative width → empty
-        assert!(
-            Rect {
-                x: 0,
-                y: 0,
-                width: -5,
-                height: 100
-            }
-            .is_empty()
-        );
+        assert!(Rect {
+            x: 0,
+            y: 0,
+            width: -5,
+            height: 100
+        }
+        .is_empty());
     }
 
     #[test]
     fn rect_is_empty_negative_height() {
         // Negative: negative height → empty
-        assert!(
-            Rect {
-                x: 0,
-                y: 0,
-                width: 100,
-                height: -1
-            }
-            .is_empty()
-        );
+        assert!(Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: -1
+        }
+        .is_empty());
     }
 
     #[test]
@@ -715,5 +739,164 @@ mod tests {
         let json = serde_json::to_string(&bounds).unwrap();
         let parsed: InvisibleBounds = serde_json::from_str(&json).unwrap();
         assert_eq!(bounds, parsed);
+    }
+
+    // --- Rect::clamped_into tests ---
+
+    #[test]
+    fn clamped_into_unchanged_when_already_inside() {
+        // Positive: a rect fully inside bounds stays exactly where it is.
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let r = Rect {
+            x: 100,
+            y: 100,
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(r.clamped_into(bounds), r);
+    }
+
+    #[test]
+    fn clamped_into_shifts_left_edge_inward() {
+        // Positive: left edge before bounds.x is shifted right to bounds.x.
+        let bounds = Rect {
+            x: 100,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        let r = Rect {
+            x: -200,
+            y: 50,
+            width: 400,
+            height: 400,
+        };
+        let clamped = r.clamped_into(bounds);
+        assert_eq!(clamped.x, 100);
+        assert_eq!(clamped.y, 50);
+        assert_eq!(clamped.width, 400);
+        assert_eq!(clamped.height, 400);
+    }
+
+    #[test]
+    fn clamped_into_shifts_right_edge_inward() {
+        // Positive: right edge past bounds.right() is shifted left to fit.
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        let r = Rect {
+            x: 900,
+            y: 0,
+            width: 400,
+            height: 400,
+        };
+        let clamped = r.clamped_into(bounds);
+        assert_eq!(clamped.x, 600); // 1000 - 400
+        assert_eq!(clamped.width, 400);
+    }
+
+    #[test]
+    fn clamped_into_shifts_top_edge_inward() {
+        // Positive: top edge before bounds.y is shifted down to bounds.y.
+        let bounds = Rect {
+            x: 0,
+            y: 100,
+            width: 1000,
+            height: 1000,
+        };
+        let r = Rect {
+            x: 50,
+            y: -300,
+            width: 200,
+            height: 200,
+        };
+        let clamped = r.clamped_into(bounds);
+        assert_eq!(clamped.y, 100);
+    }
+
+    #[test]
+    fn clamped_into_shifts_bottom_edge_inward() {
+        // Positive: bottom edge past bounds.bottom() is shifted up to fit.
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        let r = Rect {
+            x: 0,
+            y: 900,
+            width: 200,
+            height: 200,
+        };
+        let clamped = r.clamped_into(bounds);
+        assert_eq!(clamped.y, 800); // 1000 - 200
+    }
+
+    #[test]
+    fn clamped_into_shrinks_when_larger_than_bounds() {
+        // Positive: a window bigger than bounds collapses to bounds itself.
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 500,
+            height: 400,
+        };
+        let r = Rect {
+            x: -100,
+            y: -100,
+            width: 2000,
+            height: 2000,
+        };
+        assert_eq!(r.clamped_into(bounds), bounds);
+    }
+
+    #[test]
+    fn clamped_into_exactly_filling_bounds_is_unchanged() {
+        // Positive: a rect that fills bounds exactly (touching all edges) is
+        // not shifted — touching is allowed, consistent with `overlaps`.
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        assert_eq!(r.clamped_into(bounds), r);
+    }
+
+    #[test]
+    fn clamped_into_offset_bounds() {
+        // Positive: bounds not anchored at origin clamp correctly on both axes.
+        let bounds = Rect {
+            x: 1920,
+            y: 0,
+            width: 1280,
+            height: 1024,
+        };
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 600,
+            height: 400,
+        };
+        let clamped = r.clamped_into(bounds);
+        assert_eq!(clamped.x, 1920);
+        assert_eq!(clamped.y, 0);
+        assert_eq!(clamped.width, 600);
+        assert_eq!(clamped.height, 400);
     }
 }

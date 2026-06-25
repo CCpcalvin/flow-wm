@@ -122,5 +122,9 @@ fn run(args: Args) -> Result<(), String> {
     )?;
     stm.run();
 
+    // Graceful exit (Stop command or fatal wait error): rescue any windows
+    // stranded off-screen before tearing down. See `daemon::shutdown`.
+    stm.rescue_stranded_windows();
+
     Ok(())
 }
