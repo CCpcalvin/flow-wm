@@ -1,4 +1,5 @@
-//! Per-window border overlay (layered, click-through, topmost).
+//! Per-window border overlay (layered, click-through, seated just above its
+//! target).
 //!
 //! A [`Border`] is a thin colored ring drawn just inside a managed window's
 //! visible content. Unlike the previous design (which gave each border its own
@@ -28,14 +29,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetWindowRect, RegisterClassExW,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOZORDER, SetWindowPos,
-    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSENDCHANGING, SWP_NOSIZE,
+    SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::PCWSTR;
 use windows::core::w;
 
-use super::style::BorderStyle;
+use super::style::{BorderStyle, CornerPreference};
 use crate::common::Rect;
 use crate::config::Color;
 
@@ -118,9 +119,11 @@ fn ensure_window_class_registered() -> Result<(), String> {
 
 /// A single border overlay drawn around one managed window's visible content.
 ///
-/// The overlay is a click-through, topmost, layered window. The daemon
-/// *commands* its geometry via [`set_geometry`](Self::set_geometry) — the
-/// border never queries the target window's position itself. This is the
+/// The overlay is a click-through, layered window seated **just above its
+/// target** in z-order (not `WS_EX_TOPMOST`) so that floating / ignored
+/// windows the user drags over the target correctly cover the border. The
+/// daemon *commands* its geometry via [`set_geometry`](Self::set_geometry) —
+/// the border never queries the target window's position itself. This is the
 /// key difference from the old `BorderOverlay`, which ran a private
 /// `EVENT_OBJECT_LOCATIONCHANGE` hook and called `GetWindowRect(target)`.
 ///
@@ -157,31 +160,48 @@ pub struct Border {
 struct BorderInner {
     /// Overlay window HWND. `0` after [`destroy`](Border::destroy) / drop.
     overlay: Mutex<isize>,
+    /// The managed window this border wraps. The overlay is seated just ABOVE
+    /// this HWND in z-order (via `SetWindowPos(overlay, target, …)`) rather
+    /// than using `WS_EX_TOPMOST`, so windows the user raises above the target
+    /// (floats, ignored windows) correctly cover the border. Set once at
+    /// construction; immutable for the border's lifetime — an HWND is stable
+    /// for the window's life, and the border is destroyed when its target
+    /// leaves the registry.
+    target: isize,
     /// Current style (color + thickness).
     style: Mutex<BorderStyle>,
 }
 
 impl Border {
-    /// Create a new border overlay window with the given style.
+    /// Create a new border overlay window with the given style, wrapping
+    /// `target_hwnd`.
     ///
-    /// The overlay is created at `(0,0)` with a 1×1 logical size and then
-    /// shown. Until [`set_geometry`](Self::set_geometry) uploads a bitmap
-    /// via `UpdateLayeredWindow`, a `WS_EX_LAYERED` window renders nothing,
-    /// so nothing appears on screen. The daemon is expected to call
+    /// The overlay is created at `(0,0)` with a 1×1 logical size, seated just
+    /// above `target_hwnd` in z-order, and then shown. Until
+    /// [`set_geometry`](Self::set_geometry) uploads a bitmap via
+    /// `UpdateLayeredWindow`, a `WS_EX_LAYERED` window renders nothing, so
+    /// nothing appears on screen. The daemon is expected to call
     /// `set_geometry` shortly after creation to position and paint the ring.
+    ///
+    /// `target_hwnd` is the window the border wraps; it is stored and used to
+    /// re-assert the overlay's z-order (see [`seat_above_target`](Self::seat_above_target)).
     ///
     /// # Errors
     ///
     /// Returns a human-readable `String` if the window class could not be
     /// registered or `CreateWindowExW` fails.
-    pub(crate) fn create(style: BorderStyle) -> Result<Self, String> {
+    pub(crate) fn create(style: BorderStyle, target_hwnd: isize) -> Result<Self, String> {
         ensure_window_class_registered()?;
+        // NOTE: deliberately NOT `WS_EX_TOPMOST`. A topmost overlay would
+        // render above floating / ignored windows the user dragged over the
+        // target, so those windows could not cover the border. Instead the
+        // overlay is seated just above its target HWND in z-order (see
+        // `seat_above_target` and the `hwndInsertAfter` argument in
+        // `set_geometry`). The animator's `SetWindowPos`-based moves use
+        // `SWP_NOZORDER`, so this relative z-order is preserved across
+        // animation. See `docs/src/dev-guide/borders.md`.
         let ex_style = WINDOW_EX_STYLE(
-            WS_EX_LAYERED.0
-                | WS_EX_TRANSPARENT.0
-                | WS_EX_TOPMOST.0
-                | WS_EX_NOACTIVATE.0
-                | WS_EX_TOOLWINDOW.0,
+            WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0,
         );
         let style_flags = WINDOW_STYLE(WS_POPUP.0);
         // SAFETY: CreateWindowExW creates a top-level layered window. The
@@ -208,12 +228,16 @@ impl Border {
         let border = Self {
             inner: Arc::new(BorderInner {
                 overlay: Mutex::new(hwnd.0 as isize),
+                target: target_hwnd,
                 style: Mutex::new(style),
             }),
         };
         // Reveal the overlay. Until set_geometry paints a bitmap the layered
         // surface is fully transparent, so this never flashes on screen.
         border.set_visible(true);
+        // Seat the overlay just above its target so the initial z-order is
+        // correct before the first set_geometry.
+        border.seat_above_target();
         Ok(border)
     }
 
@@ -225,6 +249,39 @@ impl Border {
     #[must_use]
     pub(crate) fn hwnd(&self) -> isize {
         *self.inner.overlay.lock().expect("overlay mutex poisoned")
+    }
+
+    /// Re-assert the overlay's z-order so it sits just above its target
+    /// window, without moving or resizing it.
+    ///
+    /// Necessary because the OS can raise the target (e.g. on focus) without
+    /// moving the overlay, which would otherwise leave the border hidden
+    /// beneath its own target. Called on creation, on every geometry update
+    /// (via `set_geometry`'s `hwndInsertAfter`), and on every border refresh.
+    /// Cheap: a single `SetWindowPos` with `NOMOVE | NOSIZE` touches z-order
+    /// only. Safe to call with a destroyed overlay or target — the call fails
+    /// and is ignored at `trace` level by the caller's expectation.
+    pub(crate) fn seat_above_target(&self) {
+        let raw = *self.inner.overlay.lock().expect("overlay mutex poisoned");
+        if raw == 0 {
+            return;
+        }
+        let overlay_hwnd = HWND(raw as *mut _);
+        let target_hwnd = HWND(self.inner.target as *mut _);
+        // SAFETY: SetWindowPos on our own overlay, asking the OS to place it
+        // just above the target sibling in z-order. NOMOVE|NOSIZE|NOACTIVATE|
+        // NOSENDCHANGING restrict the effect to z-order only.
+        let _ = unsafe {
+            SetWindowPos(
+                overlay_hwnd,
+                Some(target_hwnd),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_NOMOVE | SWP_NOSIZE,
+            )
+        };
     }
 }
 
@@ -273,20 +330,25 @@ impl Border {
             return;
         }
         let overlay_hwnd = HWND(raw as *mut _);
-        // SAFETY: SetWindowPos on our own overlay window with NOACTIVATE |
-        // NOZORDER | NOSENDCHANGING. NOSENDCHANGING avoids re-entrant
-        // WM_WINDOWPOSCHANGING callbacks. We deliberately do NOT use
-        // SWP_ASYNCWINDOWPOS: this runs on the IPC thread (not a hook
-        // thread), so synchronous dispatch is correct and avoids queueing.
+        let target_hwnd = HWND(self.inner.target as *mut _);
+        // SAFETY: SetWindowPos on our own overlay window. Passing the target
+        // as hwndInsertAfter seats the overlay just above the target in
+        // z-order (replacing the old WS_EX_TOPMOST approach), so floating /
+        // ignored windows the user raises above the target correctly cover
+        // the border. NOACTIVATE | NOSENDCHANGING: don't steal focus and
+        // avoid re-entrant WM_WINDOWPOSCHANGING callbacks. We deliberately
+        // do NOT use SWP_NOZORDER (we want to set z-order) and NOT
+        // SWP_ASYNCWINDOWPOS (this runs on the IPC thread, synchronous
+        // dispatch is correct). See `docs/src/dev-guide/borders.md`.
         let _ = unsafe {
             SetWindowPos(
                 overlay_hwnd,
-                None,
+                Some(target_hwnd),
                 visible_rect.x,
                 visible_rect.y,
                 visible_rect.width,
                 visible_rect.height,
-                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+                SWP_NOACTIVATE | SWP_NOSENDCHANGING,
             )
         };
         self.paint(visible_rect);
@@ -333,7 +395,19 @@ impl Border {
     /// after the animator has moved the overlay via `SetWindowPos`. If the
     /// overlay is destroyed or its rect cannot be queried, this is a no-op.
     pub(crate) fn set_style(&self, style: BorderStyle) {
-        *self.inner.style.lock().expect("style mutex poisoned") = style;
+        // Short-circuit when the style is unchanged. Focus changes route every
+        // potentially-affected border through here, and skipping the repaint
+        // (UpdateLayeredWindow + full DIB rebuild) when the color is identical
+        // turns a no-op recolor into a cheap equality check. This is what lets
+        // `on_focus_changed` refresh only the prev/new focus windows without
+        // forcing redundant repaints.
+        {
+            let mut guard = self.inner.style.lock().expect("style mutex poisoned");
+            if *guard == style {
+                return;
+            }
+            *guard = style;
+        }
         let Some(rect) = self.overlay_rect() else {
             return;
         };
@@ -397,6 +471,7 @@ fn paint_ring(overlay_hwnd: HWND, target_rect: &RECT, style: BorderStyle) {
         return;
     }
     let thickness = style.width_px as usize;
+    let corner_radius = corner_radius_px(style.corner_preference, thickness);
 
     // SAFETY: All GDI calls below are well-formed. We pair every Create*
     // with its matching Delete*; the DC/bitmap lifetimes are confined to
@@ -457,7 +532,14 @@ fn paint_ring(overlay_hwnd: HWND, target_rect: &RECT, style: BorderStyle) {
         // slice borrow is confined to the fill call and not aliased.
         let pixels_slice: &mut [u32] = std::slice::from_raw_parts_mut(pixels, len);
         let colored = pack_bgra(style.color, 0xFF);
-        fill_border_ring(pixels_slice, w as usize, h as usize, thickness, colored);
+        fill_border_ring(
+            pixels_slice,
+            w as usize,
+            h as usize,
+            thickness,
+            corner_radius,
+            colored,
+        );
 
         // Select the bitmap into the memory DC for UpdateLayeredWindow.
         let old_obj = SelectObject(hdc_mem, bitmap.into());
@@ -515,11 +597,92 @@ pub(crate) const fn pack_bgra(color: Color, alpha: u8) -> u32 {
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
+/// Map a [`CornerPreference`] to the OUTER corner radius (in pixels) for the
+/// rounded ring, given the ring `thickness`.
+///
+/// Returns the radius of the overlay's outer rounded corner. Because the
+/// target window is inset by `thickness` (see `docs/src/dev-guide/borders.md`),
+/// to hug a window whose own corner radius is `R` the ring's outer radius must
+/// be `R + thickness`: the inner edge of the ring then has radius `R`,
+/// concentric with the window's corner. Square windows (`R = 0`) get a fully
+/// square ring (outer radius 0).
+///
+/// The window radii `8` / `4` are the unofficial but stable Windows 11
+/// defaults; Microsoft does not document the exact pixel values.
+fn corner_radius_px(pref: CornerPreference, thickness: usize) -> usize {
+    // Win11 rounds top-level windows by default, so `Default` is treated as
+    // the standard rounded radius.
+    let window_radius: usize = match pref {
+        CornerPreference::Square => 0,
+        CornerPreference::Rounded => 8,
+        CornerPreference::RoundedSmall => 4,
+        CornerPreference::Default => 8,
+    };
+    if window_radius == 0 {
+        0
+    } else {
+        window_radius + thickness
+    }
+}
+
+/// Test whether pixel `(x, y)` lies inside a rounded rectangle with top-left
+/// `(ox, oy)`, pixel size `w × h`, and corner radius `cr`.
+///
+/// `cr` is assumed to be ≤ `min(w, h) / 2` (callers clamp). With `cr == 0`
+/// this reduces to a plain axis-aligned rectangle test. Pure and allocation-
+/// free so it can be used in the per-pixel ring loop without test setup.
+fn in_rounded_rect(
+    x: usize,
+    y: usize,
+    ox: usize,
+    oy: usize,
+    w: usize,
+    h: usize,
+    cr: usize,
+) -> bool {
+    if w == 0 || h == 0 {
+        return false;
+    }
+    // Translate into the rectangle's local space.
+    if x < ox || y < oy {
+        return false;
+    }
+    let lx = x - ox;
+    let ly = y - oy;
+    if lx >= w || ly >= h {
+        return false;
+    }
+    if cr == 0 {
+        return true;
+    }
+    // Straight-edge bands: anywhere not in a corner square is inside.
+    if lx >= cr && lx < w - cr {
+        return true;
+    }
+    if ly >= cr && ly < h - cr {
+        return true;
+    }
+    // Corner square: inside iff within radius `cr` of the arc center.
+    let cx: i64 = (if lx < cr { cr } else { w - cr }) as i64;
+    let cy: i64 = (if ly < cr { cr } else { h - cr }) as i64;
+    let dx = lx as i64 - cx;
+    let dy = ly as i64 - cy;
+    let r = cr as i64;
+    dx * dx + dy * dy <= r * r
+}
+
 /// Fill the outer `thickness`-pixel ring of a `width * height` pixel buffer
 /// with `color`, leaving the interior transparent (`0`).
 ///
-/// Used to render the border ring into a freshly zeroed DIB section. The
-/// caller must size `pixels` to exactly `width * height`. Thickness is
+/// `corner_radius` is the OUTER corner radius in pixels (`0` = square ring).
+/// For a rounded ring the inner edge is concentric with the outer, with radius
+/// `corner_radius - thickness` (clamped to 0), so it hugs a target window
+/// whose own corners have radius `corner_radius - thickness`. See
+/// [`corner_radius_px`] for how the caller derives `corner_radius` from a
+/// [`CornerPreference`].
+///
+/// The caller must size `pixels` to exactly `width * height` and zero it
+/// first; this function only writes `color`, never clears. Thickness is
 /// clamped against half the smaller dimension so an oversized value just
 /// fills the whole buffer (no panic).
 ///
@@ -531,6 +694,7 @@ pub(crate) fn fill_border_ring(
     width: usize,
     height: usize,
     thickness: usize,
+    corner_radius: usize,
     color: u32,
 ) {
     assert_eq!(
@@ -543,24 +707,49 @@ pub(crate) fn fill_border_ring(
     }
     // Clamp thickness so it never exceeds half the smaller dimension. If it
     // does, the "ring" covers the whole image, which is well-defined.
-    let half = (width.min(height)) / 2;
+    let half = width.min(height) / 2;
     let t = thickness.min(half);
     if t == 0 {
         return;
     }
+    // Clamp the outer radius against the buffer; the inner radius is concentric
+    // and therefore always ≤ the inner box's half-dimension (see below).
+    let r = corner_radius.min(half);
 
-    let last_row = height - t;
-    let last_col = width - t;
+    // Square fast path: identical to the original slice-fill ring. Keeps the
+    // hot float-drag repaint path (which rebuilds the bitmap on every move)
+    // cheap — no per-pixel arc math.
+    if r == 0 {
+        let last_row = height - t;
+        let last_col = width - t;
+        for y in 0..height {
+            let row_start = y * width;
+            if y < t || y >= last_row {
+                pixels[row_start..row_start + width].fill(color);
+            } else {
+                pixels[row_start..row_start + t].fill(color);
+                pixels[row_start + last_col..row_start + width].fill(color);
+            }
+        }
+        return;
+    }
+
+    // Rounded path. Outer rect = full buffer with radius `r`; inner rect =
+    // buffer inset by `t` with the concentric radius `r - t`. A pixel is part
+    // of the ring iff it is inside the outer rounded rect AND outside the
+    // inner rounded rect.
+    let inner_radius = r.saturating_sub(t);
+    let inner_w = width.saturating_sub(2 * t);
+    let inner_h = height.saturating_sub(2 * t);
+
     for y in 0..height {
         let row_start = y * width;
-        let is_border_row = y < t || y >= last_row;
-        if is_border_row {
-            // Whole row colored.
-            pixels[row_start..row_start + width].fill(color);
-        } else {
-            // Left edge then right edge; middle stays 0 (already transparent).
-            pixels[row_start..row_start + t].fill(color);
-            pixels[row_start + last_col..row_start + width].fill(color);
+        for x in 0..width {
+            if in_rounded_rect(x, y, 0, 0, width, height, r)
+                && !in_rounded_rect(x, y, t, t, inner_w, inner_h, inner_radius)
+            {
+                pixels[row_start + x] = color;
+            }
         }
     }
 }
@@ -590,7 +779,7 @@ mod tests {
     #[test]
     fn fill_border_ring_zero_thickness_leaves_buffer_transparent() {
         let mut buf = vec![0u32; 9];
-        fill_border_ring(&mut buf, 3, 3, 0, 0xFFFF00FF);
+        fill_border_ring(&mut buf, 3, 3, 0, 0, 0xFFFF00FF);
         assert!(buf.iter().all(|&p| p == 0));
     }
 
@@ -600,7 +789,7 @@ mod tests {
         // Index layout (row*3 + col): 0 1 2 / 3 4 5 / 6 7 8.
         let mut buf = vec![0u32; 9];
         let colored = pack_bgra(color(0, 0, 0), 0xFF);
-        fill_border_ring(&mut buf, 3, 3, 1, colored);
+        fill_border_ring(&mut buf, 3, 3, 1, 0, colored);
         assert_eq!(buf[0], colored);
         assert_eq!(buf[1], colored);
         assert_eq!(buf[2], colored);
@@ -618,7 +807,7 @@ mod tests {
         // Row start indices: 0, 5, 10, 15, 20.
         let mut buf = vec![0u32; 25];
         let colored = pack_bgra(color(0, 0, 0), 0xFF);
-        fill_border_ring(&mut buf, 5, 5, 2, colored);
+        fill_border_ring(&mut buf, 5, 5, 2, 0, colored);
         // Rows 0,1,3,4 fully colored; row 2 has cols 0,1,3,4 colored, col 2 transparent.
         for x in 0..5 {
             assert_eq!(buf[x], colored, "row 0 col {x}");
@@ -639,14 +828,14 @@ mod tests {
         // Whole image is "ring" — every pixel colored.
         let mut buf = vec![0u32; 16];
         let colored = pack_bgra(color(0, 0, 0), 0xFF);
-        fill_border_ring(&mut buf, 4, 4, 100, colored);
+        fill_border_ring(&mut buf, 4, 4, 100, 0, colored);
         assert!(buf.iter().all(|&p| p == colored));
     }
 
     #[test]
     fn fill_border_ring_empty_dimensions_is_noop() {
         let mut buf: Vec<u32> = vec![];
-        fill_border_ring(&mut buf, 0, 0, 5, 0xFFFF00FF);
+        fill_border_ring(&mut buf, 0, 0, 5, 0, 0xFFFF00FF);
     }
 
     // ── pack_bgra edge cases ───────────────────────────────────────────
@@ -689,7 +878,7 @@ mod tests {
         // half = min(6,3)/2 = 1, so t clamps to 1. last_row = 2, last_col = 5.
         let mut buf = vec![0u32; 18]; // 6 × 3
         let colored = pack_bgra(color(0, 0, 0), 0xFF);
-        fill_border_ring(&mut buf, 6, 3, 1, colored);
+        fill_border_ring(&mut buf, 6, 3, 1, 0, colored);
 
         // Row 0 (indices 0..6): all colored.
         assert!(
@@ -717,6 +906,79 @@ mod tests {
     #[test]
     fn fill_border_ring_wrong_buffer_size_panics() {
         let mut buf = vec![0u32; 10]; // should be 9 for a 3×3 grid
-        fill_border_ring(&mut buf, 3, 3, 1, 0xFFFF00FF);
+        fill_border_ring(&mut buf, 3, 3, 1, 0, 0xFFFF00FF);
+    }
+
+    // ── rounded-corner rendering ──────────────────────────────────────
+
+    /// `corner_radius_px`: square windows (and any preference mapping to
+    /// radius 0) yield a fully square ring (outer radius 0).
+    #[test]
+    fn corner_radius_px_square_is_zero() {
+        assert_eq!(corner_radius_px(CornerPreference::Square, 3), 0);
+    }
+
+    /// `corner_radius_px`: a rounded window with radius 8 and thickness 3
+    /// yields outer radius 11 (8 + thickness), so the ring's inner edge has
+    /// radius 8 — concentric with the window's own corner.
+    #[test]
+    fn corner_radius_px_rounded_adds_thickness() {
+        assert_eq!(corner_radius_px(CornerPreference::Rounded, 3), 11);
+        assert_eq!(corner_radius_px(CornerPreference::RoundedSmall, 3), 7);
+        assert_eq!(corner_radius_px(CornerPreference::Default, 3), 11);
+    }
+
+    /// `in_rounded_rect`: a square rect (cr=0) is a plain bbox test.
+    #[test]
+    fn in_rounded_rect_zero_radius_is_bbox() {
+        assert!(in_rounded_rect(0, 0, 0, 0, 5, 5, 0));
+        assert!(in_rounded_rect(4, 4, 0, 0, 5, 5, 0));
+        assert!(!in_rounded_rect(5, 0, 0, 0, 5, 5, 0));
+        assert!(!in_rounded_rect(0, 5, 0, 0, 5, 5, 0));
+    }
+
+    /// `in_rounded_rect`: the extreme corner of a rounded rect is OUTSIDE the
+    /// arc and therefore excluded — the defining behavior that keeps the border
+    /// from sticking out past a rounded window.
+    #[test]
+    fn in_rounded_rect_arc_excludes_extreme_corner() {
+        // 9×9 rect, radius 4. Corner center at (4,4). Pixel (0,0) is at
+        // distance sqrt(32) ≈ 5.66 > 4, so it is outside.
+        assert!(!in_rounded_rect(0, 0, 0, 0, 9, 9, 4));
+        // Pixel (4,0) is on the top straight edge: inside.
+        assert!(in_rounded_rect(4, 0, 0, 0, 9, 9, 4));
+        // Center is inside.
+        assert!(in_rounded_rect(4, 4, 0, 0, 9, 9, 4));
+    }
+
+    /// Rounded ring on a square-ish buffer: the four extreme corner pixels
+    /// (outside the corner arcs) must stay transparent, while a mid-edge pixel
+    /// stays colored. This is the core rounded-border invariant.
+    #[test]
+    fn fill_border_ring_rounded_keeps_extreme_corners_transparent() {
+        // 11×11, thickness 1, outer corner_radius 4 (so window radius ≈ 3).
+        let mut buf = vec![0u32; 11 * 11];
+        let colored = pack_bgra(color(0, 0, 0), 0xFF);
+        fill_border_ring(&mut buf, 11, 11, 1, 4, colored);
+        // Extreme corners are outside the radius-4 arc → transparent.
+        assert_eq!(buf[0], 0, "top-left corner transparent");
+        assert_eq!(buf[10], 0, "top-right corner transparent");
+        assert_eq!(buf[11 * 10], 0, "bottom-left corner transparent");
+        assert_eq!(buf[11 * 10 + 10], 0, "bottom-right corner transparent");
+        // Top-edge middle (col 5, row 0) is on the straight band → colored.
+        assert_eq!(buf[5], colored, "top edge middle colored");
+        // Left-edge middle (col 0, row 5) is on the straight band → colored.
+        assert_eq!(buf[5 * 11], colored, "left edge middle colored");
+    }
+
+    /// Rounded ring still colors a normal-thickness band on the straight
+    /// edges and leaves the interior transparent.
+    #[test]
+    fn fill_border_ring_rounded_leaves_center_transparent() {
+        let mut buf = vec![0u32; 11 * 11];
+        let colored = pack_bgra(color(0, 0, 0), 0xFF);
+        fill_border_ring(&mut buf, 11, 11, 1, 4, colored);
+        // Center pixel well inside the ring → transparent.
+        assert_eq!(buf[5 * 11 + 5], 0, "center transparent");
     }
 }

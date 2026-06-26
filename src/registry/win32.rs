@@ -35,7 +35,8 @@ use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DwmGetWindowAttribute,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
@@ -50,6 +51,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PWSTR;
 
+use crate::borders::CornerPreference;
 use crate::common::{InvisibleBounds, Rect};
 
 // ── WindowInfo struct ───────────────────────────────────────────────
@@ -248,6 +250,50 @@ pub fn get_extended_frame_bounds(hwnd: HWND) -> Result<Rect, String> {
         y: rect.top,
         width: rect.right - rect.left,
         height: rect.bottom - rect.top,
+    })
+}
+
+/// Read a window's Windows 11 corner-rounding preference and map it to a
+/// semantic [`CornerPreference`] for border rendering.
+///
+/// Wraps `DwmGetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE)` (Windows 11
+/// build 22000+). The border overlay uses this to round its own ring to match
+/// the target window's corners, so a rounded window gets a rounded border and
+/// a square window gets a square border (see `docs/src/dev-guide/borders.md`).
+///
+/// # Fail-open
+///
+/// Returns `None` on pre-Win11 Windows (where the attribute is unavailable),
+/// on UWP/chemistry windows that reject the query, and during shutdown races.
+/// Callers treat `None` as "use the renderer default" — the daemon substitutes
+/// [`CornerPreference::Default`], which the renderer maps to Win11's standard
+/// rounded radius.
+///
+/// The integer mapping mirrors `dwmapi.h`:
+/// `DWMWCP_DEFAULT = 0`, `DWMWCP_DONOTROUND = 1`, `DWMWCP_ROUND = 2`,
+/// `DWMWCP_ROUNDSMALL = 3`.
+#[must_use]
+pub fn get_window_corner_preference(hwnd: HWND) -> Option<CornerPreference> {
+    let mut pref = DWM_WINDOW_CORNER_PREFERENCE::default();
+    // SAFETY: DwmGetWindowAttribute reads a 4-byte attribute for the given
+    // HWND into a local of the matching repr-transparent type. The out-pointer
+    // and size are correct; the query is read-only with respect to the window.
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &mut pref as *mut _ as *mut core::ffi::c_void,
+            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+    };
+    result.ok()?;
+    Some(match pref.0 {
+        1 => CornerPreference::Square,
+        2 => CornerPreference::Rounded,
+        3 => CornerPreference::RoundedSmall,
+        // 0 (DEFAULT) and any unrecognized value: let the renderer default
+        // (Win11 rounds top-level windows).
+        _ => CornerPreference::Default,
     })
 }
 
