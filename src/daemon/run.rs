@@ -34,10 +34,12 @@
 //! 2. Resets the hook signal (`ResetEvent`) — **before** draining, to close
 //!    the race window (see below).
 //! 3. Drains ALL pending hook events via `try_recv()` loop.
-//! 4. If the pipe event was signaled, processes the IPC session (read,
-//!    dispatch, write, disconnect, re-accept), pumping messages between
-//!    each read so border sync-dispatch never blocks on an IPC-blocked main
-//!    thread.
+//! 4. If a client is connected, processes the IPC session (read, dispatch,
+//!    write, disconnect, re-accept), pumping messages between each read so
+//!    border sync-dispatch never blocks on an IPC-blocked main thread.
+//!    Connection is detected with an independent zero-timeout
+//!    `WaitForSingleObject` poll rather than the wait's return index — see
+//!    [`ScrollTilingManager::run`] for why the return index alone starves IPC.
 //! 5. Returns to `MsgWaitForMultipleObjects`.
 //!
 //! # Race-Free Hook Drain
@@ -71,7 +73,8 @@
 //! This approach is event-driven by default (zero CPU while idle) with a
 //! bounded timer fallback only when windows are pending classification.
 
-use windows::Win32::System::Threading::ResetEvent;
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::System::Threading::{ResetEvent, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
     TranslateMessage,
@@ -117,7 +120,11 @@ impl ScrollTilingManager {
     ///     ResetEvent(hook_signal)             // Race-free: reset BEFORE drain
     ///     process_hook_events()               // Drain hooks + retry pending
     ///
-    ///     if connected_event was signaled:
+    ///     if WaitForSingleObject(connected_event, 0) is signaled:
+    ///         // NOT the wait's return index — see "Why the return index
+    ///         // starves IPC" below. The hook signal (index 0) is set on
+    ///         // every forwarded WinEvent and would otherwise permanently
+    ///         // shadow the connect event (index 1).
     ///         loop {                           // IPC session with this client
     ///             pump_messages()              // Don't starve border thread
     ///             process_hook_events()
@@ -143,6 +150,24 @@ impl ScrollTilingManager {
     /// The inner loop (blocking `read_message`) is acceptable because the CLI
     /// is one-shot: connect → send one command → read response → disconnect.
     /// The entire IPC transaction completes in under 1 ms.
+    ///
+    /// # Why the Return Index Alone Starves IPC
+    ///
+    /// A natural implementation checks `if wait_result == WAIT_OBJECT_0 + 1`
+    /// (the connect event's index) to decide whether to service IPC. That
+    /// **does not work** with this hook design. `MsgWaitForMultipleObjects`
+    /// with `bWaitAll = false` returns the **lowest** signaled handle index;
+    /// the hook signal is index 0 and the connect event is index 1. The hook
+    /// callback calls `SetEvent` after forwarding every non-`LOCATIONCHANGE`
+    /// WinEvent system-wide, which arrive continuously (shell, tray, tooltips,
+    /// and the border overlays' own creation). That signal is a manual-reset
+    /// event re-set before each wait, so it is signaled on nearly every
+    /// iteration — permanently shadowing the connect event and making the wait
+    /// return `0` even while a client is connected. Draining the channel is no
+    /// cure, because the *next* forwarded event re-sets the signal before the
+    /// next wait. The independent zero-timeout `WaitForSingleObject` poll on
+    /// the connect event breaks that dependency so IPC is serviced whenever a
+    /// client is actually waiting, regardless of hook-signal state.
     ///
     /// # Why a Message Pump Is Required
     ///
@@ -223,10 +248,32 @@ impl ScrollTilingManager {
             // This runs on every wake — hook signal, IPC connect, or timeout.
             self.process_hook_events();
 
-            // Check if an IPC client connected (index 1 = WAIT_OBJECT_0 + 1).
-            // On WAIT_TIMEOUT (258), hook-only wake (0), or message wake (2),
-            // this is false and we skip the IPC inner loop.
-            if signaled == 1 {
+            // Check if an IPC client connected.
+            //
+            // We CANNOT rely solely on `signaled == 1` here.
+            // `MsgWaitForMultipleObjects(bWaitAll = false)` returns the
+            // LOWEST-index signaled handle. The hook signal is index 0 and the
+            // connect event is index 1, so `signaled == 1` is returned only
+            // when the connect event is signaled AND the hook signal is not.
+            //
+            // The hook callback calls `SetEvent` after forwarding EVERY
+            // non-LOCATIONCHANGE WinEvent system-wide (CREATE/SHOW/HIDE/...),
+            // which arrive continuously (shell, tray, tooltips, and the border
+            // overlays' own creation at startup). Because the signal is a
+            // manual-reset event re-set before each wait, it is signaled on
+            // nearly every iteration — permanently shadowing the connect event
+            // and starving IPC no matter how long the client waits.
+            //
+            // The fix: test the connect event independently with a zero-timeout
+            // `WaitForSingleObject`. This services IPC whenever a client is
+            // actually connected, regardless of the hook signal's state. The
+            // manual-reset connect event stays signaled until `start_accept`
+            // resets it (after the session), so the 0-timeout poll is
+            // non-consuming and cheap.
+            let ipc_connected = signaled == 1
+                || unsafe { WaitForSingleObject(connect_handle, 0) } == WAIT_OBJECT_0;
+
+            if ipc_connected {
                 // Inner loop: handle this client's messages.
                 // The CLI is one-shot (connect → send → read response →
                 // disconnect), so this loop typically runs once before the

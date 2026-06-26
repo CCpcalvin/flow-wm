@@ -246,26 +246,43 @@ impl PipeServer {
             // is !Send in windows-rs), then reconstruct inside the closure.
             let pipe = HANDLE(handle as *mut core::ffi::c_void);
             let event = HANDLE(event as *mut core::ffi::c_void);
-            let result = unsafe { ConnectNamedPipe(pipe, None) };
-            match result {
-                Ok(()) => {}
-                Err(e) => {
-                    // ERROR_PIPE_CONNECTED (Win32 error 535 / 0x217, HRESULT
-                    // 0x80070217) means a client already connected before we
-                    // called ConnectNamedPipe — this is a success case.
-                    //
-                    // We compare the HRESULT from the error object rather than
-                    // GetLastError() because windows-rs may have called other
-                    // Win32 functions internally that changed the last error.
-                    let hresult = e.code();
-                    let is_pipe_connected =
-                        hresult == windows::core::HRESULT(0x8007_0217_u32 as i32);
-                    if !is_pipe_connected {
-                        log::error!("PipeServer accept thread: ConnectNamedPipe failed: {e}");
-                        return;
+
+            // ERROR_PIPE_CONNECTED (Win32 535 / 0x217): a client connected
+            // before ConnectNamedPipe was called — a success case.
+            const ERROR_PIPE_CONNECTED_HRESULT: windows::core::HRESULT =
+                windows::core::HRESULT(0x8007_0217_u32 as i32);
+
+            // Retry loop. ConnectNamedPipe can fail transiently with
+            // ERROR_NO_DATA ("The pipe is being closed") when the CLI's
+            // `is_daemon_running` health-check connects + disconnects in the
+            // window between pipe creation and this first ConnectNamedPipe,
+            // leaving the instance in a "closing" state. The old code bailed
+            // out here without signaling, so the connect event was never set
+            // and IPC was permanently dead (debug.log showed exactly this).
+            // Reset the instance with DisconnectNamedPipe and retry until a
+            // real client connects. The loop also exits when the process
+            // terminates (the handle close makes ConnectNamedPipe return an
+            // error and the thread is killed on exit), so it cannot spin
+            // forever in practice.
+            loop {
+                let result = unsafe { ConnectNamedPipe(pipe, None) };
+                match result {
+                    Ok(()) => break,
+                    Err(e) if e.code() == ERROR_PIPE_CONNECTED_HRESULT => break,
+                    Err(e) => {
+                        log::warn!(
+                            "PipeServer accept thread: ConnectNamedPipe failed ({e:#?}); \
+                             resetting pipe instance and retrying"
+                        );
+                        // SAFETY: best-effort reset of the server-side instance
+                        // so the next ConnectNamedPipe can wait for a fresh
+                        // client. Errors (e.g. on a closing handle) are ignored.
+                        let _ = unsafe { DisconnectNamedPipe(pipe) };
+                        std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                 }
             }
+
             // Signal the main thread that a client is connected.
             let _ = unsafe { SetEvent(event) };
         }));
@@ -713,4 +730,109 @@ fn wide(s: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    // ── ms_until: deadline → milliseconds conversion for WaitForSingleObject ──
+    //
+    // Pure arithmetic extracted from the overlapped-I/O client transport.
+    // No Win32, no pipe — just Instant arithmetic. Tests the clamping,
+    // flooring, and None-on-expired behaviour that protects against
+    // passing 0 (which would mean "return immediately") to WaitForSingleObject.
+
+    #[test]
+    fn ms_until_future_deadline_returns_positive_milliseconds() {
+        // Positive: a deadline 500 ms in the future yields Some(≥500).
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let result = ms_until(deadline);
+        assert!(result.is_some());
+        // Allow ±1 ms tolerance for clock drift during the call.
+        let ms = result.unwrap();
+        assert!(ms >= 499 && ms <= 501, "expected ~500 ms, got {ms}");
+    }
+
+    #[test]
+    fn ms_until_past_deadline_returns_none() {
+        // Negative: a deadline already passed yields None (caller turns this
+        // into a TimedOut error).
+        let deadline = Instant::now() - Duration::from_millis(100);
+        assert_eq!(ms_until(deadline), None);
+    }
+
+    #[test]
+    fn ms_until_nearly_expired_floor_at_one() {
+        // Positive edge: the function floors at 1 ms so WaitForSingleObject
+        // doesn't get 0 (which means "don't wait at all"). When the deadline
+        // is a few microseconds away, the result is Some(1), not Some(0).
+        let deadline = Instant::now() + Duration::from_micros(500);
+        let result = ms_until(deadline);
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn ms_until_large_deadline_capped_at_u32_max() {
+        // Positive: a 60-day deadline (far beyond u32::MAX ms ≈ 49 days)
+        // is capped, not truncated.
+        let deadline = Instant::now() + Duration::from_secs(60 * 24 * 3600);
+        let result = ms_until(deadline);
+        assert_eq!(result, Some(u32::MAX));
+    }
+
+    #[test]
+    fn ms_until_zero_remaining_floors_to_one() {
+        // Positive edge: when the deadline is effectively now (within a few
+        // microseconds), checked_duration_since returns Some(~0), which is
+        // floored to 1 ms by the `max(1)` guard so WaitForSingleObject
+        // doesn't receive 0 (which would mean "don't wait at all").
+        let deadline = Instant::now();
+        let result = ms_until(deadline);
+        // By the time ms_until runs, some sub-microsecond time has passed,
+        // so we get Some(0ms) floored to Some(1). An exact-zero instant
+        // would give None (checked_duration_since returns None when equal),
+        // but that timing is not reproducible in a test.
+        assert!(result.is_some(), "deadline at now should yield Some(1), got {result:?}");
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    // ── wide: Rust string → UTF-16 null-terminated ────────────────────────
+
+    #[test]
+    fn wide_empty_string_produces_single_null() {
+        // Positive: empty input → only the null terminator.
+        let result = wide("");
+        assert_eq!(result, vec![0u16]);
+    }
+
+    #[test]
+    fn wide_ascii_string_includes_null_terminator() {
+        // Positive: ASCII stays single-code-unit + null.
+        let result = wide("abc");
+        assert_eq!(result, vec![b'a' as u16, b'b' as u16, b'c' as u16, 0]);
+    }
+
+    #[test]
+    fn wide_unicode_produces_correct_code_units() {
+        // Positive: a multi-byte UTF-8 character (é = U+00E9) is one UTF-16
+        // code unit; a surrogate-pair character (𐍈 = U+10348) is two.
+        let result = wide("é");
+        assert_eq!(result, vec![0x00E9, 0]); // single code unit + null
+
+        let result_surrogate = wide("𐍈");
+        // U+10348 → UTF-16 surrogate pair: 0xD800, 0xDF48
+        assert_eq!(result_surrogate, vec![0xD800, 0xDF48, 0]);
+    }
+
+    #[test]
+    fn wide_never_produces_empty_vec() {
+        // Negative edge: even for empty input, the null terminator is always
+        // present. This is a Win32 invariant — null-terminated strings must
+        // have at least one element.
+        let result = wide("");
+        assert!(!result.is_empty());
+        assert_eq!(*result.last().unwrap(), 0);
+    }
 }

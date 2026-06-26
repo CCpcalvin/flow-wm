@@ -152,7 +152,10 @@ impl ScrollTilingManager {
 
     /// Dispatch a focus movement in the given direction.
     ///
-    /// This is the complete focus pipeline:
+    /// This performs only the layout work and the OS foreground push; **all
+    /// focus *state* side-effects are handled by [`on_focus_changed`](Self::on_focus_changed),
+    /// the single sink for `EVENT_SYSTEM_FOREGROUND`** (both external alt-tab /
+    /// clicks and this self-induced change). Concretely:
     ///
     /// 1. **Layout focus** — [`ScrollingSpace::focus`](crate::workspace::ScrollingSpace::focus) resolves the neighbor
     ///    [`WindowId`] and optionally shifts the viewport (producing a
@@ -160,24 +163,37 @@ impl ScrollTilingManager {
     /// 2. **OS foreground** — [`registry_win32::set_foreground_window`] moves
     ///    the actual Win32 focus to the target window using the
     ///    `AttachThreadInput` trick to bypass foreground-lock restrictions.
-    /// 3. **Registry sync** — [`WindowRegistry::set_focused`] updates the
-    ///    registry's focus tracking so queries report the correct focused
-    ///    window (fixes the `"focused": null` bug).
-    /// 4. **Animation** — if the viewport scrolled, [`animate_layout`](Self::animate_layout)
+    ///    This fires `EVENT_SYSTEM_FOREGROUND`, which `on_focus_changed`
+    ///    consumes to update the registry focus, recolor the previous and new
+    ///    borders, and re-assert layout focus (a no-op here since step 1
+    ///    already moved it).
+    /// 3. **Animation** — if the viewport scrolled, [`animate_layout`](Self::animate_layout)
     ///    animates the camera shift so the focused window becomes visible.
+    ///
+    /// # Why no `set_focused` here
+    ///
+    /// We deliberately do **not** call [`WindowRegistry::set_focused`] in this
+    /// path. `on_focus_changed` captures the *previous* focus from
+    /// `registry.focused()` before it calls `set_focused`; if we eagerly moved
+    /// the registry's focus here, that capture would see `prev == target` and
+    /// skip recoloring the old window — leaving its border stuck on the Focused
+    /// color. Letting the hook own `set_focused` keeps the prev/new pair
+    /// correct.
     fn dispatch_focus(&mut self, dir: Direction) -> SocketResponse {
         match self.active_scrolling_mut().focus(dir) {
             Some((focused_id, diff_opt)) => {
-                // 2. Apply OS-level foreground focus to the target window.
                 let target_hwnd = focused_id.0;
+
+                // Push OS foreground focus. The resulting
+                // EVENT_SYSTEM_FOREGROUND is handled by on_focus_changed (the
+                // single sink), which updates the registry focus and recolors
+                // both the old and new windows' borders. Do NOT set_focused
+                // here — see the doc comment above.
                 if !registry_win32::set_foreground_window(target_hwnd) {
                     log::warn!("dispatch_focus: SetForegroundWindow failed for hwnd {target_hwnd}");
                 }
 
-                // 3. Sync the registry's focus tracking.
-                self.registry.set_focused(target_hwnd);
-
-                // 4. Animate the camera shift if the viewport moved.
+                // Animate the camera shift if the viewport moved.
                 if let Some(diff) = diff_opt {
                     self.animate_layout(&diff);
                 }
@@ -601,6 +617,13 @@ impl ScrollTilingManager {
     /// [`dispatch_move_window_to_workspace`]. The foreground hook
     /// (`on_focus_changed`) calls [`switch_workspace_layout`] directly — it
     /// must not re-push foreground because the OS already chose the window.
+    ///
+    /// Like `dispatch_focus`, this does **not** call `set_focused`: the
+    /// `EVENT_SYSTEM_FOREGROUND` fired by `set_foreground_window` is consumed
+    /// by `on_focus_changed` (the single sink), which updates the registry
+    /// focus and recolors the prev/new borders. Setting focus eagerly here
+    /// would poison `on_focus_changed`'s previous-focus capture and leave the
+    /// old workspace's focused border stuck on the Focused color.
     fn switch_active_workspace(
         &mut self,
         target_id: WorkspaceId,
@@ -610,9 +633,10 @@ impl ScrollTilingManager {
             return false;
         }
 
-        // Re-establish tiling focus on the destination. Without this the
-        // registry's `focused` could keep pointing at a window in the (now
-        // parked) previous workspace. Mirrors `dispatch_focus`.
+        // Re-establish OS foreground on the destination's last-focused window.
+        // The resulting EVENT_SYSTEM_FOREGROUND is handled by on_focus_changed
+        // (registry focus + border recolor). Do NOT set_focused here — see the
+        // doc comment above.
         if let Some(target) = self.active_scrolling().last_focused_window() {
             let target_hwnd = target.0;
             if !registry_win32::set_foreground_window(target_hwnd) {
@@ -620,7 +644,6 @@ impl ScrollTilingManager {
                     "switch_active_workspace: SetForegroundWindow failed for hwnd {target_hwnd}"
                 );
             }
-            self.registry.set_focused(target_hwnd);
         }
 
         true
