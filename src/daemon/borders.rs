@@ -44,14 +44,20 @@ impl ScrollTilingManager {
             | WindowState::Ignored(_) => return None,
         };
         let mut style = style_for_state(&self.config.borders, state);
-        // Resolve the target's Windows 11 corner preference so the border ring
-        // rounds to match the window (rounded window → rounded border; square
-        // window → square border). Falls back to `Default` (Win11 rounds
-        // top-level windows) if the DWM query fails or runs on pre-Win11.
+        // Reuse the existing border's cached corner preference when one is
+        // already attached; only pay the DWM round-trip on the creation path
+        // (border == None). A window's corner rounding never changes at
+        // runtime, so this turns a per-focus-change `DwmGetWindowAttribute`
+        // into a cheap field read. See `Border::corner_preference`.
         // See `docs/src/dev-guide/borders.md`.
-        style.corner_preference =
-            crate::registry::win32::get_window_corner_preference(HWND(hwnd as *mut _))
-                .unwrap_or_default();
+        style.corner_preference = window
+            .border
+            .as_ref()
+            .map(|b| b.corner_preference())
+            .unwrap_or_else(|| {
+                crate::registry::win32::get_window_corner_preference(HWND(hwnd as *mut _))
+                    .unwrap_or_default()
+            });
         Some(style)
     }
 

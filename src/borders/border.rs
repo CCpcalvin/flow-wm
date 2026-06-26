@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP,
+    HDC, HGDIOBJ, ReleaseDC, SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -170,6 +170,21 @@ struct BorderInner {
     target: isize,
     /// Current style (color + thickness).
     style: Mutex<BorderStyle>,
+    /// Cached DWM corner preference resolved once from the target window at
+    /// creation. A window's corner rounding essentially never changes at
+    /// runtime, so [`Border::corner_preference`] lets the daemon avoid a
+    /// `DwmGetWindowAttribute` round-trip on every focus change (the recolor
+    /// path) — see `daemon::borders::border_style_for`.
+    corner_preference: CornerPreference,
+    /// Cached rendered ring surface (DIB + memory DC + shape signature).
+    ///
+    /// Lets [`Border::paint`] skip the expensive `CreateCompatibleDC` +
+    /// `CreateDIBSection` + per-pixel `fill_border_ring` work when the new
+    /// paint matches the cached shape (move-only → skip entirely; color-only
+    /// change → recolor in place). This is the hot path on focus changes and
+    /// workspace switches, where the ring geometry is stable and only the
+    /// color (Focused ↔ Unfocused) or position differs.
+    surface: Mutex<Option<CachedSurface>>,
 }
 
 impl Border {
@@ -230,6 +245,12 @@ impl Border {
                 overlay: Mutex::new(hwnd.0 as isize),
                 target: target_hwnd,
                 style: Mutex::new(style),
+                // Cache the corner preference baked into the creation style so
+                // the daemon can reuse it on subsequent recolors without
+                // re-querying DWM.
+                corner_preference: style.corner_preference,
+                // No bitmap rendered yet — the first `paint` builds it.
+                surface: Mutex::new(None),
             }),
         };
         // Reveal the overlay. Until set_geometry paints a bitmap the layered
@@ -249,6 +270,18 @@ impl Border {
     #[must_use]
     pub(crate) fn hwnd(&self) -> isize {
         *self.inner.overlay.lock().expect("overlay mutex poisoned")
+    }
+
+    /// Returns the target window's corner-rounding preference, cached at
+    /// border creation.
+    ///
+    /// The daemon uses this in `border_style_for` to build the recolor style
+    /// without re-issuing a `DwmGetWindowAttribute` call on every focus
+    /// change — the preference is frozen once per window because a window's
+    /// corner rounding never changes at runtime.
+    #[must_use]
+    pub(crate) fn corner_preference(&self) -> CornerPreference {
+        self.inner.corner_preference
     }
 
     /// Re-assert the overlay's z-order so it sits just above its target
@@ -314,9 +347,11 @@ impl Border {
     /// fixing the previous misalignment where it sat over the invisible
     /// resize border.
     ///
-    /// Performs both `SetWindowPos` (move + resize the overlay HWND) and
-    /// `UpdateLayeredWindow` (rebuild the ring bitmap). Safe to call with
-    /// a destroyed overlay (no-op) or a zero-area rect (early return).
+    /// Performs `SetWindowPos` (move + resize + re-seat z-order) and then
+    /// refreshes pixels via [`paint`](Self::paint). When the size and style are
+    /// unchanged (the common teleport / animator case) [`paint`](Self::paint)
+    /// is a no-op, so this reduces to a single `SetWindowPos` move. Safe to
+    /// call with a destroyed overlay (no-op) or a zero-area rect (early return).
     ///
     /// Note: the commanded rect is *not* cached. [`set_style`](Self::set_style)
     /// queries the overlay's actual position at repaint time, which stays
@@ -389,11 +424,14 @@ impl Border {
     /// Update the border color/thickness and repaint at the overlay's current
     /// position.
     ///
-    /// Does not move the overlay — only rebuilds the ring bitmap with the new
+    /// Does not move the overlay — only updates the ring pixels with the new
     /// style. The repaint position is queried from the overlay HWND itself
     /// (via [`overlay_rect`](Self::overlay_rect)), so it stays correct even
     /// after the animator has moved the overlay via `SetWindowPos`. If the
     /// overlay is destroyed or its rect cannot be queried, this is a no-op.
+    ///
+    /// [`paint`](Self::paint) recolors the cached bitmap in place when only the
+    /// color changed (the focus-switch case), avoiding a full DIB rebuild.
     pub(crate) fn set_style(&self, style: BorderStyle) {
         // Short-circuit when the style is unchanged. Focus changes route every
         // potentially-affected border through here, and skipping the repaint
@@ -426,11 +464,26 @@ impl Border {
         let _ = unsafe { ShowWindow(hwnd, cmd) };
     }
 
-    /// Rebuild the ring bitmap for `rect` and upload it via
-    /// `UpdateLayeredWindow`. The overlay HWND is positioned separately by
+    /// Render the ring for `rect` and upload it via `UpdateLayeredWindow`.
+    ///
+    /// Uses the cached [`CachedSurface`] to avoid the expensive GDI churn
+    /// (`CreateCompatibleDC` + `CreateDIBSection` + per-pixel
+    /// [`fill_border_ring`]) on the common cases:
+    ///
+    /// - **Move-only** (same size + style, e.g. `teleport_workspaces` or the
+    ///   animator moving the overlay via `SetWindowPos`): the cached bitmap is
+    ///   already composited, so this is a no-op — `SetWindowPos` already moved
+    ///   the layered window and the compositor follows.
+    /// - **Color-only change** (focus switch Focused ↔ Unfocused, same size):
+    ///   recolor the cached DIB pixels in place and re-upload. No DIB realloc.
+    /// - **Shape change** (size / thickness / corner): rebuild the cache.
+    ///
+    /// The overlay HWND itself is positioned separately by
     /// [`set_geometry`](Self::set_geometry); this only updates pixels.
     fn paint(&self, rect: Rect) {
-        if rect.is_empty() {
+        let w = rect.width;
+        let h = rect.height;
+        if w <= 0 || h <= 0 {
             return;
         }
         let raw = *self.inner.overlay.lock().expect("overlay mutex poisoned");
@@ -438,147 +491,275 @@ impl Border {
             return;
         }
         let overlay_hwnd = HWND(raw as *mut _);
-        let target_rect = RECT {
-            left: rect.x,
-            top: rect.y,
-            right: rect.right(),
-            bottom: rect.bottom(),
-        };
-        paint_ring(
-            overlay_hwnd,
-            &target_rect,
-            *self.inner.style.lock().expect("style mutex poisoned"),
-        );
+        let style = *self.inner.style.lock().expect("style mutex poisoned");
+
+        let mut surface_guard = self.inner.surface.lock().expect("surface mutex poisoned");
+        let shape_matches = surface_guard
+            .as_ref()
+            .is_some_and(|s| s.shape_matches(w, h, &style));
+        if shape_matches {
+            let surface = surface_guard.as_mut().expect("shape_matches implies Some");
+            if surface.color == style.color {
+                // Identical bitmap already composited at this size + style. The
+                // overlay was moved or re-asserted; nothing to upload.
+                return;
+            }
+            // Same ring geometry, new color: recolor the cached pixels in
+            // place and re-upload. Avoids CreateDIBSection + fill_border_ring.
+            surface.recolor(style.color);
+            surface.upload(overlay_hwnd, &rect);
+            return;
+        }
+        // Shape changed (size / thickness / corner) or first paint: build a
+        // fresh surface, upload it, and replace the cache (dropping the old
+        // one frees its GDI handles).
+        if let Some(surface) = CachedSurface::build(w, h, &style) {
+            surface.upload(overlay_hwnd, &rect);
+            *surface_guard = Some(surface);
+        }
+        // GDI failure: leave the previous cache intact so a transient failure
+        // doesn't lose the last good bitmap.
     }
 }
 
-// ── Layered bitmap rendering ────────────────────────────────────────
+// ── Cached layered surface ──────────────────────────────────────────
 
-/// Rebuild the colored-ring bitmap for `overlay_hwnd` at `target_rect` and
-/// upload it via `UpdateLayeredWindow` (`ULW_ALPHA`).
+/// Cached DIB section + memory DC holding the last-rendered border ring.
 ///
-/// The bitmap is `width × height` 32-bit ARGB with the outer `thickness`-px
-/// ring set to `style.color` and the interior fully transparent. Every
-/// `Create*` GDI call is paired with its `Delete*`; all resource lifetimes
-/// are confined to this function so nothing leaks across paints.
+/// Kept on [`BorderInner`] so consecutive paints of the same ring geometry
+/// skip the GDI allocation churn (see [`Border::paint`]). The signature
+/// `(w, h, thickness, corner_preference)` identifies the ring geometry;
+/// `color` tracks what is currently baked into the pixels so a color-only
+/// change can recolor in place via [`CachedSurface::recolor`].
 ///
-/// Failures are reported at `trace` level (expected during shutdown races)
-/// rather than propagated: a missed paint frame is cosmetic, not fatal.
-fn paint_ring(overlay_hwnd: HWND, target_rect: &RECT, style: BorderStyle) {
-    let w = (target_rect.right - target_rect.left).max(0);
-    let h = (target_rect.bottom - target_rect.top).max(0);
-    if w == 0 || h == 0 {
-        return;
+/// Every `Create*` GDI handle (`hdc_mem`, `bitmap`, the displaced `old_obj`)
+/// is paired with its `Delete*` in [`Drop`], so replacing a `CachedSurface`
+/// (e.g. on a shape change) frees the prior surface's resources.
+struct CachedSurface {
+    /// Pixel width / height the DIB was created for.
+    w: i32,
+    h: i32,
+    /// Ring thickness (`style.width_px`) baked into the cached pixels.
+    thickness: u32,
+    /// Corner preference baked into the cached ring shape.
+    corner: CornerPreference,
+    /// The color currently baked into the cached pixels.
+    color: Color,
+    /// Memory DC the bitmap is selected into; reused for every upload.
+    hdc_mem: HDC,
+    /// The DIB section handle. Owns the pixel buffer at `bits`.
+    bitmap: HBITMAP,
+    /// Object displaced when `bitmap` was selected into `hdc_mem`; restored on
+    /// drop so `DeleteObject(bitmap)` succeeds.
+    old_obj: HGDIOBJ,
+    /// Pointer into the DIB section's pixel buffer (`len` u32s). Valid for the
+    /// lifetime of `bitmap`; written through to recolor without re-allocating.
+    bits: *mut u32,
+    len: usize,
+}
+
+impl std::fmt::Debug for CachedSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Omit the GDI handles / raw pointer — only the shape signature matters
+        // for debugging, and the windows-rs handle types needn't implement Debug.
+        f.debug_struct("CachedSurface")
+            .field("w", &self.w)
+            .field("h", &self.h)
+            .field("thickness", &self.thickness)
+            .field("corner", &self.corner)
+            .field("color", &self.color)
+            .finish_non_exhaustive()
     }
-    let thickness = style.width_px as usize;
-    let corner_radius = corner_radius_px(style.corner_preference, thickness);
+}
 
-    // SAFETY: All GDI calls below are well-formed. We pair every Create*
-    // with its matching Delete*; the DC/bitmap lifetimes are confined to
-    // this function so they cannot leak across redraws.
-    unsafe {
-        // Screen DC for CreateCompatibleDC; released immediately.
-        let hdc_screen = GetDC(None);
-        if hdc_screen.is_invalid() {
-            log::trace!("borders: GetDC failed for screen");
-            return;
-        }
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-        let _ = ReleaseDC(None, hdc_screen);
-        if hdc_mem.is_invalid() {
-            log::trace!("borders: CreateCompatibleDC failed");
-            return;
-        }
+impl CachedSurface {
+    /// Whether the cached ring geometry matches the given dimensions + style.
+    fn shape_matches(&self, w: i32, h: i32, style: &BorderStyle) -> bool {
+        self.w == w
+            && self.h == h
+            && self.thickness == style.width_px
+            && self.corner == style.corner_preference
+    }
 
-        // Top-down 32-bit ARGB DIB section (negative biHeight = top-down).
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w,
-                biHeight: -h,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                biSizeImage: (w as u32) * (h as u32) * 4,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [Default::default()],
-        };
+    /// Allocate a `w × h` DIB + memory DC and fill the ring for `style`.
+    ///
+    /// Returns `None` if any GDI call fails (logged at `trace`); the caller
+    /// leaves the previous cache intact so a transient failure doesn't lose
+    /// the last good bitmap.
+    fn build(w: i32, h: i32, style: &BorderStyle) -> Option<Self> {
+        // SAFETY: GetDC / CreateCompatibleDC / CreateDIBSection / SelectObject
+        // are well-formed for these arguments. Each Create* is paired with
+        // cleanup either on this error path or in `Drop`.
+        unsafe {
+            // Screen DC for CreateCompatibleDC; released immediately.
+            let hdc_screen = GetDC(None);
+            if hdc_screen.is_invalid() {
+                log::trace!("borders: GetDC failed for screen");
+                return None;
+            }
+            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+            let _ = ReleaseDC(None, hdc_screen);
+            if hdc_mem.is_invalid() {
+                log::trace!("borders: CreateCompatibleDC failed");
+                return None;
+            }
 
-        let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let bitmap =
-            match CreateDIBSection(Some(hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::trace!("borders: CreateDIBSection failed: {e}");
-                    let _ = DeleteDC(hdc_mem);
-                    return;
-                }
+            // Top-down 32-bit ARGB DIB section (negative biHeight = top-down).
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    biSizeImage: (w as u32) * (h as u32) * 4,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [Default::default()],
             };
-        if bits_ptr.is_null() {
-            let _ = DeleteObject(bitmap.into());
-            let _ = DeleteDC(hdc_mem);
-            return;
+
+            let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+            let bitmap =
+                match CreateDIBSection(Some(hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::trace!("borders: CreateDIBSection failed: {e}");
+                        let _ = DeleteDC(hdc_mem);
+                        return None;
+                    }
+                };
+            if bits_ptr.is_null() {
+                let _ = DeleteObject(bitmap.into());
+                let _ = DeleteDC(hdc_mem);
+                return None;
+            }
+
+            // Populate pixels: outer thickness-px ring colored, interior 0.
+            let len = (w as usize) * (h as usize);
+            let bits = bits_ptr as *mut u32;
+            std::ptr::write_bytes(bits, 0, len);
+            // SAFETY: CreateDIBSection sized the buffer to `len` u32s; the
+            // slice borrow is confined to the fill call and is not aliased.
+            let pixels = std::slice::from_raw_parts_mut(bits, len);
+            let thickness = style.width_px as usize;
+            let corner_radius = corner_radius_px(style.corner_preference, thickness);
+            let colored = pack_bgra(style.color, 0xFF);
+            fill_border_ring(
+                pixels,
+                w as usize,
+                h as usize,
+                thickness,
+                corner_radius,
+                colored,
+            );
+
+            // Select the bitmap into the memory DC for UpdateLayeredWindow.
+            let old_obj = SelectObject(hdc_mem, bitmap.into());
+
+            Some(CachedSurface {
+                w,
+                h,
+                thickness: style.width_px,
+                corner: style.corner_preference,
+                color: style.color,
+                hdc_mem,
+                bitmap,
+                old_obj,
+                bits,
+                len,
+            })
         }
+    }
 
-        // Populate pixels: outer thickness-px ring colored, interior 0.
-        let len = (w as usize) * (h as usize);
-        let pixels: *mut u32 = bits_ptr as *mut u32;
-        std::ptr::write_bytes(pixels, 0, len);
-        // SAFETY: CreateDIBSection sized the buffer to len u32s; the
-        // slice borrow is confined to the fill call and not aliased.
-        let pixels_slice: &mut [u32] = std::slice::from_raw_parts_mut(pixels, len);
-        let colored = pack_bgra(style.color, 0xFF);
-        fill_border_ring(
-            pixels_slice,
-            w as usize,
-            h as usize,
-            thickness,
-            corner_radius,
-            colored,
-        );
+    /// Recolor the cached ring pixels to `new_color` in place.
+    ///
+    /// Ring pixels are `pack_bgra(color, 0xFF)` (always nonzero — the alpha
+    /// byte is `0xFF`); interior and outside-corner pixels are exactly `0`.
+    /// Overwriting every nonzero pixel with the new packed color recolors the
+    /// ring without recomputing its geometry.
+    fn recolor(&mut self, new_color: Color) {
+        let packed = pack_bgra(new_color, 0xFF);
+        // SAFETY: `bits` points into the DIB section owned by `self.bitmap`,
+        // sized `len` u32s; the slice borrow is confined to this call and is
+        // not aliased by anything else.
+        unsafe {
+            let pixels = std::slice::from_raw_parts_mut(self.bits, self.len);
+            for px in pixels.iter_mut() {
+                if *px != 0 {
+                    *px = packed;
+                }
+            }
+        }
+        self.color = new_color;
+    }
 
-        // Select the bitmap into the memory DC for UpdateLayeredWindow.
-        let old_obj = SelectObject(hdc_mem, bitmap.into());
-
+    /// Upload the cached bitmap to `overlay_hwnd` at `rect` via
+    /// `UpdateLayeredWindow` (`ULW_ALPHA`). Also re-asserts the composited
+    /// position via `pt_dst`.
+    fn upload(&self, overlay_hwnd: HWND, rect: &Rect) {
         let pt_dst = POINT {
-            x: target_rect.left,
-            y: target_rect.top,
+            x: rect.x,
+            y: rect.y,
         };
         let pt_src = POINT { x: 0, y: 0 };
-        let size = SIZE { cx: w, cy: h };
+        let size = SIZE {
+            cx: self.w,
+            cy: self.h,
+        };
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        // ULW_ALPHA: use per-pixel alpha from the source DC.
-        let result = UpdateLayeredWindow(
-            overlay_hwnd,
-            None,
-            Some(&pt_dst),
-            Some(&size),
-            Some(hdc_mem),
-            Some(&pt_src),
-            COLORREF(0),
-            Some(&blend),
-            ULW_ALPHA,
-        );
-
-        // Restore + release GDI resources regardless of outcome.
-        SelectObject(hdc_mem, old_obj);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(hdc_mem);
-
-        if result.is_err() {
-            log::trace!("borders: UpdateLayeredWindow failed");
+        // SAFETY: UpdateLayeredWindow reads our cached memory DC (with the
+        // bitmap selected in) and pushes the composited surface to the overlay.
+        // Failures are cosmetic (logged at trace) and expected during shutdown
+        // races.
+        unsafe {
+            let result = UpdateLayeredWindow(
+                overlay_hwnd,
+                None,
+                Some(&pt_dst),
+                Some(&size),
+                Some(self.hdc_mem),
+                Some(&pt_src),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            );
+            if result.is_err() {
+                log::trace!("borders: UpdateLayeredWindow failed");
+            }
         }
     }
 }
+
+impl Drop for CachedSurface {
+    fn drop(&mut self) {
+        // SAFETY: these handles came from CreateCompatibleDC / CreateDIBSection
+        // / SelectObject. Restore the DC's original object, free the bitmap,
+        // then free the DC. DeleteDC deselects non-stock objects but does NOT
+        // delete them, so we DeleteObject the bitmap explicitly.
+        unsafe {
+            let _ = SelectObject(self.hdc_mem, self.old_obj);
+            let _ = DeleteObject(self.bitmap.into());
+            let _ = DeleteDC(self.hdc_mem);
+        }
+    }
+}
+
+// SAFETY: CachedSurface owns GDI handles (HDC / HBITMAP / HGDIOBJ) and a raw
+// pixel pointer, none of which are `Send` by default. All access happens on
+// the single main/IPC thread that owns the overlay HWND (see BorderInner's
+// threading note); these values are never dereferenced from another thread.
+// This matches the existing `unsafe impl Send for Window` argument.
+unsafe impl Send for CachedSurface {}
 
 // ── Pure helpers (testable without Win32) ─────────────────────────────
 
