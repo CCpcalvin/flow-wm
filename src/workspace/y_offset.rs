@@ -31,12 +31,16 @@
 //! | `= A`        | `0`       | The active workspace — on screen.          |
 //! | `> A`        | `+y_unit` | Below the active workspace (parked).       |
 //!
-//! When switching workspaces, only the **source** and **destination**
-//! participate in the animation. Non-participating workspaces whose parking
-//! *side* changed (e.g. ws 3-7 when switching 2 → 8 — they were below active
-//! 2, but become above active 8) are **silently teleported** (direct
-//! `SetWindowPos`, bypassing the animator) to restore the invariant without
-//! distracting motion.
+//! When switching workspaces, every non-empty workspace is submitted to the
+//! animator in a single batch. The **source** and **destination** animate
+//! into their new slots. Bystanders whose parking *side* changed (e.g. ws 3-7
+//! when switching 2 → 8 — they were below active 2, but become above active
+//! 8) are **teleported** first (direct `SetWindowPos`, before the animator
+//! runs) so the animator sees them already at target and moves them as a
+//! no-op; same-side bystanders are already at rest and also no-op. Any window
+//! still in flight from a previous, interrupted switch is retargeted by the
+//! animator reading its interpolated position — this is what prevents rapid
+//! switches from stranding bystanders mid-screen.
 //!
 //! # Where this lives
 //!
