@@ -274,16 +274,34 @@ impl Drop for KillingChild {
 /// test that panics — or a daemon that stalls on the isolated desktop — can
 /// never leak an orphaned `stmd.exe`. See [`KillingChild`] for details.
 pub fn start_test_daemon(pipe: &str, desktop_name: &str) -> Result<KillingChild, String> {
+    start_test_daemon_with_extra_args(pipe, desktop_name, &[])
+}
+
+/// Start `stmd` in test mode with additional CLI arguments (e.g. `--log-file`).
+///
+/// Same as [`start_test_daemon`] but appends caller-supplied arguments after
+/// the standard `--desktop` flag. Used by tests that need to redirect the
+/// daemon's log to an isolated file (the default daily log is shared across
+/// parallel test daemons, so reading it back is racy).
+pub fn start_test_daemon_with_extra_args(
+    pipe: &str,
+    desktop_name: &str,
+    extra_args: &[&str],
+) -> Result<KillingChild, String> {
     let exe = assert_cmd::cargo_bin!("stmd");
 
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     const DETACHED: u32 = 0x00000200 | 0x08000000;
 
-    let mut child = std::process::Command::new(&exe)
-        .arg("--desktop")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--desktop")
         .arg(desktop_name)
         .env("STM_PIPE_NAME", pipe)
-        .creation_flags(DETACHED)
+        .creation_flags(DETACHED);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn stmd: {e}"))?;
 

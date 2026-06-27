@@ -478,37 +478,59 @@ impl ScrollTilingManager {
     ///
     /// Implements the **vertical packing** workspace model: each workspace
     /// is parked one monitor-height (plus one `window_gap`) above or below
-    /// the active workspace, and only the source (previously active) and
-    /// destination (newly active) workspaces animate during a switch.
+    /// the active workspace. The source (previously active) and destination
+    /// (newly active) workspaces animate into their new slots; bystanders
+    /// are either pre-snapped (side-changed) or left at rest (same side).
     ///
     /// Called by [`switch_active_workspace`] (the IPC-path wrapper that also
     /// re-establishes tiling focus) and by `on_focus_changed` (the foreground
     /// hook, which must not re-push foreground — the OS already chose the
     /// window).
     ///
-    /// # Animation partitioning
+    /// # Animation model
     ///
-    /// Every non-empty workspace on the active monitor is classified into
-    /// exactly one of three buckets:
+    /// Every non-empty workspace on the active monitor is submitted to
+    /// [`animate_workspaces`](Self::animate_workspaces) in a single batch,
+    /// each at its post-switch `y_offset`. This mirrors the intra-workspace
+    /// [`animate_layout`](Self::animate_layout) pattern — submit every
+    /// projected target and let the animator decide.
     ///
-    /// | Bucket | Workspaces | Action |
-    /// |--------|------------|--------|
-    /// | **Animate** | source (`prev_active_id`) + destination (`target_id`) | submitted to [`animate_workspaces`](Self::animate_workspaces) as a single coordinated batch |
-    /// | **Teleport** | bystanders whose parked side changed (e.g. ws 3-7 when switching 2 → 8) | submitted to [`teleport_workspaces`](Self::teleport_workspaces) — instant `SetWindowPos`, no animator |
-    /// | **Untouched** | bystanders whose parked side stayed the same | skipped entirely |
+    /// The animator's `start_batch` reads each window's current position
+    /// (interpolated if mid-flight, `GetWindowRect` otherwise) and
+    /// `build_tweens` drops windows already at their target, so:
     ///
-    /// The animate/teleport split is what keeps the user's attention on the
-    /// two workspaces that are actually transitioning: a 10-workspace switch
-    /// could otherwise animate up to eight bystander workspaces all sliding
-    /// across the screen at once.
+    /// - **Participants** (source + dest) animate, because their offset
+    ///   genuinely changes.
+    /// - **Same-side bystanders at rest** produce `from == to` no-ops and
+    ///   do not move.
+    /// - **Same-side bystanders still mid-flight** from a prior switch are
+    ///   retargeted smoothly to their parked slot — this is the fix for the
+    ///   rapid switch-workspace stranding bug, where a window could
+    ///   otherwise be dropped mid-slide when the next switch replaced the
+    ///   active batch.
+    ///
+    /// # Side-changed bystanders (teleport pre-snap)
+    ///
+    /// A bystander whose parked *side* changed (e.g. ws 3–7 when switching
+    /// 2 → 8: below active 2, but above active 8) would otherwise slide
+    /// across the entire visible area. To avoid that visual noise, these are
+    /// first snapped instantly via [`teleport_workspaces`](Self::teleport_workspaces),
+    /// which `SetWindowPos`-es them to their new parked offset *before* the
+    /// animate batch runs. The animator then reads their post-teleport rect
+    /// via `GetWindowRect` (`from == to`) and drops them as no-ops, so they
+    /// stay snapped instead of sliding.
     ///
     /// # Why teleport before animate?
     ///
-    /// Teleport is called first so the bystander "backdrop" snaps into its
-    /// post-switch configuration before the participant animation begins.
-    /// If a bystander is currently mid-flight from a prior animation, the
-    /// teleport retargets it instantly to its new parked slot — exactly the
-    /// behaviour we want for windows the user isn't looking at.
+    /// Teleport must run first so the animator's `GetWindowRect` read sees
+    /// the snapped position and treats the window as a no-op. If the
+    /// animate batch were submitted first, the bystander would already have
+    /// a slide tween built against its pre-teleport rect. A bystander that
+    /// is *already mid-flight* from a prior switch is in the old active
+    /// batch, so the animator reads its interpolated position regardless of
+    /// the teleport — it slides to the new offset rather than snapping. This
+    /// case is rare, ends at the correct target, and reads as a natural
+    /// continuation of its existing motion.
     ///
     /// # Caller invariants
     ///
@@ -565,8 +587,10 @@ impl ScrollTilingManager {
             .collect();
         set_float_hwnds(&new_active_float_hwnds);
 
-        // Partition every non-empty workspace into the animate / teleport /
-        // skip buckets described in the method-level docs.
+        // Submit every non-empty workspace to the animator, and pre-snap the
+        // side-changed bystanders via teleport. See the method-level docs for
+        // why this mirrors the intra-workspace animate_layout pattern and how
+        // it fixes rapid-switch stranding.
         let mut animate_batches: Vec<(ActualLayout, i32)> = Vec::new();
         let mut teleport_batches: Vec<(ActualLayout, i32)> = Vec::new();
         for ws in self.active_monitor().workspaces() {
@@ -593,16 +617,28 @@ impl ScrollTilingManager {
                 entries: merged_entries,
             };
 
-            if is_participant {
-                animate_batches.push((merged, new_offset));
-            } else if side_changed {
-                teleport_batches.push((merged, new_offset));
+            // Pre-snap side-changed NON-participant bystanders so the animator
+            // later reads them (via GetWindowRect) already at their target and
+            // drops them as no-ops. Participants are excluded: their offset
+            // genuinely changed and they must animate.
+            if !is_participant && side_changed {
+                teleport_batches.push((merged.clone(), new_offset));
             }
-            // else: bystander at the same parked side — leave untouched.
+
+            // Every non-empty workspace goes to the animator. build_tweens
+            // drops windows already at their target (the teleported
+            // side-changed bystanders above, plus same-side static
+            // bystanders), and start_batch retargets any window still
+            // mid-flight from a prior switch — fixing rapid-switch stranding
+            // without per-window special-casing.
+            animate_batches.push((merged, new_offset));
         }
 
-        // Teleport first (instant backdrop), then animate the participants
-        // (single coordinated batch — source and dest transition in lockstep).
+        // Teleport first so the animator's GetWindowRect read sees the snapped
+        // side-changed bystanders, then submit the full batch. The animator
+        // drops the teleported bystanders and same-side static bystanders as
+        // no-ops, animates the participants, and retargets any window still
+        // mid-flight from a prior switch.
         self.teleport_workspaces(&teleport_batches);
         self.animate_workspaces(&animate_batches);
 
