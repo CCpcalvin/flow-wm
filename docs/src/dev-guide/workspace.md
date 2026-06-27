@@ -98,15 +98,15 @@ whole stack vertically.
 
 Three IPC commands implement this surface:
 
-- `stm dispatch switchworkspace <id>` — switch the active workspace.
+- `stm dispatch switch-workspace <id>` — switch the active workspace.
   **Implemented.** Animates a vertical-packing switch: the source and
   destination workspaces slide between their parked y-offsets in a single
   coordinated animation batch.
-- `stm dispatch movetoworkspace <id>` — move the focused window to another
+- `stm dispatch move-to-workspace <id>` — move the focused window to another
   workspace. **Implemented.** Mutates both the source and destination
   layouts, then switches the camera to the destination so the moved window
   is brought into view.
-- `stm dispatch swapworkspace <id>` — swap the active workspace with another.
+- `stm dispatch swap-workspace <id>` — swap the active workspace with another.
   **Stub.** Its protocol shape is locked in, but its animation model (two
   workspaces exchanging positions in the packed stack) is not yet decided,
   so it currently returns `unimplemented_command`.

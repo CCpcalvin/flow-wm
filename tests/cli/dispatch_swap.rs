@@ -1,4 +1,4 @@
-//! Integration tests for `stm dispatch swapcolumn` and `stm dispatch movewindow`.
+//! Integration tests for `stm dispatch swap-column` and `stm dispatch move-window`.
 //!
 //! These tests create an isolated desktop, start `stmd` on it, create dummy
 //! windows, and exercise the swap/move CLI commands. The daemon's layout is
@@ -58,16 +58,16 @@ fn column_window_ids(json: &serde_json::Value) -> Vec<Vec<i64>> {
         .unwrap_or_default()
 }
 
-// ── swapcolumn tests ─────────────────────────────────────────────────
+// ── swap-column tests ────────────────────────────────────────────────
 
-/// `stm dispatch swapcolumn right` swaps the focused column with its right
+/// `stm dispatch swap-column right` swaps the focused column with its right
 /// neighbour.
 ///
 /// Setup: two windows → two columns. Focus is moved to the leftmost column
-/// (via `focus left`, which is a no-op if already there) so that `swapcolumn
+/// (via `focus left`, which is a no-op if already there) so that `swap-column
 /// right` has a valid target. After the swap the column contents are exchanged.
 #[test]
-fn swapcolumn_right_swaps_two_columns() {
+fn swap_column_right_swaps_two_columns() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
@@ -96,7 +96,7 @@ fn swapcolumn_right_swaps_two_columns() {
 
     // Act: swap columns to the right.
     stm(&pipe)
-        .args(["dispatch", "swapcolumn", "right"])
+        .args(["dispatch", "swap-column", "right"])
         .assert()
         .stdout(predicate::str::contains("column swapped"))
         .success();
@@ -120,13 +120,13 @@ fn swapcolumn_right_swaps_two_columns() {
     );
 }
 
-/// `stm dispatch swapcolumn left` swaps the focused column with its left
+/// `stm dispatch swap-column left` swaps the focused column with its left
 /// neighbour.
 ///
 /// Setup: two windows → two columns. Focus is moved to the rightmost column
-/// (via `focus right`) so that `swapcolumn left` has a valid target.
+/// (via `focus right`) so that `swap-column left` has a valid target.
 #[test]
-fn swapcolumn_left_swaps_two_columns() {
+fn swap_column_left_swaps_two_columns() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
@@ -154,7 +154,7 @@ fn swapcolumn_left_swaps_two_columns() {
 
     // Act: swap columns to the left.
     stm(&pipe)
-        .args(["dispatch", "swapcolumn", "left"])
+        .args(["dispatch", "swap-column", "left"])
         .assert()
         .stdout(predicate::str::contains("column swapped"))
         .success();
@@ -173,13 +173,13 @@ fn swapcolumn_left_swaps_two_columns() {
     );
 }
 
-// ── movewindow tests ─────────────────────────────────────────────────
+// ── move-window tests ────────────────────────────────────────────────
 
-/// `stm dispatch movewindow right` on tiled windows is equivalent to
-/// `swapcolumn right` (the semantic "move" resolves to a column swap for
+/// `stm dispatch move-window right` on tiled windows is equivalent to
+/// `swap-column right` (the semantic "move" resolves to a column swap for
 /// horizontal movement of tiled windows).
 #[test]
-fn movewindow_right_swaps_two_columns() {
+fn move_window_right_swaps_two_columns() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
@@ -207,7 +207,7 @@ fn movewindow_right_swaps_two_columns() {
 
     // Act: move window right (semantic → column swap for tiled L/R).
     stm(&pipe)
-        .args(["dispatch", "movewindow", "right"])
+        .args(["dispatch", "move-window", "right"])
         .assert()
         .stdout(predicate::str::contains("window moved"))
         .success();
@@ -228,10 +228,10 @@ fn movewindow_right_swaps_two_columns() {
 
 // ── Edge-case tests ──────────────────────────────────────────────────
 
-/// `stm dispatch swapcolumn right` at the right edge (single column) returns
+/// `stm dispatch swap-column right` at the right edge (single column) returns
 /// an error — there is no column to swap with.
 #[test]
-fn swapcolumn_right_at_edge_returns_error() {
+fn swap_column_right_at_edge_returns_error() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
@@ -253,7 +253,7 @@ fn swapcolumn_right_at_edge_returns_error() {
 
     // Act: swap right should fail (no column to the right).
     stm(&pipe)
-        .args(["dispatch", "swapcolumn", "right"])
+        .args(["dispatch", "swap-column", "right"])
         .assert()
         .failure();
 }

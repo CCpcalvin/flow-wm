@@ -112,7 +112,7 @@ pub enum SocketMessage {
     /// - Floating window, any direction → nudge by a configurable shift.
     ///   *[deferred — not yet wired]*
     ///
-    /// Keeping `movewindow` separate from the concrete `SwapColumn`/`Swap*`
+    /// Keeping `move-window` separate from the concrete `SwapColumn`/`Swap*`
     /// messages lets the daemon own the "what does *move* mean here?"
     /// decision, so keybindings stay stable as floating support lands.
     MoveWindow {
@@ -180,7 +180,7 @@ pub enum SocketMessage {
     // bare integer, matching `WorkspaceId`'s `#[serde(transparent)]` impl.
     /// Switch the active monitor's focus to the given workspace.
     ///
-    /// Mirrors `stm dispatch switchworkspace <id>`. The previously active
+    /// Mirrors `stm dispatch switch-workspace <id>`. The previously active
     /// workspace is conceptually frozen in its packed position (above or
     /// below the target, the vertical analogue of horizontal column packing
     /// inside a `ScrollingSpace`) and the target slides into the viewport.
@@ -191,7 +191,7 @@ pub enum SocketMessage {
     /// Swap the active workspace with the target workspace in the monitor's
     /// workspace list.
     ///
-    /// Mirrors `stm dispatch swapworkspace <id>`. The two workspaces exchange
+    /// Mirrors `stm dispatch swap-workspace <id>`. The two workspaces exchange
     /// positions in the packed vertical stack; focus follows the originally
     /// active workspace to its new slot. This is the operation most other
     /// tiling managers omit but that is essential for rearranging a long
@@ -202,7 +202,7 @@ pub enum SocketMessage {
     },
     /// Move the focused window to the target workspace.
     ///
-    /// Mirrors `stm dispatch movetoworkspace <id>`. The focused window is
+    /// Mirrors `stm dispatch move-to-workspace <id>`. The focused window is
     /// detached from the active workspace's `ScrollingSpace` (with local
     /// focus succession — no OS foreground focus push) and re-inserted into
     /// the target workspace's `ScrollingSpace` after its currently focused
@@ -215,7 +215,7 @@ pub enum SocketMessage {
     /// `MoveToWorkspace`) to mirror the sibling [`MoveWindow`](Self::MoveWindow)
     /// message: both operate on the focused *window*, and the longer name
     /// makes the operand explicit. The CLI surface keeps the shorter
-    /// `movetoworkspace` for brevity.
+    /// `move-to-workspace` for brevity.
     MoveWindowToWorkspace {
         /// Destination workspace identifier.
         workspace_id: u32,

@@ -414,7 +414,7 @@ fn compile_rules(rules: Vec<WindowRule>) -> Vec<CompiledRule> {
 /// Evaluates rule layers in priority order (first match wins):
 ///
 /// 1. **User rules** — from `stm-rules.toml` (highest priority).
-/// 2. **Learned rules** — persisted user decisions from `setwindow` (`history-stm-rules.toml`).
+/// 2. **Learned rules** — persisted user decisions from `set-window` (`history-stm-rules.toml`).
 /// 3. **Default rules** — bundled at compile time (lowest rule priority).
 /// 4. **Default action** — fallback when no rule matches at any layer.
 ///
@@ -501,7 +501,7 @@ impl ClassificationPipeline {
     ///
     /// Learned rules sit between user rules and default rules in the priority
     /// chain — see (`docs/src/dev-guide/classification.md`). Call this after
-    /// the daemon records a new user decision (e.g. via `setwindow tile`)
+    /// the daemon records a new user decision (e.g. via `set-window tile`)
     /// so the next window of the same app is classified to the learned mode.
     ///
     /// Recompiles all regex patterns (cheap at human-frequency update rates).

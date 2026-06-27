@@ -33,11 +33,11 @@ Win32 hook thread are all in place and driving real window management:
 - **Dispatch surface**: focus, per-window swap, column swap, semantic move,
   scroll, expand/shrink/set column width, center, monocle toggle, close
   window. See [IPC & Watchdog](./ipc-and-watchdog.md).
-- **Floating windows**: tile↔float transitions (`setwindow float|tile|cycle`),
+- **Floating windows**: tile↔float transitions (`set-window float|tile|cycle`),
   centered default placement, and merged scroll+float animation batches. See
   [Floating Space](./floating-space.md).
-- **Workspaces**: ten workspaces per monitor; `switchworkspace` and
-  `movetoworkspace` animate a vertical-packing switch (animate / teleport /
+- **Workspaces**: ten workspaces per monitor; `switch-workspace` and
+  `move-to-workspace` animate a vertical-packing switch (animate / teleport /
   skip partitioning). See [Workspace Hierarchy](./workspace.md).
 - **Classification**: DWM-cloak, iconic, Alt-Tab visibility, and owner
   pre-filters, plus the four-layer user/learned/default/`default_action`
@@ -128,7 +128,7 @@ The current constructor hard-codes a single monitor derived from
 `get_primary_monitor_info()` ([`src/daemon/new.rs`](../../src/daemon/new.rs)).
 Expanding to multiple monitors requires iterating `EnumDisplayMonitors` /
 `MonitorFromPoint` + `GetMonitorInfoW`, building a `Monitor` per display,
-and adding `stm dispatch focusmonitor` / `movetoworkspace <id> <monitor>`
+and adding `stm dispatch focusmonitor` / `move-to-workspace <id> <monitor>`
 plumbing.
 
 ### Performance: Cloaking Off-Screen Windows

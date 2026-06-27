@@ -174,14 +174,14 @@ daemon. The config directory resolution chain is documented in
 | Command | Maps to |
 |---------|---------|
 | `stm dispatch focus left/right/up/down` | `FocusLeft/Right/Up/Down` |
-| `stm dispatch swapcolumn left/right` | `SwapColumn` |
-| `stm dispatch movewindow left/right` | `MoveWindow` |
-| `stm dispatch expandcolumn` | `ExpandColumn` |
-| `stm dispatch shrinkcolumn` | `ShrinkColumn` |
-| `stm dispatch closewindow` | `CloseWindow` |
-| `stm dispatch switchworkspace <id>` | `SwitchWorkspace` |
-| `stm dispatch swapworkspace <id>` | `SwapWorkspace` (stub) |
-| `stm dispatch movetoworkspace <id>` | `MoveWindowToWorkspace` |
+| `stm dispatch swap-column left/right` | `SwapColumn` |
+| `stm dispatch move-window left/right` | `MoveWindow` |
+| `stm dispatch expand-column` | `ExpandColumn` |
+| `stm dispatch shrink-column` | `ShrinkColumn` |
+| `stm dispatch close-window` | `CloseWindow` |
+| `stm dispatch switch-workspace <id>` | `SwitchWorkspace` |
+| `stm dispatch swap-workspace <id>` | `SwapWorkspace` (stub) |
+| `stm dispatch move-to-workspace <id>` | `MoveWindowToWorkspace` |
 
 The dispatch commands that change layout flow through the daemon's 3-stage
 pipeline (mutate, project, animate) as described in
