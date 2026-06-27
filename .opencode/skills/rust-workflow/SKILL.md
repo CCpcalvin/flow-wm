@@ -1,21 +1,30 @@
 ---
 name: rust-workflow
 description: >
-  Orchestrates multi-phase Rust binary feature implementation for the
-  ScrollingTilingManager on Windows — layout engine, registry (Win32 bridge),
-  config, IPC, and animation. Load proactively on any new feature request for
-  this project.
-  Do NOT load for Python/FastAPI features, Svelte frontend work, or cross-platform
-  Rust crates. Replaces the Python/Svelte workflow skill for this project.
-  Produces a phased plan with CoderAgent, TestEngineer, and CodeReviewer assignments.
+  Orchestration reference for multi-phase Rust feature work on the
+  ScrollingTilingManager Windows binary (layout, registry/Win32, config, IPC,
+  animation). Holds phase planning, parallel rules, module dependency layers,
+  re-spawn policy, and the feature-done checklist.
+
+  TRIGGER: loaded by the "Rust workflow gate" rule in AGENTS.md — do not decide
+  independently whether to load this skill. If you have been routed here, you are
+  running a non-trivial Rust task; read this file in full.
+
+  Scope: Windows binary under src/ only. Not for Python/FastAPI, Svelte frontend,
+  or cross-platform Rust crates. Produces CoderAgent / TestEngineer / CodeReviewer
+  assignments.
 version: 2
 ---
 
 # Rust Feature Workflow — ScrollingTilingManager (Windows Binary)
 
+> **When to load this skill** is decided by the "Rust workflow gate" in `AGENTS.md`,
+> not by this file. If you are reading this, a non-trivial Rust task is in progress.
+> This file covers the **how**: phase planning, parallel rules, and done-criteria.
+
 ## 1 — TaskManager
 
-Skip for trivial tasks (single-file, < 40 lines, no new types or module exports, no new Win32 calls).
+You may skip formal TaskManager phasing for simple non-trivial tasks — a single module, one phase, no cross-layer dependency. Everything below assumes phasing is warranted.
 
 Phase rules:
 - Each phase must be independently compilable with `cargo check`.
