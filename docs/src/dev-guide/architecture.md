@@ -100,7 +100,7 @@ the resulting `AppliedLayout` becomes the animator's move targets.
   applies defaults (code is the single source of truth), and derives layout
   parameters at startup. See [Config & Persistence](./config-and-persistence.md).
 - **HistoryStore** (`src/config/history.rs`) — persists the user's explicit
-  `setwindow` decisions (learned rules) to `history-stm-rules.toml` so the next
+  `set-window` decisions (learned rules) to `history-stm-rules.toml` so the next
   window of the same app is classified automatically. See
   [Classification & Learned Rules](./classification.md). (The recovery-snapshot
   persistence planned for `stm-watchdog` is not yet implemented — there is no

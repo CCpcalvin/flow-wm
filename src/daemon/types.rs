@@ -89,7 +89,7 @@ pub struct ScrollTilingManager {
 
     /// Per-app learned window modes, persisted to `history-stm-rules.toml`.
     ///
-    /// Records the user's explicit `setwindow float|tile` decisions so the
+    /// Records the user's explicit `set-window float|tile` decisions so the
     /// next window of the same app is classified automatically. See
     /// (`docs/src/dev-guide/classification.md`) for the priority chain.
     pub(super) history: HistoryStore,
@@ -212,8 +212,8 @@ impl ScrollTilingManager {
     /// active monitor.
     ///
     /// This is the workspace every IPC command and hook event operates on
-    /// by default. Workspace-switching commands (`switchworkspace`,
-    /// `movetoworkspace`) reassign the active index before animating.
+    /// by default. Workspace-switching commands (`switch-workspace`,
+    /// `move-to-workspace`) reassign the active index before animating.
     #[must_use]
     pub(super) fn active_workspace(&self) -> &Workspace {
         self.active_monitor().active_workspace()

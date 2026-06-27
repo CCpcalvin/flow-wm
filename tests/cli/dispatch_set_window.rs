@@ -1,4 +1,4 @@
-//! Integration tests for `stm dispatch setwindow {float,tile,cycle}`.
+//! Integration tests for `stm dispatch set-window {float,tile,cycle}`.
 //!
 //! These exercise the full `dispatch_set_window` → `set_window_to_float` →
 //! `set_window_to_tile` pipeline end-to-end on an isolated desktop: a real
@@ -35,7 +35,7 @@ const DISPATCH_SETTLE: Duration = Duration::from_millis(500);
 
 /// Count total tiled windows across all columns of a `query_layout_virtual`
 /// response. A floated window leaves the tiling layout, so this count drops
-/// by one on a successful `setwindow float`.
+/// by one on a successful `set-window float`.
 fn tiled_window_count(json: &serde_json::Value) -> usize {
     json["columns"]
         .as_array()
@@ -57,14 +57,14 @@ fn column_count(json: &serde_json::Value) -> usize {
 
 // ── tile → float → tile round-trip ───────────────────────────────────
 
-/// `stm dispatch setwindow float` removes the focused window from the tiling
-/// layout, and `stm dispatch setwindow tile` re-inserts it.
+/// `stm dispatch set-window float` removes the focused window from the tiling
+/// layout, and `stm dispatch set-window tile` re-inserts it.
 ///
 /// Setup: two windows → two columns. Focus is moved to the leftmost window
 /// (deterministic target). Floating it must collapse the layout to one
 /// tiled window; tiling it again must restore two tiled windows.
 #[test]
-fn setwindow_float_then_tile_roundtrips_layout() {
+fn set_window_float_then_tile_roundtrips_layout() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
@@ -97,7 +97,7 @@ fn setwindow_float_then_tile_roundtrips_layout() {
 
     // Act 1: float the focused window.
     stm(&pipe)
-        .args(["dispatch", "setwindow", "float"])
+        .args(["dispatch", "set-window", "float"])
         .assert()
         .stdout(predicate::str::contains("window set to float"))
         .success();
@@ -118,7 +118,7 @@ fn setwindow_float_then_tile_roundtrips_layout() {
 
     // Act 2: tile it again (OS focus stays on the floated window per spec).
     stm(&pipe)
-        .args(["dispatch", "setwindow", "tile"])
+        .args(["dispatch", "set-window", "tile"])
         .assert()
         .stdout(predicate::str::contains("window set to tile"))
         .success();
@@ -140,13 +140,13 @@ fn setwindow_float_then_tile_roundtrips_layout() {
 
 // ── cycle toggle ─────────────────────────────────────────────────────
 
-/// `stm dispatch setwindow cycle` toggles tiled → floating on the first call
-/// (mirroring `setwindow float` on a tiled window).
+/// `stm dispatch set-window cycle` toggles tiled → floating on the first call
+/// (mirroring `set-window float` on a tiled window).
 ///
 /// This covers the `WindowMode::Cycle` branch end-to-end; the `Cycle` decision
 /// itself is unit-tested in `src/daemon/dispatch.rs`.
 #[test]
-fn setwindow_cycle_toggles_tiled_to_floating() {
+fn set_window_cycle_toggles_tiled_to_floating() {
     let td = TestDesktop::create().expect("test desktop");
     let pipe = unique_pipe_name();
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
@@ -168,7 +168,7 @@ fn setwindow_cycle_toggles_tiled_to_floating() {
 
     // Act: cycle a tiled window → must float (leave the tiling layout).
     stm(&pipe)
-        .args(["dispatch", "setwindow", "cycle"])
+        .args(["dispatch", "set-window", "cycle"])
         .assert()
         .stdout(predicate::str::contains("window set to cycle"))
         .success();

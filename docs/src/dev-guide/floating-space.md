@@ -124,7 +124,7 @@ sequenceDiagram
     participant Reg as WindowRegistry
     participant Anim as Animator
 
-    CLI->>STM: setwindow float
+    CLI->>STM: set-window float
     STM->>Reg: focused()
     Reg-->>STM: WindowId
     STM->>SS: remove_window(focused)
@@ -163,7 +163,7 @@ sequenceDiagram
     participant Reg as WindowRegistry
     participant Anim as Animator
 
-    CLI->>STM: setwindow tile
+    CLI->>STM: set-window tile
     STM->>Reg: focused()
     Reg-->>STM: WindowId
     STM->>FS: remove(focused)
@@ -244,14 +244,14 @@ was deliberately differentiated.
 
 | Concept | Owner | Scope | Used for |
 |---------|-------|-------|----------|
-| **OS focus** (`registry.focused()`) | `WindowRegistry` | Global — the actual Win32 foreground window | Determining which window `setwindow` acts on; `SetForegroundWindow` calls |
+| **OS focus** (`registry.focused()`) | `WindowRegistry` | Global — the actual Win32 foreground window | Determining which window `set-window` acts on; `SetForegroundWindow` calls |
 | **`ScrollingSpace::last_focused_window`** | `ScrollingSpace` | Per-space — most recently interacted-with **tile** | Insert-after-focused, remove-with-succession, monocle target |
-| **(none for floats)** | — | — | `setwindow` operates on OS focus regardless of which space the window is in |
+| **(none for floats)** | — | — | `set-window` operates on OS focus regardless of which space the window is in |
 
 ### Why `last_focused_window` (not `focused`)
 
 The original field was named `focused`, which implied OS-level foreground. This
-caused confusion when implementing `setwindow`: is "the focused window" the
+caused confusion when implementing `set-window`: is "the focused window" the
 OS-foreground window or the scrolling space's internal cursor? Renaming to
 `last_focused_window` makes the "history cursor" semantics explicit — it tracks
 the most recently interacted-with **tile within this space**, not the global
@@ -299,9 +299,9 @@ for the full design rationale.
 ### Command Surface
 
 ```
-stm dispatch setwindow float     # float the focused window
-stm dispatch setwindow tile      # tile the focused window
-stm dispatch setwindow cycle     # toggle based on current state
+stm dispatch set-window float     # float the focused window
+stm dispatch set-window tile      # tile the focused window
+stm dispatch set-window cycle     # toggle based on current state
 ```
 
 The IPC wire format:

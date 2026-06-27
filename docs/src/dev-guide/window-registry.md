@@ -113,7 +113,7 @@ stateDiagram-v2
 ```
 
 User-driven tile ↔ float transitions **are** implemented via
-`stm dispatch setwindow float|tile|cycle` — see [Floating Space](./floating-space.md)
+`stm dispatch set-window float|tile|cycle` — see [Floating Space](./floating-space.md)
 for the full transition table and animation. Two directions remain unimplemented:
 
 - **Tiling → `Ignored(Maximized)`** — a tiled window the user then maximizes is

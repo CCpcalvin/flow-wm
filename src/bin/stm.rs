@@ -8,7 +8,7 @@
 //! | Lifecycle | `start`, `stop` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
 //! | Query | `query all` |
-//! | Dispatch | `dispatch focus\|swapcolumn\|movewindow\|expandcolumn\|shrinkcolumn\|closewindow\|switchworkspace\|movetoworkspace`, plus stub `swapworkspace` |
+//! | Dispatch | `dispatch focus\|swap-column\|move-window\|expand-column\|shrink-column\|close-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
 //!
 //! See the developer guide's *IPC & Watchdog* chapter
 //! (`docs/src/dev-guide/ipc-and-watchdog.md`) for the full command reference.
@@ -118,7 +118,7 @@ enum QueryCommands {
 /// Dispatch subcommands — one per action category.
 ///
 /// Each variant wraps a further subcommand tree so the CLI stays organized as
-/// more actions are added (swapcolumn, swapwindow, etc.).
+/// more actions are added (swap-column, swap-window, etc.).
 ///
 /// # Layout pipeline
 ///
@@ -144,7 +144,6 @@ enum DispatchCommands {
         direction: FocusDirection,
     },
     /// Swap the focused column with its left/right neighbour.
-    #[command(name = "swapcolumn")]
     SwapColumn {
         #[command(subcommand)]
         direction: HorizontalDirection,
@@ -154,7 +153,6 @@ enum DispatchCommands {
     /// This is a semantic command — the daemon decides what "move" means
     /// based on window state (tiled left/right = column swap; floating =
     /// pixel nudge once supported).
-    #[command(name = "movewindow")]
     MoveWindow {
         #[command(subcommand)]
         direction: HorizontalDirection,
@@ -164,20 +162,17 @@ enum DispatchCommands {
     ///
     /// Sends [`SocketMessage::ExpandColumn`]. The daemon widens the focused
     /// column to the next `column_width` boundary and animates the result.
-    #[command(name = "expandcolumn")]
     ExpandColumn,
     /// Shrink the focused column width by one column step.
     ///
     /// Sends [`SocketMessage::ShrinkColumn`]. The daemon narrows the focused
     /// column to the previous `column_width` boundary and animates the result.
-    #[command(name = "shrinkcolumn")]
     ShrinkColumn,
     /// Center the viewport so the focused column lands at the monitor midpoint.
     ///
     /// Sends [`SocketMessage::Center`]. The daemon slides the viewport so the
     /// focused column lands at the monitor midpoint using the variable-width
     /// prefix sum — works correctly even with expanded or shrunk columns.
-    #[command(name = "center")]
     Center,
     /// Close the currently focused window.
     ///
@@ -187,14 +182,12 @@ enum DispatchCommands {
     /// application can run its normal shutdown logic (prompt to save unsaved
     /// work, release resources, etc.). The window is removed from the layout
     /// automatically once Win32 reports its destruction.
-    #[command(name = "closewindow")]
     CloseWindow,
     /// Set the focused window's tiling mode.
     ///
     /// Maps to [`SocketMessage::SetWindow`]. Sends
-    /// `stm dispatch setwindow float|tile|cycle` to the daemon, which
+    /// `stm dispatch set-window float|tile|cycle` to the daemon, which
     /// transitions the focused window between floating and tiling modes.
-    #[command(name = "setwindow")]
     SetWindow {
         #[command(subcommand)]
         mode: WindowMode,
@@ -210,10 +203,9 @@ enum DispatchCommands {
     /// Switch the active workspace.
     ///
     /// Maps to [`SocketMessage::SwitchWorkspace`]. Sends
-    /// `stm dispatch switchworkspace <id>` to the daemon, which slides the
+    /// `stm dispatch switch-workspace <id>` to the daemon, which slides the
     /// requested workspace into the viewport and parks the previously active
     /// one above or below it in a single coordinated animation.
-    #[command(name = "switchworkspace")]
     SwitchWorkspace {
         /// Identifier of the workspace to switch to (niri-style `u32`).
         workspace_id: u32,
@@ -221,11 +213,10 @@ enum DispatchCommands {
     /// Swap the active workspace with another workspace.
     ///
     /// Maps to [`SocketMessage::SwapWorkspace`]. Sends
-    /// `stm dispatch swapworkspace <id>` to the daemon, which will
+    /// `stm dispatch swap-workspace <id>` to the daemon, which will
     /// (eventually) exchange the positions of the active workspace and the
     /// target in the monitor's vertical workspace stack, with focus following
     /// the originally active workspace.
-    #[command(name = "swapworkspace")]
     SwapWorkspace {
         /// Identifier of the workspace to swap with the active one.
         workspace_id: u32,
@@ -233,16 +224,16 @@ enum DispatchCommands {
     /// Move the focused window to another workspace.
     ///
     /// Maps to [`SocketMessage::MoveWindowToWorkspace`]. Sends
-    /// `stm dispatch movetoworkspace <id>` to the daemon, which detaches the
+    /// `stm dispatch move-to-workspace <id>` to the daemon, which detaches the
     /// focused window from the active workspace's `ScrollingSpace` (with
     /// local focus succession — no OS foreground focus push) and re-inserts
     /// it into the target workspace's `ScrollingSpace` after its focused
     /// column. Focus stays on the source workspace.
     ///
-    /// The CLI command name is the shorter `movetoworkspace` for brevity,
+    /// The CLI command name is the shorter `move-to-workspace` for brevity,
     /// even though the underlying IPC variant is `MoveWindowToWorkspace`
-    /// (mirroring the sibling `MoveWindow` operation).
-    #[command(name = "movetoworkspace")]
+    /// (mirroring the sibling `move-window` operation).
+    #[command(name = "move-to-workspace")]
     MoveWindowToWorkspace {
         /// Identifier of the destination workspace.
         workspace_id: u32,
@@ -262,11 +253,11 @@ enum FocusDirection {
     Down,
 }
 
-/// Horizontal direction for `stm dispatch swapcolumn|movewindow <dir>`.
+/// Horizontal direction for `stm dispatch swap-column|move-window <dir>`.
 ///
 /// Only left/right is offered: column swaps are inherently horizontal, and
-/// the current `movewindow` implementation resolves to a column swap for
-/// tiled windows. When `movewindow` gains vertical (within-column) support,
+/// the current `move-window` implementation resolves to a column swap for
+/// tiled windows. When `move-window` gains vertical (within-column) support,
 /// it will switch to a four-way direction enum of its own.
 #[derive(Debug, Subcommand)]
 enum HorizontalDirection {
@@ -487,8 +478,8 @@ fn cmd_query_all() -> Result<(), String> {
 fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
     match command {
         DispatchCommands::Focus { direction } => cmd_dispatch_focus(direction),
-        DispatchCommands::SwapColumn { direction } => cmd_dispatch_swapcolumn(direction),
-        DispatchCommands::MoveWindow { direction } => cmd_dispatch_movewindow(direction),
+        DispatchCommands::SwapColumn { direction } => cmd_dispatch_swap_column(direction),
+        DispatchCommands::MoveWindow { direction } => cmd_dispatch_move_window(direction),
         DispatchCommands::ExpandColumn => {
             send_command(SocketMessage::ExpandColumn, "column expanded")
         }
@@ -497,7 +488,7 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
         }
         DispatchCommands::Center => send_command(SocketMessage::Center, "viewport centered"),
         DispatchCommands::CloseWindow => send_command(SocketMessage::CloseWindow, "window closed"),
-        DispatchCommands::SetWindow { mode } => cmd_dispatch_setwindow(mode),
+        DispatchCommands::SetWindow { mode } => cmd_dispatch_set_window(mode),
         DispatchCommands::SwitchWorkspace { workspace_id } => send_command(
             SocketMessage::SwitchWorkspace { workspace_id },
             "workspace switched",
@@ -526,8 +517,8 @@ fn cmd_dispatch_focus(direction: FocusDirection) -> Result<(), String> {
 
 /// Send a column-swap command to the daemon.
 ///
-/// Maps `stm dispatch swapcolumn left|right` to [`SocketMessage::SwapColumn`].
-fn cmd_dispatch_swapcolumn(direction: HorizontalDirection) -> Result<(), String> {
+/// Maps `stm dispatch swap-column left|right` to [`SocketMessage::SwapColumn`].
+fn cmd_dispatch_swap_column(direction: HorizontalDirection) -> Result<(), String> {
     let msg = match direction {
         HorizontalDirection::Left => SocketMessage::SwapColumn {
             direction: Direction::Left,
@@ -541,9 +532,9 @@ fn cmd_dispatch_swapcolumn(direction: HorizontalDirection) -> Result<(), String>
 
 /// Send a semantic move-window command to the daemon.
 ///
-/// Maps `stm dispatch movewindow left|right` to [`SocketMessage::MoveWindow`].
+/// Maps `stm dispatch move-window left|right` to [`SocketMessage::MoveWindow`].
 /// The daemon translates this into a concrete action based on window state.
-fn cmd_dispatch_movewindow(direction: HorizontalDirection) -> Result<(), String> {
+fn cmd_dispatch_move_window(direction: HorizontalDirection) -> Result<(), String> {
     let msg = match direction {
         HorizontalDirection::Left => SocketMessage::MoveWindow {
             direction: Direction::Left,
@@ -557,8 +548,8 @@ fn cmd_dispatch_movewindow(direction: HorizontalDirection) -> Result<(), String>
 
 /// Send a set-window-mode command to the daemon.
 ///
-/// Maps `stm dispatch setwindow float|tile|cycle` to [`SocketMessage::SetWindow`].
-fn cmd_dispatch_setwindow(mode: WindowMode) -> Result<(), String> {
+/// Maps `stm dispatch set-window float|tile|cycle` to [`SocketMessage::SetWindow`].
+fn cmd_dispatch_set_window(mode: WindowMode) -> Result<(), String> {
     let msg = SocketMessage::SetWindow { mode };
     let label = match mode {
         WindowMode::Float => "float",
@@ -915,11 +906,11 @@ mod tests {
         }
     }
 
-    // --- swapcolumn parsing ---
+    // --- swap-column parsing ---
 
     #[test]
-    fn parse_dispatch_swapcolumn_left() {
-        let cli = Cli::try_parse_from(["stm", "dispatch", "swapcolumn", "left"]).unwrap();
+    fn parse_dispatch_swap_column_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "swap-column", "left"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -932,8 +923,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_swapcolumn_right() {
-        let cli = Cli::try_parse_from(["stm", "dispatch", "swapcolumn", "right"]).unwrap();
+    fn parse_dispatch_swap_column_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "swap-column", "right"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -946,30 +937,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_swapcolumn_without_direction_fails() {
-        // Negative: swapcolumn needs a direction subcommand.
-        let result = Cli::try_parse_from(["stm", "dispatch", "swapcolumn"]);
+    fn parse_dispatch_swap_column_without_direction_fails() {
+        // Negative: swap-column needs a direction subcommand.
+        let result = Cli::try_parse_from(["stm", "dispatch", "swap-column"]);
         assert!(
             result.is_err(),
-            "'stm dispatch swapcolumn' without a direction should fail"
+            "'stm dispatch swap-column' without a direction should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_swapcolumn_vertical_fails() {
-        // Negative: swapcolumn only accepts left/right (HorizontalDirection).
-        let result = Cli::try_parse_from(["stm", "dispatch", "swapcolumn", "up"]);
+    fn parse_dispatch_swap_column_vertical_fails() {
+        // Negative: swap-column only accepts left/right (HorizontalDirection).
+        let result = Cli::try_parse_from(["stm", "dispatch", "swap-column", "up"]);
         assert!(
             result.is_err(),
-            "'swapcolumn up' should fail (only left/right)"
+            "'swap-column up' should fail (only left/right)"
         );
     }
 
-    // --- movewindow parsing ---
+    // --- move-window parsing ---
 
     #[test]
-    fn parse_dispatch_movewindow_left() {
-        let cli = Cli::try_parse_from(["stm", "dispatch", "movewindow", "left"]).unwrap();
+    fn parse_dispatch_move_window_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "move-window", "left"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -982,8 +973,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_movewindow_right() {
-        let cli = Cli::try_parse_from(["stm", "dispatch", "movewindow", "right"]).unwrap();
+    fn parse_dispatch_move_window_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "move-window", "right"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -996,23 +987,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_movewindow_without_direction_fails() {
-        // Negative: movewindow needs a direction subcommand.
-        let result = Cli::try_parse_from(["stm", "dispatch", "movewindow"]);
+    fn parse_dispatch_move_window_without_direction_fails() {
+        // Negative: move-window needs a direction subcommand.
+        let result = Cli::try_parse_from(["stm", "dispatch", "move-window"]);
         assert!(
             result.is_err(),
-            "'stm dispatch movewindow' without a direction should fail"
+            "'stm dispatch move-window' without a direction should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_movewindow_vertical_fails() {
-        // Negative: movewindow currently only accepts left/right (vertical is
+    fn parse_dispatch_move_window_vertical_fails() {
+        // Negative: move-window currently only accepts left/right (vertical is
         // deferred — when added it will use its own four-way enum).
-        let result = Cli::try_parse_from(["stm", "dispatch", "movewindow", "up"]);
+        let result = Cli::try_parse_from(["stm", "dispatch", "move-window", "up"]);
         assert!(
             result.is_err(),
-            "'movewindow up' should fail (vertical not yet supported)"
+            "'move-window up' should fail (vertical not yet supported)"
         );
     }
 
@@ -1044,11 +1035,11 @@ mod tests {
         assert!(result.is_err(), "unknown dispatch subcommand should fail");
     }
 
-    // --- Dispatch expandcolumn / shrinkcolumn ---
+    // --- Dispatch expand-column / shrink-column ---
 
     #[test]
-    fn parse_dispatch_expandcolumn() {
-        let cli = Cli::try_parse_from(["stm", "dispatch", "expandcolumn"]).unwrap();
+    fn parse_dispatch_expand_column() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "expand-column"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::ExpandColumn,
@@ -1058,8 +1049,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_shrinkcolumn() {
-        let cli = Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn"]).unwrap();
+    fn parse_dispatch_shrink_column() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "shrink-column"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::ShrinkColumn,
@@ -1068,10 +1059,30 @@ mod tests {
         }
     }
 
+    // --- Dispatch center ---
+    //
+    // `center` is the one variant whose explicit `#[command(name = "center")]`
+    // attribute was *removed* in the kebab-case rename (clap derives the same
+    // single-word name, so the override was redundant). This test pins that
+    // derivation: if a future clap version or refactor changes the derived
+    // name, this is the canary that fails.
+
     #[test]
-    fn parse_dispatch_closewindow() {
-        // Positive: `stm dispatch closewindow` parses to the CloseWindow variant.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "closewindow"]).unwrap();
+    fn parse_dispatch_center() {
+        // Positive: `stm dispatch center` parses to the Center variant.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "center"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command: DispatchCommands::Center,
+            } => {}
+            other => panic!("expected Dispatch::Center, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_close_window() {
+        // Positive: `stm dispatch close-window` parses to the CloseWindow variant.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "close-window"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::CloseWindow,
@@ -1081,21 +1092,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_closewindow_extra_arg_fails() {
-        // Negative: closewindow takes no arguments.
-        let result = Cli::try_parse_from(["stm", "dispatch", "closewindow", "extra"]);
+    fn parse_dispatch_close_window_extra_arg_fails() {
+        // Negative: close-window takes no arguments.
+        let result = Cli::try_parse_from(["stm", "dispatch", "close-window", "extra"]);
         assert!(
             result.is_err(),
-            "'stm dispatch closewindow' with an extra arg should fail"
+            "'stm dispatch close-window' with an extra arg should fail"
         );
     }
 
-    // --- setwindow parsing ---
+    // --- set-window parsing ---
 
     #[test]
-    fn parse_dispatch_setwindow_float() {
-        // Positive: `stm dispatch setwindow float` parses with mode = Float.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "setwindow", "float"]).unwrap();
+    fn parse_dispatch_set_window_float() {
+        // Positive: `stm dispatch set-window float` parses with mode = Float.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "set-window", "float"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -1108,9 +1119,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_setwindow_tile() {
-        // Positive: `stm dispatch setwindow tile` parses with mode = Tile.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "setwindow", "tile"]).unwrap();
+    fn parse_dispatch_set_window_tile() {
+        // Positive: `stm dispatch set-window tile` parses with mode = Tile.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "set-window", "tile"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -1123,9 +1134,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_setwindow_cycle() {
-        // Positive: `stm dispatch setwindow cycle` parses with mode = Cycle.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "setwindow", "cycle"]).unwrap();
+    fn parse_dispatch_set_window_cycle() {
+        // Positive: `stm dispatch set-window cycle` parses with mode = Cycle.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "set-window", "cycle"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command:
@@ -1138,71 +1149,71 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_setwindow_without_mode_fails() {
-        // Negative: setwindow needs a mode subcommand.
-        let result = Cli::try_parse_from(["stm", "dispatch", "setwindow"]);
+    fn parse_dispatch_set_window_without_mode_fails() {
+        // Negative: set-window needs a mode subcommand.
+        let result = Cli::try_parse_from(["stm", "dispatch", "set-window"]);
         assert!(
             result.is_err(),
-            "'stm dispatch setwindow' without a mode should fail"
+            "'stm dispatch set-window' without a mode should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_setwindow_invalid_mode_fails() {
-        // Negative: setwindow only accepts float/tile/cycle.
-        let result = Cli::try_parse_from(["stm", "dispatch", "setwindow", "invalid"]);
+    fn parse_dispatch_set_window_invalid_mode_fails() {
+        // Negative: set-window only accepts float/tile/cycle.
+        let result = Cli::try_parse_from(["stm", "dispatch", "set-window", "invalid"]);
         assert!(
             result.is_err(),
-            "'stm dispatch setwindow invalid' should fail"
+            "'stm dispatch set-window invalid' should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_expandcolumn_extra_arg_fails() {
-        // Negative: expandcolumn takes no arguments.
-        let result = Cli::try_parse_from(["stm", "dispatch", "expandcolumn", "extra"]);
+    fn parse_dispatch_expand_column_extra_arg_fails() {
+        // Negative: expand-column takes no arguments.
+        let result = Cli::try_parse_from(["stm", "dispatch", "expand-column", "extra"]);
         assert!(
             result.is_err(),
-            "'stm dispatch expandcolumn' with extra args should fail"
+            "'stm dispatch expand-column' with extra args should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_shrinkcolumn_extra_arg_fails() {
-        // Negative: shrinkcolumn takes no arguments — extra positional arg rejected.
-        let result = Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn", "extra"]);
+    fn parse_dispatch_shrink_column_extra_arg_fails() {
+        // Negative: shrink-column takes no arguments — extra positional arg rejected.
+        let result = Cli::try_parse_from(["stm", "dispatch", "shrink-column", "extra"]);
         assert!(
             result.is_err(),
-            "'stm dispatch shrinkcolumn' with extra args should fail"
+            "'stm dispatch shrink-column' with extra args should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_expandcolumn_multiple_extra_args_fails() {
-        // Negative: expandcolumn rejects more than one extra argument.
-        let result = Cli::try_parse_from(["stm", "dispatch", "expandcolumn", "extra1", "extra2"]);
+    fn parse_dispatch_expand_column_multiple_extra_args_fails() {
+        // Negative: expand-column rejects more than one extra argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "expand-column", "extra1", "extra2"]);
         assert!(
             result.is_err(),
-            "'stm dispatch expandcolumn' with multiple extra args should fail"
+            "'stm dispatch expand-column' with multiple extra args should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_shrinkcolumn_multiple_extra_args_fails() {
-        // Negative: shrinkcolumn rejects more than one extra argument.
-        let result = Cli::try_parse_from(["stm", "dispatch", "shrinkcolumn", "extra1", "extra2"]);
+    fn parse_dispatch_shrink_column_multiple_extra_args_fails() {
+        // Negative: shrink-column rejects more than one extra argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "shrink-column", "extra1", "extra2"]);
         assert!(
             result.is_err(),
-            "'stm dispatch shrinkcolumn' with multiple extra args should fail"
+            "'stm dispatch shrink-column' with multiple extra args should fail"
         );
     }
 
-    // --- switchworkspace / swapworkspace / movetoworkspace parsing ---
+    // --- switch-workspace / swap-workspace / move-to-workspace parsing ---
 
     #[test]
-    fn parse_dispatch_switchworkspace() {
-        // Positive: `stm dispatch switchworkspace 3` parses with workspace_id = 3.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "switchworkspace", "3"]).unwrap();
+    fn parse_dispatch_switch_workspace() {
+        // Positive: `stm dispatch switch-workspace 3` parses with workspace_id = 3.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "switch-workspace", "3"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::SwitchWorkspace { workspace_id: 3 },
@@ -1212,20 +1223,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_switchworkspace_without_id_fails() {
-        // Negative: switchworkspace needs a workspace_id argument.
-        let result = Cli::try_parse_from(["stm", "dispatch", "switchworkspace"]);
+    fn parse_dispatch_switch_workspace_without_id_fails() {
+        // Negative: switch-workspace needs a workspace_id argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "switch-workspace"]);
         assert!(
             result.is_err(),
-            "'stm dispatch switchworkspace' without an id should fail"
+            "'stm dispatch switch-workspace' without an id should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_switchworkspace_zero() {
+    fn parse_dispatch_switch_workspace_zero() {
         // Positive: workspace_id = 0 is accepted by the parser (boundary value).
         // The daemon decides whether 0 is a valid workspace; the CLI does not.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "switchworkspace", "0"]).unwrap();
+        let cli = Cli::try_parse_from(["stm", "dispatch", "switch-workspace", "0"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::SwitchWorkspace { workspace_id: 0 },
@@ -1235,9 +1246,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_swapworkspace() {
-        // Positive: `stm dispatch swapworkspace 7` parses with workspace_id = 7.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "swapworkspace", "7"]).unwrap();
+    fn parse_dispatch_swap_workspace() {
+        // Positive: `stm dispatch swap-workspace 7` parses with workspace_id = 7.
+        let cli = Cli::try_parse_from(["stm", "dispatch", "swap-workspace", "7"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::SwapWorkspace { workspace_id: 7 },
@@ -1247,21 +1258,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_swapworkspace_without_id_fails() {
-        // Negative: swapworkspace needs a workspace_id argument.
-        let result = Cli::try_parse_from(["stm", "dispatch", "swapworkspace"]);
+    fn parse_dispatch_swap_workspace_without_id_fails() {
+        // Negative: swap-workspace needs a workspace_id argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "swap-workspace"]);
         assert!(
             result.is_err(),
-            "'stm dispatch swapworkspace' without an id should fail"
+            "'stm dispatch swap-workspace' without an id should fail"
         );
     }
 
     #[test]
-    fn parse_dispatch_movetoworkspace() {
-        // Positive: `stm dispatch movetoworkspace 11` parses with workspace_id = 11.
-        // The CLI command name stays `movetoworkspace` (short form) even though
+    fn parse_dispatch_move_to_workspace() {
+        // Positive: `stm dispatch move-to-workspace 11` parses with workspace_id = 11.
+        // The CLI command name stays `move-to-workspace` (short form) even though
         // the underlying Rust variant is `MoveWindowToWorkspace`.
-        let cli = Cli::try_parse_from(["stm", "dispatch", "movetoworkspace", "11"]).unwrap();
+        let cli = Cli::try_parse_from(["stm", "dispatch", "move-to-workspace", "11"]).unwrap();
         match cli.command {
             Commands::Dispatch {
                 command: DispatchCommands::MoveWindowToWorkspace { workspace_id: 11 },
@@ -1271,19 +1282,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_movetoworkspace_without_id_fails() {
-        // Negative: movetoworkspace needs a workspace_id argument.
-        let result = Cli::try_parse_from(["stm", "dispatch", "movetoworkspace"]);
+    fn parse_dispatch_move_to_workspace_without_id_fails() {
+        // Negative: move-to-workspace needs a workspace_id argument.
+        let result = Cli::try_parse_from(["stm", "dispatch", "move-to-workspace"]);
         assert!(
             result.is_err(),
-            "'stm dispatch movetoworkspace' without an id should fail"
+            "'stm dispatch move-to-workspace' without an id should fail"
         );
     }
 
     #[test]
     fn parse_dispatch_workspace_command_rejects_non_numeric_id() {
         // Negative: workspace_id must be a u32; a non-numeric token is rejected.
-        let result = Cli::try_parse_from(["stm", "dispatch", "switchworkspace", "abc"]);
+        let result = Cli::try_parse_from(["stm", "dispatch", "switch-workspace", "abc"]);
         assert!(
             result.is_err(),
             "non-numeric workspace_id should be rejected"
@@ -1340,6 +1351,38 @@ mod tests {
             result.is_err(),
             "old 'check-config' command should no longer parse"
         );
+    }
+
+    // --- Negative: old squished dispatch subcommands should no longer parse ---
+    //
+    // The `stm dispatch <sub>` surface was renamed from squished-lowercase
+    // (e.g. `swapcolumn`) to kebab-case (`swap-column`). Existing user scripts
+    // and keybindings that still spell the old form must now be rejected by
+    // clap rather than silently mis-route. Each case below is the OLD form of
+    // a subcommand that has a sibling positive test above proving the NEW
+    // kebab form parses; together they pin both ends of the rename.
+    // `center` is intentionally absent here — it was never renamed.
+
+    #[test]
+    fn parse_old_squished_dispatch_subcommands_fail() {
+        let old_forms = [
+            "swapcolumn",
+            "movewindow",
+            "expandcolumn",
+            "shrinkcolumn",
+            "closewindow",
+            "setwindow",
+            "switchworkspace",
+            "swapworkspace",
+            "movetoworkspace",
+        ];
+        for old in old_forms {
+            let result = Cli::try_parse_from(["stm", "dispatch", old]);
+            assert!(
+                result.is_err(),
+                "old squished dispatch subcommand '{old}' should no longer parse"
+            );
+        }
     }
 
     // --- Negative: invalid config subcommand ---

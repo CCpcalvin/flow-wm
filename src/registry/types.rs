@@ -271,7 +271,7 @@ impl Window {
 /// | `Floating(Active)` | `EVENT_OBJECT_HIDE` | `Floating(Hidden)` |
 /// | `Floating(Hidden)` | `EVENT_OBJECT_SHOW` | `Floating(Active)` with `pre_manage_rect` |
 ///
-/// Note: tile ↔ float transitions are implemented via `stm dispatch setwindow`
+/// Note: tile ↔ float transitions are implemented via `stm dispatch set-window`
 /// (see `docs/src/dev-guide/floating-space.md`). The remaining unimplemented
 /// directions are user-driven tiling ↔ `Ignored(Maximized|Fullscreen)` (e.g.,
 /// maximizing a tiled window); only the OS-driven recovery direction works —

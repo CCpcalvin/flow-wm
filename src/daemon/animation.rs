@@ -48,7 +48,7 @@ impl ScrollTilingManager {
     /// and drops no-ops (windows already at their target). This ensures that
     /// windows which are still mid-flight from a previous (interrupted) animation
     /// are correctly retargeted even when their target rect didn't change in
-    /// this mutation — fixing the "rapid swapcolumn stranding" bug.
+    /// this mutation — fixing the "rapid swap-column stranding" bug.
     ///
     /// Animation errors are logged as warnings but not propagated — a jarring
     /// animation is better than a crash.

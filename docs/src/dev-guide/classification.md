@@ -2,7 +2,7 @@
 
 STM classifies every new window as **tiling**, **floating**, or **ignored**. This
 chapter covers *why* the default is float, *how* STM learns from the user's
-explicit `setwindow` decisions, and *where* that learned state lives on disk.
+explicit `set-window` decisions, and *where* that learned state lives on disk.
 For the rule-matching algorithm itself — the Win32 pre-filters, the per-layer
 first-match-wins evaluation, and the regex/field semantics — see
 [Window Registry](./window-registry.md).
@@ -12,7 +12,7 @@ first-match-wins evaluation, and the regex/field semantics — see
 Most tiling window managers take a **blacklist** approach: every window tiles
 unless the user adds a rule to float it. STM inverts this. **Every window
 floats unless the user promotes it to tiling** — either with an explicit rule
-in `stm-rules.toml` or by running `stm dispatch setwindow tile` on it once.
+in `stm-rules.toml` or by running `stm dispatch set-window tile` on it once.
 
 This whitelist model is encoded in a single value: the `default_action` field
 of `WindowRulesConfig` defaults to `Float` (see
@@ -64,14 +64,14 @@ the learned rule is never consulted for that app.
 ## Learned Rules
 
 Learned rules are STM's memory of the user's explicit float/tile decisions.
-When the user runs `stm dispatch setwindow float` or `stm dispatch setwindow
+When the user runs `stm dispatch set-window float` or `stm dispatch set-window
 tile` on a window, STM records the decision keyed on that app's identity. The
 next time a window of the same app appears, it is classified automatically —
 no rule writing required.
 
 ### What Triggers a Recording
 
-Only **actual transitions** are recorded. A `setwindow` call that resolves to a
+Only **actual transitions** are recorded. A `set-window` call that resolves to a
 no-op (the window was already in the requested mode) records nothing. This
 keeps the history file free of redundant entries and makes repeated commands
 idempotent.
@@ -87,7 +87,7 @@ sequenceDiagram
     participant R as WindowRegistry
     participant FS as history-stm-rules.toml
 
-    CLI->>D: setwindow float
+    CLI->>D: set-window float
     D->>D: resolve action (MakeFloating / MakeTiling / NoOp)
     D->>R: execute transition
     R-->>D: Ok
@@ -152,7 +152,7 @@ To forget everything STM has learned:
 
 - **Delete a single app's entry** — open the file in a text editor and remove
   the matching `[[rules]]` block. STM will not re-add it until the user runs
-  `setwindow` on that app again.
+  `set-window` on that app again.
 
 - **Override a learned rule permanently** — add an explicit rule for the app in
   `stm-rules.toml`. User rules outrank learned rules, so the user's choice
@@ -172,7 +172,7 @@ To forget everything STM has learned:
 | `default_action = Float` default | `Default` impl for `WindowRulesConfig` in [`src/config/types.rs`](../../src/config/types.rs) |
 | Four-layer pipeline evaluation | `ClassificationPipeline::classify` in [`src/registry/classification.rs`](../../src/registry/classification.rs) |
 | Runtime pipeline refresh | `set_learned_rules` on `ClassificationPipeline` and `WindowRegistry` |
-| Capture on `setwindow` transition | `record_learned_transition` in [`src/daemon/dispatch.rs`](../../src/daemon/dispatch.rs) |
+| Capture on `set-window` transition | `record_learned_transition` in [`src/daemon/dispatch.rs`](../../src/daemon/dispatch.rs) |
 | Daemon-owned history store | `history` field on `ScrollTilingManager`, loaded in `new()` |
 
 ## Cross-References

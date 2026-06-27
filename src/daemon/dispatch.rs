@@ -297,8 +297,8 @@ impl ScrollTilingManager {
     /// - **Floating, any direction** → a pixel nudge by a configurable shift
     ///   *(deferred)*.
     ///
-    /// For now only the tiled left/right path is wired, so `movewindow`
-    /// behaves identically to `swapcolumn`. The branching structure is kept
+    /// For now only the tiled left/right path is wired, so `move-window`
+    /// behaves identically to `swap-column`. The branching structure is kept
     /// as a single delegation point so that floating and up/down support can
     /// be added later without changing the IPC protocol or keybindings.
     fn dispatch_move_window(&mut self, dir: Direction) -> SocketResponse {
@@ -917,7 +917,7 @@ impl ScrollTilingManager {
         response
     }
 
-    /// Persist a `setwindow` transition to `history-stm-rules.toml`.
+    /// Persist a `set-window` transition to `history-stm-rules.toml`.
     ///
     /// `NoOp` transitions are ignored (no user intent to record). The store is
     /// saved only when `record` reports a change, so repeated identical
@@ -1260,7 +1260,7 @@ mod tests {
     fn action_to_learned_noop_maps_to_none() {
         // NoOp carries no user intent (window was already in the requested
         // mode) and must not be recorded — otherwise every idempotent
-        // `setwindow` call would write to disk.
+        // `set-window` call would write to disk.
         assert_eq!(action_to_learned(SetWindowAction::NoOp), None);
     }
 

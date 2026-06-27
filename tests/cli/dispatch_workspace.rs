@@ -1,5 +1,5 @@
-//! Integration tests for `stm dispatch switchworkspace` and `stm dispatch
-//! movetoworkspace`.
+//! Integration tests for `stm dispatch switch-workspace` and `stm dispatch
+//! move-to-workspace`.
 //!
 //! These tests cover two related bug fixes in cross-workspace window moves:
 //!
@@ -381,7 +381,7 @@ fn move_to_unknown_workspace_returns_error() {
     // Act: workspace 99 does not exist (the daemon creates 1..=10). The CLI
     // must report a failure.
     super::common::stm(&pipe)
-        .args(["dispatch", "movetoworkspace", "99"])
+        .args(["dispatch", "move-to-workspace", "99"])
         .assert()
         .failure();
 

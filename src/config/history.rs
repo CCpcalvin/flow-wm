@@ -1,7 +1,7 @@
 //! Machine-learned window classification rules, persisted to
 //! `history-stm-rules.toml`.
 //!
-//! The [`HistoryStore`] records the user's explicit `setwindow float|tile`
+//! The [`HistoryStore`] records the user's explicit `set-window float|tile`
 //! decisions keyed on `exe + class` (falling back to `exe`-only when `class` is
 //! empty). On the next window open, the classification pipeline consults these
 //! learned rules between user rules and default rules.
@@ -12,7 +12,7 @@ use crate::config::types::{MatchRule, WindowAction, WindowRule, WindowRulesConfi
 
 /// Persistent store of per-app learned window modes.
 ///
-/// Records the user's explicit `setwindow float|tile` decisions keyed on
+/// Records the user's explicit `set-window float|tile` decisions keyed on
 /// `exe + class` (falling back to `exe`-only when `class` is empty). On the
 /// next window open, the classification pipeline consults these learned
 /// rules between user rules and default rules. See
@@ -29,7 +29,7 @@ pub struct HistoryStore {
 const HISTORY_FILE_HEADER: &str = "\
 # history-stm-rules.toml — learned window classification rules.
 #
-# This file is maintained automatically by stmd based on your `setwindow`
+# This file is maintained automatically by stmd based on your `set-window`
 # float/tile decisions. You may edit or delete entries by hand; stmd will
 # recreate the file as you continue using it. To clear ALL learned rules,
 # delete this file (or empty the [[rules]] list).

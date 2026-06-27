@@ -17,8 +17,8 @@ mod daemon_init;
 #[path = "cli/daemon_lifecycle.rs"]
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]
-#[path = "cli/dispatch_setwindow.rs"]
-mod dispatch_setwindow;
+#[path = "cli/dispatch_set_window.rs"]
+mod dispatch_set_window;
 #[cfg(debug_assertions)]
 #[path = "cli/dispatch_swap.rs"]
 mod dispatch_swap;

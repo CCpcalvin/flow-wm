@@ -1536,14 +1536,14 @@ mod tests {
     // -------------------------------------------------------------------
     // Bug 1 regression: AppliedLayout.actual_layout.entries must contain
     // ALL windows (not just "moved" ones). This is the core invariant
-    // that prevents the swapcolumn animation stranding bug.
+    // that prevents the swap-column animation stranding bug.
     // -------------------------------------------------------------------
 
     #[test]
     fn applied_layout_entries_match_window_count_after_swap() {
         // Positive: after a swap_column mutation, actual_layout.entries must
         // contain every window — not just the two columns that swapped.
-        // Regression test for: rapid swapcolumn during in-flight animation
+        // Regression test for: rapid swap-column during in-flight animation
         // stranded mid-flight windows because the old diff only included
         // windows whose target changed.
         let mut engine = engine_with_three_columns();
@@ -1968,7 +1968,8 @@ mod tests {
             "no diff when focused col is already visible (idempotency)"
         );
         assert_eq!(
-            engine.virtual_layout().viewport_offset, before,
+            engine.virtual_layout().viewport_offset,
+            before,
             "no shift when focused col is already visible"
         );
     }
@@ -2024,7 +2025,8 @@ mod tests {
             "no-focus path falls back to col 0; col 0 visible → no diff"
         );
         assert_eq!(
-            engine.virtual_layout().viewport_offset, before,
+            engine.virtual_layout().viewport_offset,
+            before,
             "no shift when col 0 is already visible"
         );
     }
@@ -2047,7 +2049,8 @@ mod tests {
             "stale focus falls back to col 0; col 0 visible → no diff"
         );
         assert_eq!(
-            engine.virtual_layout().viewport_offset, before,
+            engine.virtual_layout().viewport_offset,
+            before,
             "no shift when col 0 is already visible"
         );
     }

@@ -1,4 +1,23 @@
-- Use `cargo add` to handle dependencies and versions. Do NOT edit `Cargo.toml` for it. 
+## Rust workflow gate (mandatory)
+
+The product is a Rust Windows binary under `src/`. For non-trivial Rust work the full
+workflow (phased planning, clippy/fmt gates, TestEngineer, CodeReviewer) is NOT optional.
+The trigger is a file pattern, not a "does this feel heavy" judgment — that heuristic is
+what caused Test/Review to get skipped in practice.
+
+A Rust task is **non-trivial** if ANY is true:
+- edits `src/**/*.rs` adding or modifying types, module exports, or Win32 calls;
+- touches more than one file under `src/`; or
+- adds/changes a config field, layout algorithm, or IPC command.
+
+When non-trivial, load `skill("rust-workflow")` and follow the workflow it defines. The
+skill is the single source of truth for the phases, quality gates, and done-criteria.
+
+**Trivial Rust edits** — single-file, <40 lines, no new types, module exports, or Win32
+calls — may skip the workflow, but `cargo check` must still pass. **When in doubt, treat
+as non-trivial.**
+
+- Use `cargo add` to handle dependencies and versions. Do NOT edit `Cargo.toml` for it.
 
 ## Documentation strategy
 

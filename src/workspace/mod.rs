@@ -10,9 +10,9 @@
 //!
 //! The horizontal scrolling inside a [`ScrollingSpace`] (left/right across columns)
 //! has a vertical analogue: workspaces stacked "above" and "below" the active one,
-//! switched the same way columns scroll. `switchworkspace` and `movetoworkspace`
+//! switched the same way columns scroll. `switch-workspace` and `move-to-workspace`
 //! animate a vertical-packing switch (see the daemon dispatch module); only
-//! `swapworkspace` remains a stub pending its own animation model.
+//! `swap-workspace` remains a stub pending its own animation model.
 //!
 //! # What lives here vs. what doesn't
 //!
@@ -52,7 +52,7 @@ pub use y_offset::workspace_y_offset;
 /// `WorkspaceId` is `#[serde(transparent)]`, so it serialises as a bare
 /// integer — e.g. `3` rather than `{"workspace_id": 3}`. This keeps the IPC
 /// message shape small and matches the `u32` payloads of the
-/// `switchworkspace` / `swapworkspace` / `movetoworkspace` commands.
+/// `switch-workspace` / `swap-workspace` / `move-to-workspace` commands.
 ///
 /// ```
 /// # use scrolling_tiling_manager::workspace::WorkspaceId;
