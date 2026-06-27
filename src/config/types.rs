@@ -193,8 +193,8 @@ impl Default for Padding {
     fn default() -> Self {
         Self {
             window_gap: 16,
-            up: 16,
-            down: 16,
+            up: 0,
+            down: 0,
         }
     }
 }
@@ -618,8 +618,8 @@ mod tests {
         assert_eq!(parsed.column_width, None);
         assert_eq!(parsed.min_column_width_px, 640);
         assert_eq!(parsed.padding.window_gap, 16);
-        assert_eq!(parsed.padding.up, 16);
-        assert_eq!(parsed.padding.down, 16);
+        assert_eq!(parsed.padding.up, 0);
+        assert_eq!(parsed.padding.down, 0);
         assert_eq!(parsed.animation.duration_ms, 240);
         assert_eq!(parsed.animation.easing, ConfigEasing::EaseOutExpo);
     }
@@ -689,8 +689,8 @@ strategy = "original_slot"
         let toml_str = "[padding]\nwindow_gap = 20\n";
         let config: StmConfig = toml::from_str(toml_str).expect("nested-partial should parse");
         assert_eq!(config.padding.window_gap, 20);
-        assert_eq!(config.padding.up, 16);
-        assert_eq!(config.padding.down, 16);
+        assert_eq!(config.padding.up, 0);
+        assert_eq!(config.padding.down, 0);
         // Top-level defaults still apply.
         assert_eq!(config.columns_per_screen, 4);
     }

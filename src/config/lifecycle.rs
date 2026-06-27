@@ -524,8 +524,8 @@ strategy = "original_slot"
         assert_eq!(config, StmConfig::default());
         assert_eq!(config.min_column_width_px, 640);
         assert_eq!(config.padding.window_gap, 16);
-        assert_eq!(config.padding.up, 16);
-        assert_eq!(config.padding.down, 16);
+        assert_eq!(config.padding.up, 0);
+        assert_eq!(config.padding.down, 0);
     }
 
     /// Negative: malformed TOML returns default config (not panic).

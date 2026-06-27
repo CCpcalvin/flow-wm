@@ -34,8 +34,8 @@ min_column_width_px = 640
 # - down: reserved space below the tiling area (e.g., for taskbar clearance)
 [padding]
 window_gap = 16
-up = 16
-down = 16
+up = 0
+down = 0
 
 # Animation settings for layout transitions.
 [animation]
