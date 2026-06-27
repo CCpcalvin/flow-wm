@@ -84,10 +84,13 @@ impl ScrollTilingManager {
             return;
         }
 
-        // Border thickness inset — shrinks each window's rect by this many
-        // pixels on every edge so the border overlay (drawn outside the
-        // content rect) is visible without occluding the window.
+        // Effective border inset. Each window's rect shrinks by
+        // (thickness - overlap) px per edge so the overlay ring (the outer
+        // `thickness` px of the layout slot) overlaps the visible content by
+        // `overlap` px — closing the DWM hairline. overlap=0 reproduces the
+        // old full-gap behavior. See `docs/src/dev-guide/borders.md`.
         let border_thickness = self.config.borders.thickness as i32;
+        let border_overlap = self.config.borders.overlap as i32;
 
         let targets: Vec<WindowTarget> = layout
             .actual_layout
@@ -110,7 +113,7 @@ impl ScrollTilingManager {
                 // colored overlay ring.
                 let window_rect = invisible_bounds
                     .visible_to_window(entry.rect)
-                    .inset(border_thickness);
+                    .inset(border_thickness - border_overlap);
 
                 log::debug!(
                     "animate: hwnd={} target ({},{},{},{}) [visible] \
@@ -208,6 +211,7 @@ impl ScrollTilingManager {
         }
 
         let border_thickness = self.config.borders.thickness as i32;
+        let border_overlap = self.config.borders.overlap as i32;
 
         // Build the combined target list. Iterating with explicit loops
         // (rather than `flat_map`) lets us hold one `&self.registry` borrow
@@ -227,7 +231,7 @@ impl ScrollTilingManager {
                 let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
 
                 // Translate visible-rect → window-rect, shrink by the border
-                // thickness to make room for the overlay ring, then apply the
+                // inset (thickness - overlap) to make room for the ring, then apply the
                 // vertical offset. Order doesn't matter mathematically (offset
                 // is a pure y translation, invisible_bounds adjusts y by a
                 // fixed `-top`, inset is uniform), but the chosen order keeps
@@ -235,7 +239,7 @@ impl ScrollTilingManager {
                 // mental model clear.
                 let window_rect = invisible_bounds
                     .visible_to_window(entry.rect)
-                    .inset(border_thickness);
+                    .inset(border_thickness - border_overlap);
                 targets.push(WindowTarget::new(
                     WindowRef(entry.window_id.0),
                     IVec2::new(window_rect.x, window_rect.y + y_offset),
@@ -313,6 +317,7 @@ impl ScrollTilingManager {
     /// visual inconsistency on a non-visible workspace, not a crash.
     pub(super) fn teleport_workspaces(&self, batches: &[(ActualLayout, i32)]) {
         let border_thickness = self.config.borders.thickness as i32;
+        let border_overlap = self.config.borders.overlap as i32;
         for (layout, y_offset) in batches {
             for entry in &layout.entries {
                 let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
@@ -320,7 +325,7 @@ impl ScrollTilingManager {
 
                 let window_rect = invisible_bounds
                     .visible_to_window(entry.rect)
-                    .inset(border_thickness);
+                    .inset(border_thickness - border_overlap);
                 let target_y = window_rect.y + y_offset;
 
                 // Direct SetWindowPos — bypass the animator entirely.
@@ -370,15 +375,17 @@ impl ScrollTilingManager {
 ///
 /// # Border Thickness
 ///
-/// `border_thickness` is passed explicitly because this function runs before
-/// `ScrollTilingManager` exists — the caller reads it from the config and
-/// forwards it. Same per-edge shrink semantics as
+/// `border_thickness` and `border_overlap` are passed explicitly because this
+/// function runs before `ScrollTilingManager` exists — the caller reads them
+/// from the config and forwards them. The effective per-edge shrink is
+/// `(thickness - overlap)`, same as
 /// [`ScrollTilingManager::animate_layout`].
 pub(super) fn animate_layout_raw(
     animator: &mut WindowAnimator,
     layout: &AppliedLayout,
     registry: &WindowRegistry,
     border_thickness: i32,
+    border_overlap: i32,
 ) {
     if layout.actual_layout.entries.is_empty() {
         return;
@@ -395,7 +402,7 @@ pub(super) fn animate_layout_raw(
 
             let window_rect = invisible_bounds
                 .visible_to_window(entry.rect)
-                .inset(border_thickness);
+                .inset(border_thickness - border_overlap);
 
             let window_target = WindowTarget::new(
                 WindowRef(entry.window_id.0),

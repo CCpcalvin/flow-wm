@@ -678,21 +678,18 @@ impl CachedSurface {
 
     /// Recolor the cached ring pixels to `new_color` in place.
     ///
-    /// Ring pixels are `pack_bgra(color, 0xFF)` (always nonzero — the alpha
-    /// byte is `0xFF`); interior and outside-corner pixels are exactly `0`.
-    /// Overwriting every nonzero pixel with the new packed color recolors the
-    /// ring without recomputing its geometry.
+    /// Each pixel's alpha is its anti-aliasing coverage (from
+    /// [`fill_border_ring`]); recoloring keeps that coverage and swaps only the
+    /// RGB channels, so AA stays crisp across focus changes. Fully transparent
+    /// pixels (alpha `0`) are left untouched.
     fn recolor(&mut self, new_color: Color) {
-        let packed = pack_bgra(new_color, 0xFF);
         // SAFETY: `bits` points into the DIB section owned by `self.bitmap`,
         // sized `len` u32s; the slice borrow is confined to this call and is
         // not aliased by anything else.
         unsafe {
             let pixels = std::slice::from_raw_parts_mut(self.bits, self.len);
             for px in pixels.iter_mut() {
-                if *px != 0 {
-                    *px = packed;
-                }
+                *px = recolor_pixel(*px, new_color);
             }
         }
         self.color = new_color;
@@ -778,15 +775,38 @@ pub(crate) const fn pack_bgra(color: Color, alpha: u8) -> u32 {
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
+/// Repack `px` with `new_color`'s RGB channels, keeping `px`'s existing alpha
+/// byte (its anti-aliasing coverage from [`fill_border_ring`]).
+///
+/// Returns `px` unchanged when its alpha is `0` (fully transparent). Used by
+/// [`CachedSurface::recolor`] to swap a ring's colour without recomputing its
+/// geometry or disturbing the AA coverage — so a focus change never re-aliases
+/// the rounded corners.
+#[must_use]
+pub(crate) fn recolor_pixel(px: u32, new_color: Color) -> u32 {
+    let a = (px >> 24) & 0xFF;
+    if a == 0 {
+        return px;
+    }
+    let r = new_color.r as u32;
+    let g = new_color.g as u32;
+    let b = new_color.b as u32;
+    (a << 24) | (r << 16) | (g << 8) | b
+}
+
 /// Map a [`CornerPreference`] to the OUTER corner radius (in pixels) for the
 /// rounded ring, given the ring `thickness`.
 ///
-/// Returns the radius of the overlay's outer rounded corner. Because the
-/// target window is inset by `thickness` (see `docs/src/dev-guide/borders.md`),
-/// to hug a window whose own corner radius is `R` the ring's outer radius must
-/// be `R + thickness`: the inner edge of the ring then has radius `R`,
-/// concentric with the window's corner. Square windows (`R = 0`) get a fully
-/// square ring (outer radius 0).
+/// Returns the radius of the overlay's outer rounded corner. The ring is the
+/// outer `thickness` px of the overlay (which sits at the visible content rect
+/// — see `docs/src/dev-guide/borders.md`), so to wrap a window whose own corner
+/// radius is `R` the ring's outer radius must be `R + thickness`; its inner
+/// edge then has radius `R`. This ring geometry is independent of `overlap`:
+/// `overlap` only moves the *window content* edge (inset by `thickness −
+/// overlap`), so at `overlap = 0` the window's corner arc is exactly
+/// concentric with the ring's inner arc (a perfect hug), while at `overlap > 0`
+/// the window corner sits `overlap` px further out, under the opaque ring (no
+/// gap). Square windows (`R = 0`) get a fully square ring (outer radius 0).
 ///
 /// The window radii `8` / `4` are the unofficial but stable Windows 11
 /// defaults; Microsoft does not document the exact pixel values.
@@ -806,22 +826,15 @@ fn corner_radius_px(pref: CornerPreference, thickness: usize) -> usize {
     }
 }
 
-/// Test whether pixel `(x, y)` lies inside a rounded rectangle with top-left
-/// `(ox, oy)`, pixel size `w × h`, and corner radius `cr`.
+/// Test whether the point `(x, y)` lies inside a rounded rectangle with
+/// top-left `(ox, oy)`, pixel size `w × h`, and corner radius `cr`.
 ///
-/// `cr` is assumed to be ≤ `min(w, h) / 2` (callers clamp). With `cr == 0`
-/// this reduces to a plain axis-aligned rectangle test. Pure and allocation-
-/// free so it can be used in the per-pixel ring loop without test setup.
-fn in_rounded_rect(
-    x: usize,
-    y: usize,
-    ox: usize,
-    oy: usize,
-    w: usize,
-    h: usize,
-    cr: usize,
-) -> bool {
-    if w == 0 || h == 0 {
+/// Float-valued so the anti-aliased ring renderer can supersample at
+/// sub-pixel offsets (see [`fill_border_ring`]). `cr` is assumed ≤
+/// `min(w, h) / 2` (callers clamp). With `cr == 0.0` this reduces to a plain
+/// axis-aligned rectangle test. Pure and allocation-free.
+fn in_rounded_rect(x: f64, y: f64, ox: f64, oy: f64, w: f64, h: f64, cr: f64) -> bool {
+    if w <= 0.0 || h <= 0.0 {
         return false;
     }
     // Translate into the rectangle's local space.
@@ -833,7 +846,7 @@ fn in_rounded_rect(
     if lx >= w || ly >= h {
         return false;
     }
-    if cr == 0 {
+    if cr <= 0.0 {
         return true;
     }
     // Straight-edge bands: anywhere not in a corner square is inside.
@@ -844,12 +857,11 @@ fn in_rounded_rect(
         return true;
     }
     // Corner square: inside iff within radius `cr` of the arc center.
-    let cx: i64 = (if lx < cr { cr } else { w - cr }) as i64;
-    let cy: i64 = (if ly < cr { cr } else { h - cr }) as i64;
-    let dx = lx as i64 - cx;
-    let dy = ly as i64 - cy;
-    let r = cr as i64;
-    dx * dx + dy * dy <= r * r
+    let cx = if lx < cr { cr } else { w - cr };
+    let cy = if ly < cr { cr } else { h - cr };
+    let dx = lx - cx;
+    let dy = ly - cy;
+    dx * dx + dy * dy <= cr * cr
 }
 
 /// Fill the outer `thickness`-pixel ring of a `width * height` pixel buffer
@@ -862,10 +874,16 @@ fn in_rounded_rect(
 /// [`corner_radius_px`] for how the caller derives `corner_radius` from a
 /// [`CornerPreference`].
 ///
+/// Rounded rings (nonzero `corner_radius`) are rendered with 4×4 supersampled
+/// anti-aliasing: each pixel's alpha is set from the fraction of 16 sub-samples
+/// that land inside the ring, smoothing the diagonal arc edges. The square
+/// fast path (`corner_radius == 0`) keeps its exact slice fill — pixel-aligned
+/// edges gain nothing from AA.
+///
 /// The caller must size `pixels` to exactly `width * height` and zero it
-/// first; this function only writes `color`, never clears. Thickness is
-/// clamped against half the smaller dimension so an oversized value just
-/// fills the whole buffer (no panic).
+/// first; this function writes `color` (with a per-pixel alpha byte on rounded
+/// arcs) and never clears. Thickness is clamped against half the smaller
+/// dimension so an oversized value just fills the whole buffer (no panic).
 ///
 /// # Panics
 ///
@@ -919,17 +937,58 @@ pub(crate) fn fill_border_ring(
     // buffer inset by `t` with the concentric radius `r - t`. A pixel is part
     // of the ring iff it is inside the outer rounded rect AND outside the
     // inner rounded rect.
+    //
+    // We render with 4×4 supersampled anti-aliasing: each pixel is sampled at
+    // 16 sub-points and its alpha set from the fraction landing inside the
+    // ring. The straight, pixel-aligned edges are unaffected (all sub-samples
+    // agree → full or zero coverage); only the diagonal arcs gain partial
+    // alpha. `color` carries `0xFF` alpha; we keep its RGB and substitute the
+    // per-pixel coverage alpha.
     let inner_radius = r.saturating_sub(t);
     let inner_w = width.saturating_sub(2 * t);
     let inner_h = height.saturating_sub(2 * t);
+    let rgb = color & 0x00FF_FFFF;
+    // Sub-pixel sample offsets for 4×4 supersampling: the centre of each
+    // ¼-pixel cell.
+    const OFFSETS: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
+    let (wf, hf) = (width as f64, height as f64);
+    let (tf, rf) = (t as f64, r as f64);
+    let (inner_wf, inner_hf, inner_rf) = (inner_w as f64, inner_h as f64, inner_radius as f64);
+
+    // The ring only ever lives within `r` pixels of some edge (the outer `t`
+    // straight band, or up to radius `r` at the corners). Pixels deeper than
+    // `r + 1` from every edge are solidly inside the inner rect and can never
+    // be part of the ring, so we skip them — making the per-rebuild cost
+    // proportional to the border perimeter, not the window area.
+    let frame = (r + 1).min(width).min(height);
+    let bottom_start = height.saturating_sub(frame);
+    let right_start = width.saturating_sub(frame);
 
     for y in 0..height {
         let row_start = y * width;
+        let in_v_band = y < frame || y >= bottom_start;
         for x in 0..width {
-            if in_rounded_rect(x, y, 0, 0, width, height, r)
-                && !in_rounded_rect(x, y, t, t, inner_w, inner_h, inner_radius)
-            {
-                pixels[row_start + x] = color;
+            // Skip the deep interior — never part of the ring, leave it 0.
+            if !in_v_band && x >= frame && x < right_start {
+                continue;
+            }
+            let mut hits = 0u32;
+            let xf = x as f64;
+            let yf = y as f64;
+            for &ox in &OFFSETS {
+                let sx = xf + ox;
+                for &oy in &OFFSETS {
+                    let sy = yf + oy;
+                    if in_rounded_rect(sx, sy, 0.0, 0.0, wf, hf, rf)
+                        && !in_rounded_rect(sx, sy, tf, tf, inner_wf, inner_hf, inner_rf)
+                    {
+                        hits += 1;
+                    }
+                }
+            }
+            if hits > 0 {
+                let alpha = (hits * 255) / 16;
+                pixels[row_start + x] = (alpha << 24) | rgb;
             }
         }
     }
@@ -1112,10 +1171,10 @@ mod tests {
     /// `in_rounded_rect`: a square rect (cr=0) is a plain bbox test.
     #[test]
     fn in_rounded_rect_zero_radius_is_bbox() {
-        assert!(in_rounded_rect(0, 0, 0, 0, 5, 5, 0));
-        assert!(in_rounded_rect(4, 4, 0, 0, 5, 5, 0));
-        assert!(!in_rounded_rect(5, 0, 0, 0, 5, 5, 0));
-        assert!(!in_rounded_rect(0, 5, 0, 0, 5, 5, 0));
+        assert!(in_rounded_rect(0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 0.0));
+        assert!(in_rounded_rect(4.0, 4.0, 0.0, 0.0, 5.0, 5.0, 0.0));
+        assert!(!in_rounded_rect(5.0, 0.0, 0.0, 0.0, 5.0, 5.0, 0.0));
+        assert!(!in_rounded_rect(0.0, 5.0, 0.0, 0.0, 5.0, 5.0, 0.0));
     }
 
     /// `in_rounded_rect`: the extreme corner of a rounded rect is OUTSIDE the
@@ -1125,11 +1184,26 @@ mod tests {
     fn in_rounded_rect_arc_excludes_extreme_corner() {
         // 9×9 rect, radius 4. Corner center at (4,4). Pixel (0,0) is at
         // distance sqrt(32) ≈ 5.66 > 4, so it is outside.
-        assert!(!in_rounded_rect(0, 0, 0, 0, 9, 9, 4));
+        assert!(!in_rounded_rect(0.0, 0.0, 0.0, 0.0, 9.0, 9.0, 4.0));
         // Pixel (4,0) is on the top straight edge: inside.
-        assert!(in_rounded_rect(4, 0, 0, 0, 9, 9, 4));
+        assert!(in_rounded_rect(4.0, 0.0, 0.0, 0.0, 9.0, 9.0, 4.0));
         // Center is inside.
-        assert!(in_rounded_rect(4, 4, 0, 0, 9, 9, 4));
+        assert!(in_rounded_rect(4.0, 4.0, 0.0, 0.0, 9.0, 9.0, 4.0));
+    }
+
+    /// `in_rounded_rect`: a point lying exactly ON the corner arc
+    /// (`dx² + dy² == cr²`) is treated as inside (the comparison is `<=`).
+    ///
+    /// Pinning this boundary behaviour keeps the 4×4 supersampling coverage
+    /// curve stable — a regression to `<` would thin the rendered arc by one
+    /// sub-pixel and subtly dim the AA boundary pixels.
+    #[test]
+    fn in_rounded_rect_arc_boundary_point_is_inside() {
+        // 10×10 rect, radius 5. Top-left arc centre is at (5, 5).
+        // Point (5, 0): dx = 0, dy = -5 → 0 + 25 == 25 == cr² → inside (<=).
+        assert!(in_rounded_rect(5.0, 0.0, 0.0, 0.0, 10.0, 10.0, 5.0));
+        // Point just outside the arc (4, 0): dx = -1, dy = -5 → 1 + 25 = 26 > 25.
+        assert!(!in_rounded_rect(4.0, 0.0, 0.0, 0.0, 10.0, 10.0, 5.0));
     }
 
     /// Rounded ring on a square-ish buffer: the four extreme corner pixels
@@ -1161,5 +1235,137 @@ mod tests {
         fill_border_ring(&mut buf, 11, 11, 1, 4, colored);
         // Center pixel well inside the ring → transparent.
         assert_eq!(buf[5 * 11 + 5], 0, "center transparent");
+    }
+
+    // ── anti-aliased rounded rendering ──────────────────────────────────
+
+    /// Anti-aliasing: a rounded ring must produce pixels with PARTIAL alpha
+    /// (0 < alpha < 255) along the diagonal arcs. Without AA every pixel is
+    /// either fully opaque or fully transparent — the regression this guards.
+    #[test]
+    fn fill_border_ring_rounded_emits_partial_alpha_on_arcs() {
+        // 40×40, thickness 3, outer radius 15 → sizeable corner arcs with
+        // sub-pixel coverage transitions.
+        const W: usize = 40;
+        const H: usize = 40;
+        let mut buf = vec![0u32; W * H];
+        let colored = pack_bgra(color(0, 0, 0), 0xFF);
+        fill_border_ring(&mut buf, W, H, 3, 15, colored);
+        let rgb = colored & 0x00FF_FFFF;
+        let mut partial = 0usize;
+        let mut full = 0usize;
+        let mut empty = 0usize;
+        let mut partial_alphas = std::collections::HashSet::new();
+        for &px in &buf {
+            let a = (px >> 24) & 0xFF;
+            if a == 0 {
+                empty += 1;
+            } else if a == 0xFF && (px & 0x00FF_FFFF) == rgb {
+                full += 1;
+            } else {
+                partial += 1;
+                partial_alphas.insert(a);
+            }
+        }
+        assert!(
+            partial > 0,
+            "rounded ring must have AA (partial-alpha) pixels"
+        );
+        assert!(full > 0, "straight-band ring pixels must be fully opaque");
+        assert!(
+            empty > 0,
+            "extreme corners + interior must stay transparent"
+        );
+        // The arc must be graded — a range of coverage levels — not a binary
+        // edge with a stray half-pixel. A correct 4×4 sampler produces several
+        // distinct hit counts (1..15) as the arc sweeps across pixels.
+        assert!(
+            partial_alphas.len() >= 2,
+            "AA arc must show a graded coverage gradient, found only {:?}",
+            partial_alphas
+        );
+        // The ring shape is symmetric about the buffer center, so an unbiased
+        // sampler must yield a symmetric alpha map. A sampler whose sub-pixel
+        // offsets cluster in one quadrant (e.g. only [0, 0.5)) shifts the arc
+        // edges toward that quadrant and breaks this symmetry — this is the
+        // guard that catches a biased supersample grid.
+        for y in 0..H {
+            for x in 0..W {
+                let px = buf[y * W + x];
+                assert_eq!(
+                    px,
+                    buf[y * W + (W - 1 - x)],
+                    "alpha map must mirror horizontally at ({x},{y})"
+                );
+                assert_eq!(
+                    px,
+                    buf[(H - 1 - y) * W + x],
+                    "alpha map must mirror vertically at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// Rounded-path boundary: when `thickness == corner_radius` the inner
+    /// radius becomes `0` (via `saturating_sub`), reducing the inner rect to a
+    /// plain bbox. The renderer must still produce an opaque straight band and
+    /// leave both the extreme corners and the deep interior transparent.
+    ///
+    /// Guards the `inner_radius = r.saturating_sub(t)` edge against a regression
+    /// where the inner-rect test would mishandle radius 0 and either leave the
+    /// straight band transparent or color the interior.
+    #[test]
+    fn fill_border_ring_rounded_zero_inner_radius_keeps_interior_transparent() {
+        // 16×16, thickness 4, outer radius 4 → inner radius = 4 - 4 = 0.
+        let mut buf = vec![0u32; 16 * 16];
+        let colored = pack_bgra(color(0, 0, 0), 0xFF);
+        fill_border_ring(&mut buf, 16, 16, 4, 4, colored);
+        // Extreme corner: outside the outer arc → transparent.
+        assert_eq!(buf[0], 0, "top-left corner outside the outer arc");
+        // Top straight band (col 8, row 0): inside outer rect, above the inner
+        // bbox (whose top edge is at y = thickness = 4) → opaque ring pixel.
+        assert_eq!(
+            buf[8], colored,
+            "top straight band must be fully opaque even with inner_radius 0"
+        );
+        // Deep interior (col 8, row 8): inside the inner bbox → transparent.
+        assert_eq!(
+            buf[8 * 16 + 8],
+            0,
+            "interior inside inner bbox must stay transparent"
+        );
+    }
+
+    /// `recolor_pixel` keeps the coverage alpha and swaps only RGB — the
+    /// property that keeps rounded corners crisp across a focus change.
+    #[test]
+    fn recolor_pixel_preserves_alpha_and_swaps_rgb() {
+        let original = pack_bgra(color(0x11, 0x22, 0x33), 0x80);
+        let recolored = recolor_pixel(original, color(0xAA, 0xBB, 0xCC));
+        assert_eq!(recolored, pack_bgra(color(0xAA, 0xBB, 0xCC), 0x80));
+    }
+
+    /// `recolor_pixel` leaves fully-transparent pixels untouched (alpha 0), so
+    /// transparent gaps never gain colour.
+    #[test]
+    fn recolor_pixel_leaves_transparent_untouched() {
+        assert_eq!(recolor_pixel(0, color(0xFF, 0xFF, 0xFF)), 0);
+        // Even an alpha-0 pixel with nonzero RGB stays as-is.
+        let px = 0x00_11_22_33u32;
+        assert_eq!(recolor_pixel(px, color(0xFF, 0xFF, 0xFF)), px);
+    }
+
+    /// `recolor_pixel` on a fully-opaque input (alpha `0xFF`) keeps full
+    /// opacity and swaps only RGB — the straight-band counterpart to the
+    /// partial-alpha test. Exercises the non-short-circuit branch at maximum
+    /// coverage and guards against an off-by-one that would dim opaque pixels
+    /// during a focus switch.
+    #[test]
+    fn recolor_pixel_full_alpha_preserves_opacity_and_swaps_rgb() {
+        let original = pack_bgra(color(0x11, 0x22, 0x33), 0xFF);
+        let recolored = recolor_pixel(original, color(0xAA, 0xBB, 0xCC));
+        assert_eq!(recolored, pack_bgra(color(0xAA, 0xBB, 0xCC), 0xFF));
+        // Top byte is the alpha — it must still be exactly 0xFF.
+        assert_eq!(recolored >> 24, 0xFF);
     }
 }

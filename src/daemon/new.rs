@@ -191,6 +191,7 @@ impl ScrollTilingManager {
                 diff,
                 &registry,
                 app_config.borders.thickness as i32,
+                app_config.borders.overlap as i32,
             );
 
             // Sync registry tiling state from the initial layout so that

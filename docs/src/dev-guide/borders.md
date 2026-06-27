@@ -81,7 +81,7 @@ translation, no invisible-bounds expansion:
    │ ┌─── border overlay (entry.rect) ─────┐ │   ← positioned at visible rect
    │ │█                                  █│ │      ring = thickness px
    │ │█  ┌── visible content ──────────┐ █│ │
-   │ │█  │  (inset by border thickness)│ █│ │      window content lives here
+   │ │█  │ (inset by thickness-overlap)│ █│ │      window content lives here
    │ │█  │                             │ █│ │
    │ │█  └─────────────────────────────┘ █│ │
    │ │█                                  █│ │
@@ -93,12 +93,17 @@ translation, no invisible-bounds expansion:
 The window target rect is computed as:
 
 ```
-visible_to_window(entry.rect).inset(border_thickness)
+visible_to_window(entry.rect).inset(border_thickness - border_overlap)
 ```
 
 This expands the visible rect out to the HWND rect, then shrinks it inward by
-`thickness` on every side — leaving a gap exactly `thickness` px wide where the
-border ring draws. The ring thus sits flush against the visible content edge.
+`(thickness - overlap)` on every side. The ring is the outer `thickness` px of
+`entry.rect`, so it overlaps the visible content by `overlap` px on each edge.
+With the default `overlap = 1`, this single pixel closes the 1px DWM
+client-edge hairline that otherwise shows between an unfocused ring and the
+window content. `overlap = 0` leaves a gap exactly `thickness` px wide (ring
+flush against the content edge — the pre-overlap behavior); `overlap =
+thickness` fills the whole layout slot with content sitting under the ring.
 
 The old design drew the ring at the HWND rect's outer edge (the invisible
 border), producing a visible gap between the colored ring and the window
@@ -336,12 +341,20 @@ stays a uniform `thickness` wide around a concentric arc:
 | `RoundedSmall` | 4 px       | 4 + `thickness`    |
 | `Default`  | treated as 8 px (Win11 default) | 8 + `thickness` |
 
-`fill_border_ring` has a square fast-path (radius 0, the original slice-fill)
-and a rounded path that, per pixel, tests membership in the outer rounded
-rect *and not* the inner rounded rect — pure integer math, no allocations, so
-it is safe to call from the paint hot path. The DWM read fails open (returns
-`Default`) if the attribute can't be read. Microsoft does not document the exact
-pixel radii; 8 px / 4 px are the observed Win11 values.
+`fill_border_ring` has a **square fast-path** (radius 0: a slice-fill — exact,
+because the edges are pixel-aligned) and a **rounded path**. The rounded path
+**4×4-supersamples** each pixel: it tests 16 sub-pixel sample points against
+membership in the outer rounded rect *and not* the inner rounded rect, then
+writes a per-pixel alpha proportional to the sample hit count. This
+anti-aliases the corner arcs — the only edges that aren't pixel-aligned —
+without pulling in a Direct2D/DirectComposition dependency. To keep the
+per-rebuild cost proportional to perimeter rather than area, only pixels
+within `(radius + 1)` px of an edge are touched; the deep interior and far
+exterior are skipped. The ring bitmap is cached (rebuilt only on shape change),
+so the supersample cost is paid rarely — recolors swap the RGB channels in
+place while preserving each pixel's coverage alpha. The DWM read fails open
+(returns `Default`) if the attribute can't be read. Microsoft does not document
+the exact pixel radii; 8 px / 4 px are the observed Win11 values.
 
 ## Configuration
 
@@ -351,6 +364,7 @@ Borders are configured under the `[borders]` section in `stm.toml`:
 [borders]
 enabled = true
 thickness = 3
+overlap = 1                    # px the ring overlaps content per edge (closes the DWM hairline)
 focused_color = "#00AAFF"      # the focused/active window
 unfocused_color = "#555555"    # tiled but not focused
 floating_color = "#AA00FF"     # floating windows
@@ -360,6 +374,7 @@ floating_color = "#AA00FF"     # floating windows
 |-------|------|---------|-------|
 | `enabled` | `bool` | `true` | Master switch. `false` prevents overlay creation and detaches existing overlays. |
 | `thickness` | `u32` | `3` | Ring width in px, uniform on all sides. Capped at 50 by `validate()`. |
+| `overlap` | `u32` | `1` | Pixels the ring overlaps the visible content per edge. `0` = ring entirely in the reserved gap (window shrinks by the full `thickness`); `thickness` = content fills the layout slot under the ring. Capped at `thickness` by `validate()`. |
 | `focused_color` | `Color` | `#00AAFF` | Color for the OS-foreground window. |
 | `unfocused_color` | `Color` | `#555555` | Color for tiled-but-not-focused windows. |
 | `floating_color` | `Color` | `#AA00FF` | Color for floating windows (komorebi convention: floats always use this regardless of focus). |

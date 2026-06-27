@@ -587,8 +587,10 @@ pub enum MinimizeRestoreStrategy {
 /// The border crate draws a thin colored ring around each managed window as a
 /// separate layered overlay window that follows the target HWND's geometry
 /// (driven by `EVENT_OBJECT_LOCATIONCHANGE`). The daemon shrinks the actual
-/// window rect by `thickness` pixels on each side so the colored ring sits
-/// *outside* the visible content without obscuring it.
+/// window rect by `(thickness - overlap)` pixels on each side so the colored
+/// ring sits in the surrounding gap and overlaps the visible content by
+/// `overlap` px (closing the DWM hairline gap). See
+/// `docs/src/dev-guide/borders.md` for the full coordinate-space model.
 ///
 /// # Example
 ///
@@ -596,6 +598,7 @@ pub enum MinimizeRestoreStrategy {
 /// [borders]
 /// enabled = true
 /// thickness = 3
+/// overlap = 1
 /// focused_color = "#00AAFF"
 /// unfocused_color = "#555555"
 /// floating_color = "#AA00FF"
@@ -608,10 +611,21 @@ pub struct BorderConfig {
     pub enabled: bool,
     /// Border ring thickness in pixels, applied uniformly on all four sides.
     ///
-    /// The layout engine shrinks each window's HWND rect by this amount on
-    /// every edge before issuing `SetWindowPos`, leaving room for the overlay
-    /// to occupy the surrounding ring.
+    /// The ring is drawn in the outer `thickness` px of each window's layout
+    /// slot. The visible window content shrinks by `(thickness - overlap)` px
+    /// per edge (see `overlap`), so the ring overlaps the content by `overlap`
+    /// px rather than leaving a gap. (`docs/src/dev-guide/borders.md`)
     pub thickness: u32,
+    /// How many pixels the border ring overlaps the window's visible content.
+    ///
+    /// Komorebi-style overlap. `0` keeps the ring entirely in the reserved
+    /// gap (window shrinks by the full `thickness`); higher values pull the
+    /// content edge outward until, at `overlap == thickness`, the content
+    /// fills the whole layout slot and the ring sits fully on top of it. The
+    /// default of `1` closes the 1px DWM-client-edge hairline that otherwise
+    /// shows between an unfocused ring and the window content. Capped at
+    /// `thickness` by [`BorderConfig::validate`]. (`docs/src/dev-guide/borders.md`)
+    pub overlap: u32,
     /// Border color for the focused/active window.
     pub focused_color: Color,
     /// Border color for tiled-but-not-focused windows.
@@ -625,6 +639,7 @@ impl Default for BorderConfig {
         Self {
             enabled: true,
             thickness: 3,
+            overlap: 1,
             focused_color: Color::rgb(0x00, 0xAA, 0xFF),
             unfocused_color: Color::rgb(0x55, 0x55, 0x55),
             floating_color: Color::rgb(0xAA, 0x00, 0xFF),
@@ -636,14 +651,23 @@ impl BorderConfig {
     /// Validate that field values are within sane bounds.
     ///
     /// `thickness` is capped at 50 px — anything wider is almost certainly a
-    /// misconfiguration that would shrink windows into nothing. Color values
-    /// are parsed at TOML load time, so they are already well-formed here.
+    /// misconfiguration that would shrink windows into nothing. `overlap` must
+    /// not exceed `thickness`, otherwise the effective inset `(thickness -
+    /// overlap)` goes negative and the window would expand beyond its layout
+    /// slot. Color values are parsed at TOML load time, so they are already
+    /// well-formed here.
     pub fn validate(&self) -> Result<(), String> {
         const MAX_THICKNESS: u32 = 50;
         if self.thickness > MAX_THICKNESS {
             return Err(format!(
                 "borders.thickness must be at most {MAX_THICKNESS} px, got {}",
                 self.thickness
+            ));
+        }
+        if self.overlap > self.thickness {
+            return Err(format!(
+                "borders.overlap must be at most borders.thickness ({}), got {}",
+                self.thickness, self.overlap
             ));
         }
         Ok(())
@@ -826,6 +850,7 @@ strategy = "original_slot"
             borders: BorderConfig {
                 enabled: false,
                 thickness: 7,
+                overlap: 2,
                 focused_color: Color::rgb(0x10, 0x20, 0x30),
                 unfocused_color: Color::rgb(0x40, 0x50, 0x60),
                 floating_color: Color::rgb(0x70, 0x80, 0x90),
@@ -854,6 +879,7 @@ strategy = "original_slot"
         );
         assert!(!parsed.borders.enabled);
         assert_eq!(parsed.borders.thickness, 7);
+        assert_eq!(parsed.borders.overlap, 2);
         assert_eq!(parsed.borders.focused_color, Color::rgb(0x10, 0x20, 0x30));
         assert_eq!(parsed.borders.unfocused_color, Color::rgb(0x40, 0x50, 0x60));
         assert_eq!(parsed.borders.floating_color, Color::rgb(0x70, 0x80, 0x90));
@@ -921,6 +947,83 @@ strategy = "original_slot"
     #[test]
     fn config_validate_accepts_default_config() {
         assert!(StmConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_overlap_exceeding_thickness() {
+        let config = StmConfig {
+            borders: BorderConfig {
+                thickness: 3,
+                overlap: 4,
+                ..BorderConfig::default()
+            },
+            ..StmConfig::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("borders.overlap"));
+    }
+
+    #[test]
+    fn config_validate_accepts_overlap_equal_to_thickness() {
+        // overlap == thickness is the boundary: content fills the whole slot.
+        let config = StmConfig {
+            borders: BorderConfig {
+                thickness: 3,
+                overlap: 3,
+                ..BorderConfig::default()
+            },
+            ..StmConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    /// Positive: `BorderConfig::default()` ships `overlap = 1` — the komorebi
+    /// default that closes the 1 px DWM-client-edge hairline gap between an
+    /// unfocused ring and the window content.
+    ///
+    /// A regression to `0` would silently reintroduce the gap for every user
+    /// relying on the shipped defaults. The `default-config.toml` sync test
+    /// catches this only if the example file is also updated; this focused
+    /// check guards the compiled `Default` impl independently.
+    #[test]
+    fn border_config_default_overlap_is_one() {
+        assert_eq!(BorderConfig::default().overlap, 1);
+    }
+
+    /// Positive: `overlap = 0` (komorebi-style overlap disabled) is accepted
+    /// by validation. This is the backward-compat value — the window shrinks
+    /// by the full `thickness` and the ring sits wholly in the reserved gap,
+    /// never overlapping the content.
+    #[test]
+    fn config_validate_accepts_overlap_zero() {
+        let config = StmConfig {
+            borders: BorderConfig {
+                thickness: 3,
+                overlap: 0,
+                ..BorderConfig::default()
+            },
+            ..StmConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    /// Positive: an explicit `overlap = 0` survives a TOML serialize →
+    /// deserialize round-trip on `BorderConfig`.
+    ///
+    /// Guards against a regression where a `skip_serializing_if` attribute
+    /// would silently drop the field at its "default-ish" value and lose the
+    /// user's explicit "komorebi off" choice on the next config write.
+    #[test]
+    fn config_overlap_zero_roundtrips_toml() {
+        let config = BorderConfig {
+            thickness: 5,
+            overlap: 0,
+            ..BorderConfig::default()
+        };
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let parsed: BorderConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed.overlap, 0);
+        assert_eq!(parsed.thickness, 5);
     }
 
     #[test]

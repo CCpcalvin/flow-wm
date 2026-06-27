@@ -56,6 +56,8 @@ strategy = "original_slot"
 #
 # - enabled:        master switch (false = no overlays created)
 # - thickness:      border ring width in pixels (applied on all four sides)
+# - overlap:        px the ring overlaps the window content (0 = full gap,
+#                    thickness = content fills the slot); closes the DWM hairline
 # - focused_color:  border color for the focused/active window
 # - unfocused_color: border color for tiled-but-not-focused windows
 # - floating_color: border color for floating windows
@@ -64,6 +66,7 @@ strategy = "original_slot"
 [borders]
 enabled = true
 thickness = 3
+overlap = 1
 focused_color = "#00AAFF"
 unfocused_color = "#555555"
 floating_color = "#AA00FF"
