@@ -188,24 +188,35 @@ separate `detach` method. The old `BorderManager::detach(HWND)` is gone.
 
 ## Three Movement Paths
 
-Borders move via three different mechanisms depending on the window's state:
+Borders move via three different mechanisms depending on the window's state.
+All three share the same repaint mechanism: when `SetWindowPos` changes the
+overlay's size, Win32 sends `WM_SIZE`, whose handler rebuilds the bitmap.
+Move-only `SetWindowPos` calls (same size) do not trigger `WM_SIZE` — the
+compositor simply translates the cached bitmap.
 
 | Path | When | How | Bitmap rebuild? |
 |------|------|-----|-----------------|
-| **Animator** | Tiled window animates | Border flattened into `Vec<WindowTarget>` alongside the window; `SetWindowPos` moves both in lockstep | No (size rarely changes mid-animation; `SetWindowPos` translates the bitmap) |
-| **Float hook** | Floating window dragged | `store_float_rect` calls `set_geometry(visible_rect)` after updating the registry | Yes (`UpdateLayeredWindow` repaints at new size) |
-| **Teleport** | Bystander workspace switch | `teleport_workspaces` calls `set_geometry(visible_rect)` directly (instant, no animation) | Yes |
+| **Animator** | Tiled window animates | Border flattened into `Vec<WindowTarget>` alongside the window; `SetWindowPos` moves both in lockstep | Yes if size changes (`WM_SIZE` → `on_wm_size`); no for move-only frames |
+| **Float hook** | Floating window dragged | `store_float_rect` calls `set_geometry(visible_rect)` after updating the registry | Same: `set_geometry` calls `SetWindowPos`, which triggers `WM_SIZE` if resized |
+| **Teleport** | Bystander workspace switch | `teleport_workspaces` calls `set_geometry(visible_rect)` directly (instant, no animation) | Same |
 
-### Why the animator path doesn't rebuild the bitmap
+### The overlay is self-sufficient: `WM_SIZE` drives repaint
 
-The animator calls `SetWindowPos` via its `WindowBackend` — it does *not* call
-`UpdateLayeredWindow`. For a layered window, `SetWindowPos` translates the
-existing bitmap (moves it) but does not resize the pixel buffer. This is fine
-for tiled border movement because the border's size is determined by the layout
-rect, which changes only at frame `t=1.0` (the final `SetWindowPos`). During
-interpolation the ring translates with the window; at completion, the next
-layout mutation triggers a full `set_geometry` (with bitmap rebuild) if the size
-changed.
+The overlay's window procedure (`overlay_wnd_proc`) handles `WM_SIZE` by
+retrieving the `BorderInner` back-pointer from `GWLP_USERDATA` and calling
+`on_wm_size`, which queries the overlay's current rect via `GetWindowRect` and
+calls `paint`. Because the size changed (the precondition for `WM_SIZE`),
+`paint` rebuilds the bitmap via `CachedSurface::build` and re-uploads it via
+`UpdateLayeredWindow`.
+
+This eliminates the stale-bitmap bug that previously occurred during resize
+animations (`expand-column`, `shrink-column`). Before the `WM_SIZE` handler
+existed, `SetWindowPos` updated the overlay's outer rect but left the cached
+bitmap at the old size — the new edge area had no pixels, so the border edge
+disappeared mid-animation. The author worked around this for
+`teleport_workspaces` by calling `set_geometry` explicitly (which called
+`paint` directly), but the animator path was missed. With `WM_SIZE` handling,
+both paths — and any future caller — automatically get a correct bitmap.
 
 ### Float hook integration
 
@@ -236,6 +247,15 @@ The animator is the one exception: border HWNDs are flattened into
 But the animator only calls `SetWindowPos` on them — it never touches the
 `Border` struct itself. The overlay HWND is a real window, so the animator's
 `SetWindowPos`-based backend treats it like any other.
+
+When a cross-thread `SetWindowPos` resizes the overlay, Win32 dispatches
+`WM_SIZE` via `SendMessage` to the thread that created the overlay (the IPC
+thread). The IPC thread's message pump (`run.rs::pump_messages`) drains the
+queue on every loop wake, so `on_wm_size` → `paint` runs on the IPC thread even
+though the animator triggered it. The animator blocks inside `SetWindowPos`
+until the IPC thread processes the message. This adds a small per-frame cost
+during resize animations (~0.5-1 ms per border for the repaint), well within
+the ~14 ms headroom the animator has at 60 Hz.
 
 ## The `Border` Type
 

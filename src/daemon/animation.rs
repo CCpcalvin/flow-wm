@@ -339,11 +339,10 @@ impl ScrollTilingManager {
                     window_rect.height,
                 );
 
-                // Teleport the border overlay to match. Unlike the animator path
-                // (which only SetWindowPos-es), teleport calls set_geometry
-                // directly so the ring bitmap is rebuilt at the final size — no
-                // stale-ring artifact on instant repositioning. Option<&Window>
-                // is Copy so re-using `window` here is sound.
+                // Teleport the border overlay to match. `set_geometry` calls
+                // `SetWindowPos`, which triggers `WM_SIZE` → repaint if the size
+                // changed, keeping the bitmap in sync on instant repositioning.
+                // Option<&Window> is Copy so re-using `window` here is sound.
                 if let Some(border) = window.and_then(|w| w.border.as_ref()) {
                     border.set_geometry(Rect {
                         x: entry.rect.x,

@@ -28,10 +28,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetWindowRect, RegisterClassExW,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSENDCHANGING, SWP_NOSIZE,
-    SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetWindowLongPtrW,
+    GetWindowRect, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSENDCHANGING, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
+    UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SIZE, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::PCWSTR;
 use windows::core::w;
@@ -50,12 +51,24 @@ const OVERLAY_CLASS_NAME: PCWSTR = w!("STMBorderOverlay");
 /// return the cached atom without touching Win32.
 static OVERLAY_CLASS_ATOM: OnceLock<u16> = OnceLock::new();
 
-/// Minimal window procedure for the overlay class.
+/// Window procedure for the overlay class.
 ///
-/// Overlays are click-through (`WS_EX_TRANSPARENT`) and draw via
-/// `UpdateLayeredWindow` (no `WM_PAINT`), so this delegates everything to
-/// `DefWindowProcW`. A custom proc is still required so the class can be
-/// registered; passing `None` is rejected by `RegisterClassExW`.
+/// Handles `WM_SIZE` by rebuilding the cached ring bitmap so it matches the
+/// overlay's new dimensions, then re-uploading it via `UpdateLayeredWindow`.
+/// This makes the overlay self-sufficient: any caller that resizes the
+/// overlay via `SetWindowPos` (the animator, `set_geometry`, teleport)
+/// automatically gets a correctly-sized bitmap — no orchestrator-level
+/// special-casing needed. All other messages are passed through to
+/// `DefWindowProcW`.
+///
+/// # Threading
+///
+/// Runs on the IPC thread (the thread that owns the overlay HWND and pumps
+/// messages via `PeekMessageW` + `DispatchMessageW` — see
+/// `daemon::run::pump_messages`). When the animator worker thread calls
+/// `SetWindowPos` cross-thread, `SendMessage(WM_SIZE)` blocks the animator
+/// until the IPC thread dispatches it here, so all `BorderInner` access
+/// remains single-threaded and the mutexes are uncontended.
 ///
 /// # Safety
 ///
@@ -66,6 +79,22 @@ unsafe extern "system" fn overlay_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_SIZE {
+        // SAFETY: GWLP_USERDATA was set in `Border::create`. The stored
+        // pointer is valid for the HWND's lifetime because `BorderInner::drop`
+        // calls `DestroyWindow` under the overlay mutex before the
+        // `Arc<BorderInner>` can release its memory — after `DestroyWindow`
+        // returns Win32 dispatches no further messages here, so the deref
+        // cannot dangle.
+        let ptr_val = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+        if ptr_val != 0 {
+            // SAFETY: `ptr_val` is a valid `*const BorderInner` stored in
+            // `Border::create`; see the lifetime note above.
+            let border_inner = unsafe { &*(ptr_val as *const BorderInner) };
+            border_inner.on_wm_size();
+        }
+        return LRESULT(0);
+    }
     // SAFETY: DefWindowProcW is sound for arbitrary hwnd/msg/wparam/lparam;
     // we pass through unchanged. The unsafe block is required by edition 2024.
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -253,6 +282,19 @@ impl Border {
                 surface: Mutex::new(None),
             }),
         };
+        // Store a back-pointer to BorderInner so `overlay_wnd_proc` can find
+        // it when `WM_SIZE` arrives. `Arc::as_ptr` yields a stable `*const
+        // BorderInner` whose address is unaffected by `Border::clone` or Arc
+        // refcount changes.
+        //
+        // SAFETY: the pointer is valid for the overlay HWND's entire lifetime.
+        // `BorderInner::drop` calls `DestroyWindow` under the overlay mutex
+        // before the `Arc<BorderInner>` releases its allocation, so after the
+        // HWND is destroyed no further `WM_SIZE` messages can arrive and the
+        // pointer can never be dereferenced after free. See
+        // `overlay_wnd_proc`'s SAFETY note for the matching dereference.
+        let inner_ptr = Arc::as_ptr(&border.inner) as isize;
+        let _ = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, inner_ptr) };
         // Reveal the overlay. Until set_geometry paints a bitmap the layered
         // surface is fully transparent, so this never flashes on screen.
         border.set_visible(true);
@@ -334,10 +376,121 @@ impl Drop for BorderInner {
     }
 }
 
+// ── BorderInner: painting & geometry query ──────────────────────────
+
+impl BorderInner {
+    /// Query the overlay's current screen rect via `GetWindowRect`.
+    ///
+    /// Used by [`set_style`](Border::set_style) and
+    /// [`on_wm_size`](Self::on_wm_size) to repaint at the overlay's *actual*
+    /// position — which may differ from the last rect commanded via
+    /// [`set_geometry`](Border::set_geometry) because the animator moves
+    /// overlays via `SetWindowPos` without going through `set_geometry`.
+    /// Querying the overlay itself (not the target window) is always correct:
+    /// the animator is what put it where it is.
+    ///
+    /// Returns `None` if the overlay is destroyed or `GetWindowRect` fails
+    /// (e.g. during shutdown races); the caller treats that as a no-op paint.
+    fn overlay_rect(&self) -> Option<Rect> {
+        let raw = *self.overlay.lock().expect("overlay mutex poisoned");
+        if raw == 0 {
+            return None;
+        }
+        let hwnd = HWND(raw as *mut _);
+        let mut rect = RECT::default();
+        // SAFETY: GetWindowRect on our own overlay window, filling a local
+        // RECT by reference. Harmless if the window has been destroyed
+        // (returns an error, which we map to None).
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+            return None;
+        }
+        Some(Rect {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        })
+    }
+
+    /// Render the ring for `rect` and upload it via `UpdateLayeredWindow`.
+    ///
+    /// Uses the cached [`CachedSurface`] to avoid the expensive GDI churn
+    /// (`CreateCompatibleDC` + `CreateDIBSection` + per-pixel
+    /// [`fill_border_ring`]) on the common cases:
+    ///
+    /// - **Move-only** (same size + style, e.g. `teleport_workspaces` or the
+    ///   animator moving the overlay via `SetWindowPos`): the cached bitmap is
+    ///   already composited, so this is a no-op — `SetWindowPos` already moved
+    ///   the layered window and the compositor follows.
+    /// - **Color-only change** (focus switch Focused ↔ Unfocused, same size):
+    ///   recolor the cached DIB pixels in place and re-upload. No DIB realloc.
+    /// - **Shape change** (size / thickness / corner): rebuild the cache.
+    ///
+    /// The overlay HWND itself is positioned separately by
+    /// [`set_geometry`](Border::set_geometry); this only updates pixels.
+    fn paint(&self, rect: Rect) {
+        let w = rect.width;
+        let h = rect.height;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let raw = *self.overlay.lock().expect("overlay mutex poisoned");
+        if raw == 0 {
+            return;
+        }
+        let overlay_hwnd = HWND(raw as *mut _);
+        let style = *self.style.lock().expect("style mutex poisoned");
+
+        let mut surface_guard = self.surface.lock().expect("surface mutex poisoned");
+        let shape_matches = surface_guard
+            .as_ref()
+            .is_some_and(|s| s.shape_matches(w, h, &style));
+        if shape_matches {
+            let surface = surface_guard.as_mut().expect("shape_matches implies Some");
+            if surface.color == style.color {
+                // Identical bitmap already composited at this size + style. The
+                // overlay was moved or re-asserted; nothing to upload.
+                return;
+            }
+            // Same ring geometry, new color: recolor the cached pixels in
+            // place and re-upload. Avoids CreateDIBSection + fill_border_ring.
+            surface.recolor(style.color);
+            surface.upload(overlay_hwnd, &rect);
+            return;
+        }
+        // Shape changed (size / thickness / corner) or first paint: build a
+        // fresh surface, upload it, and replace the cache (dropping the old
+        // one frees its GDI handles).
+        if let Some(surface) = CachedSurface::build(w, h, &style) {
+            surface.upload(overlay_hwnd, &rect);
+            *surface_guard = Some(surface);
+        }
+        // GDI failure: leave the previous cache intact so a transient failure
+        // doesn't lose the last good bitmap.
+    }
+
+    /// Repaint the border at the overlay's current geometry.
+    ///
+    /// Called by `overlay_wnd_proc` when the overlay receives `WM_SIZE`
+    /// (its dimensions changed via `SetWindowPos`). Because the size changed,
+    /// [`paint`](Self::paint) rebuilds the bitmap via `CachedSurface::build`
+    /// to match the new dimensions and re-uploads it — fixing the
+    /// stale-bitmap artifact that previously occurred during resize
+    /// animations (`expand-column`, `shrink-column`, etc.).
+    ///
+    /// No-op if the overlay is destroyed or its rect cannot be queried.
+    fn on_wm_size(&self) {
+        let Some(rect) = self.overlay_rect() else {
+            return;
+        };
+        self.paint(rect);
+    }
+}
+
 // ── Geometry, style, visibility ─────────────────────────────────────
 
 impl Border {
-    /// Command the overlay to cover `visible_rect` and repaint the ring.
+    /// Command the overlay to cover `visible_rect`.
     ///
     /// This is the daemon-driven replacement for the old hook-driven
     /// `sync_geometry`: instead of querying `GetWindowRect(target)`, the
@@ -347,11 +500,14 @@ impl Border {
     /// fixing the previous misalignment where it sat over the invisible
     /// resize border.
     ///
-    /// Performs `SetWindowPos` (move + resize + re-seat z-order) and then
-    /// refreshes pixels via [`paint`](Self::paint). When the size and style are
-    /// unchanged (the common teleport / animator case) [`paint`](Self::paint)
-    /// is a no-op, so this reduces to a single `SetWindowPos` move. Safe to
-    /// call with a destroyed overlay (no-op) or a zero-area rect (early return).
+    /// Performs `SetWindowPos` (move + resize + re-seat z-order). When the
+    /// size changes, `SetWindowPos` sends `WM_SIZE`, which
+    /// `overlay_wnd_proc` handles by rebuilding the ring bitmap and
+    /// re-uploading it via `UpdateLayeredWindow` — see
+    /// [`BorderInner::on_wm_size`]. When the size is unchanged (move-only),
+    /// no `WM_SIZE` is sent and the compositor simply translates the existing
+    /// cached bitmap. Safe to call with a destroyed overlay (no-op) or a
+    /// zero-area rect (early return).
     ///
     /// Note: the commanded rect is *not* cached. [`set_style`](Self::set_style)
     /// queries the overlay's actual position at repaint time, which stays
@@ -374,7 +530,9 @@ impl Border {
         // avoid re-entrant WM_WINDOWPOSCHANGING callbacks. We deliberately
         // do NOT use SWP_NOZORDER (we want to set z-order) and NOT
         // SWP_ASYNCWINDOWPOS (this runs on the IPC thread, synchronous
-        // dispatch is correct). See `docs/src/dev-guide/borders.md`.
+        // dispatch is correct). If the size changed, Win32 sends WM_SIZE,
+        // whose handler (overlay_wnd_proc) rebuilds the bitmap. See
+        // `docs/src/dev-guide/borders.md`.
         let _ = unsafe {
             SetWindowPos(
                 overlay_hwnd,
@@ -386,39 +544,9 @@ impl Border {
                 SWP_NOACTIVATE | SWP_NOSENDCHANGING,
             )
         };
-        self.paint(visible_rect);
-    }
-
-    /// Query the overlay's current screen rect via `GetWindowRect`.
-    ///
-    /// Used by [`set_style`](Self::set_style) to repaint at the overlay's
-    /// *actual* position — which may differ from the last rect commanded via
-    /// [`set_geometry`](Self::set_geometry) because the animator moves overlays
-    /// via `SetWindowPos` without going through `set_geometry`. Querying the
-    /// overlay itself (not the target window) is always correct: the animator
-    /// is what put it where it is.
-    ///
-    /// Returns `None` if the overlay is destroyed or `GetWindowRect` fails
-    /// (e.g. during shutdown races); the caller treats that as a no-op paint.
-    fn overlay_rect(&self) -> Option<Rect> {
-        let raw = *self.inner.overlay.lock().expect("overlay mutex poisoned");
-        if raw == 0 {
-            return None;
-        }
-        let hwnd = HWND(raw as *mut _);
-        let mut rect = RECT::default();
-        // SAFETY: GetWindowRect on our own overlay window, filling a local
-        // RECT by reference. Harmless if the window has been destroyed
-        // (returns an error, which we map to None).
-        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
-            return None;
-        }
-        Some(Rect {
-            x: rect.left,
-            y: rect.top,
-            width: rect.right - rect.left,
-            height: rect.bottom - rect.top,
-        })
+        // No explicit paint() call: if the size changed, WM_SIZE was already
+        // dispatched synchronously (same thread) and on_wm_size rebuilt the
+        // bitmap. If move-only, the compositor translates the cached bitmap.
     }
 
     /// Update the border color/thickness and repaint at the overlay's current
@@ -446,10 +574,10 @@ impl Border {
             }
             *guard = style;
         }
-        let Some(rect) = self.overlay_rect() else {
+        let Some(rect) = self.inner.overlay_rect() else {
             return;
         };
-        self.paint(rect);
+        self.inner.paint(rect);
     }
 
     /// Show or hide the overlay (used for minimize/restore).
@@ -462,63 +590,6 @@ impl Border {
         let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
         // SAFETY: ShowWindow is sound for any HWND value; we own this one.
         let _ = unsafe { ShowWindow(hwnd, cmd) };
-    }
-
-    /// Render the ring for `rect` and upload it via `UpdateLayeredWindow`.
-    ///
-    /// Uses the cached [`CachedSurface`] to avoid the expensive GDI churn
-    /// (`CreateCompatibleDC` + `CreateDIBSection` + per-pixel
-    /// [`fill_border_ring`]) on the common cases:
-    ///
-    /// - **Move-only** (same size + style, e.g. `teleport_workspaces` or the
-    ///   animator moving the overlay via `SetWindowPos`): the cached bitmap is
-    ///   already composited, so this is a no-op — `SetWindowPos` already moved
-    ///   the layered window and the compositor follows.
-    /// - **Color-only change** (focus switch Focused ↔ Unfocused, same size):
-    ///   recolor the cached DIB pixels in place and re-upload. No DIB realloc.
-    /// - **Shape change** (size / thickness / corner): rebuild the cache.
-    ///
-    /// The overlay HWND itself is positioned separately by
-    /// [`set_geometry`](Self::set_geometry); this only updates pixels.
-    fn paint(&self, rect: Rect) {
-        let w = rect.width;
-        let h = rect.height;
-        if w <= 0 || h <= 0 {
-            return;
-        }
-        let raw = *self.inner.overlay.lock().expect("overlay mutex poisoned");
-        if raw == 0 {
-            return;
-        }
-        let overlay_hwnd = HWND(raw as *mut _);
-        let style = *self.inner.style.lock().expect("style mutex poisoned");
-
-        let mut surface_guard = self.inner.surface.lock().expect("surface mutex poisoned");
-        let shape_matches = surface_guard
-            .as_ref()
-            .is_some_and(|s| s.shape_matches(w, h, &style));
-        if shape_matches {
-            let surface = surface_guard.as_mut().expect("shape_matches implies Some");
-            if surface.color == style.color {
-                // Identical bitmap already composited at this size + style. The
-                // overlay was moved or re-asserted; nothing to upload.
-                return;
-            }
-            // Same ring geometry, new color: recolor the cached pixels in
-            // place and re-upload. Avoids CreateDIBSection + fill_border_ring.
-            surface.recolor(style.color);
-            surface.upload(overlay_hwnd, &rect);
-            return;
-        }
-        // Shape changed (size / thickness / corner) or first paint: build a
-        // fresh surface, upload it, and replace the cache (dropping the old
-        // one frees its GDI handles).
-        if let Some(surface) = CachedSurface::build(w, h, &style) {
-            surface.upload(overlay_hwnd, &rect);
-            *surface_guard = Some(surface);
-        }
-        // GDI failure: leave the previous cache intact so a transient failure
-        // doesn't lose the last good bitmap.
     }
 }
 
@@ -1367,5 +1438,116 @@ mod tests {
         assert_eq!(recolored, pack_bgra(color(0xAA, 0xBB, 0xCC), 0xFF));
         // Top byte is the alpha — it must still be exactly 0xFF.
         assert_eq!(recolored >> 24, 0xFF);
+    }
+
+    // ── paint / on_wm_size destruction guards ─────────────────────────
+    //
+    // The actual WM_SIZE → repaint → bitmap-rebuild path (the core of the
+    // resize fix) is integration-only: it needs a real layered window,
+    // `SetWindowPos`, and the Win32 message pump. What IS unit-testable
+    // without Win32 is the guard logic that makes `on_wm_size` and `paint`
+    // safe to call from `overlay_wnd_proc` during shutdown races — when the
+    // overlay HWND may already be in the destroyed state (`raw == 0`).
+    //
+    // `overlay_wnd_proc` unconditionally dereferences the GWLP_USERDATA
+    // back-pointer and calls `on_wm_size`; these tests pin the no-op contract
+    // that keeps that unconditional call sound.
+
+    /// Build a `BorderInner` whose overlay HWND is `0` (destroyed) and whose
+    /// surface cache is empty. No GDI handles are allocated, so constructing
+    /// this fixture touches no Win32 state.
+    fn destroyed_border_inner() -> BorderInner {
+        BorderInner {
+            // `0` is the post-`DestroyWindow` sentinel (see `BorderInner::drop`).
+            overlay: Mutex::new(0),
+            target: 0,
+            style: Mutex::new(BorderStyle::new(
+                color(0, 0, 0),
+                1,
+                CornerPreference::Square,
+            )),
+            corner_preference: CornerPreference::Square,
+            surface: Mutex::new(None),
+        }
+    }
+
+    /// `on_wm_size` (new method) must be a panic-free, GDI-free no-op when the
+    /// overlay is in the destroyed state. This is the defense-in-depth that
+    /// lets `overlay_wnd_proc` call it unconditionally: `on_wm_size` →
+    /// `overlay_rect()` sees `raw == 0` → returns `None` → early return, with
+    /// no `GetWindowRect` or `UpdateLayeredWindow` call.
+    ///
+    /// Without this guard, a `WM_SIZE` arriving during teardown (e.g. sent by
+    /// `DestroyWindow` itself, or a cross-thread `SetWindowPos` racing the
+    /// drop) would dereference a dead HWND into GDI.
+    #[test]
+    fn on_wm_size_is_noop_when_overlay_destroyed() {
+        // Arrange — a BorderInner in the destroyed state (overlay == 0).
+        let inner = destroyed_border_inner();
+
+        // Act — WM_SIZE-equivalent entry point. Must not panic and must not
+        // touch Win32/GDI (verified by the destroyed-overlay guard firing
+        // before any GDI call site).
+        inner.on_wm_size();
+
+        // Assert — no panic occurred, surface cache untouched (still None).
+        assert!(
+            inner.surface.lock().unwrap().is_none(),
+            "destroyed overlay must not allocate a cached surface"
+        );
+    }
+
+    /// `paint` (moved from `impl Border` to `impl BorderInner`) must retain its
+    /// destroyed-overlay early-return: a non-empty rect with `raw == 0` returns
+    /// at the `raw == 0` guard, before any GDI call. Regression guard for the
+    /// move — verifies the refactor did not drop the guard.
+    #[test]
+    fn paint_is_noop_when_overlay_destroyed() {
+        // Arrange — destroyed overlay, but a non-empty rect so the zero-area
+        // guard does NOT fire first; the `raw == 0` guard must be the one that
+        // returns.
+        let inner = destroyed_border_inner();
+        let non_empty_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+
+        // Act
+        inner.paint(non_empty_rect);
+
+        // Assert — no GDI allocation leaked into the cache.
+        assert!(
+            inner.surface.lock().unwrap().is_none(),
+            "destroyed overlay must not allocate a cached surface"
+        );
+    }
+
+    /// `paint` (moved) must retain its zero-area-rect early-return: a rect with
+    /// `width <= 0` or `height <= 0` returns before locking the overlay or
+    /// touching GDI. Regression guard for the move, and the second guard that
+    /// `on_wm_size`'s callee relies on for malformed-rect safety.
+    #[test]
+    fn paint_is_noop_for_zero_area_rect() {
+        // Arrange — a rect with zero height (width is positive, so only the
+        // height branch trips). Overlay is the destroyed sentinel but the
+        // zero-area guard fires earlier, so this also confirms guard ordering.
+        let inner = destroyed_border_inner();
+        let zero_area_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 0,
+        };
+
+        // Act
+        inner.paint(zero_area_rect);
+
+        // Assert — no allocation, no panic.
+        assert!(
+            inner.surface.lock().unwrap().is_none(),
+            "zero-area rect must not allocate a cached surface"
+        );
     }
 }
