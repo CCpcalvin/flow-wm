@@ -298,6 +298,23 @@ pub fn start_test_daemon_with_extra_args(
         .arg(desktop_name)
         .env("STM_PIPE_NAME", pipe)
         .creation_flags(DETACHED);
+
+    // Redirect the daemon log away from the user's real `~/.config/stm/logs/`
+    // daily log (shared with any live daemon, so reading it back per-test is
+    // racy). The pipe name is unique per test, so it keys a unique temp log;
+    // the daemon truncates the file on each start. A caller that explicitly
+    // passes its own `--log-file` in `extra_args` wins.
+    let already_redirected = extra_args.iter().any(|a| *a == "--log-file");
+    if !already_redirected {
+        let safe: String = pipe
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let log_path = std::env::temp_dir().join(format!("stmd-test-{safe}.log"));
+        eprintln!("[test] stmd log -> {}", log_path.display());
+        cmd.arg("--log-file").arg(log_path);
+    }
+
     for arg in extra_args {
         cmd.arg(arg);
     }
