@@ -92,6 +92,17 @@ impl ScrollTilingManager {
         let visible_rect = invisible_bounds.window_to_visible(window_rect);
         let wid = WindowId(hwnd);
 
+        // Outset the border rect by `(thickness - overlap)` to match the
+        // tile-side geometry from `animate_workspaces`, which seats the border
+        // overlay at the visible-content rect outset by the border inset so the
+        // ring sits in the surrounding gap and overlaps the content by `overlap`
+        // px. Without this outset the float border would shrink onto the content
+        // edge on the first resize. `Rect::inset(amount)` with a negative amount
+        // outsets — see its doc.
+        let border_outset =
+            self.config.borders.thickness as i32 - self.config.borders.overlap as i32;
+        let border_rect = visible_rect.inset(-border_outset);
+
         // FLOAT_HWNS holds only active-workspace floats, so the window must be
         // in the active workspace's FloatingSpace. Guard the upsert with
         // contains() so a stray event can never append a bogus entry.
@@ -110,7 +121,7 @@ impl ScrollTilingManager {
             // tile-side border flattening. set_geometry takes &self
             // (interior mutability) so this is sound through &mut Window.
             if let Some(border) = win.border.as_ref() {
-                border.set_geometry(visible_rect);
+                border.set_geometry(border_rect);
             }
         }
 
