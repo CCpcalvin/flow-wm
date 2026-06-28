@@ -22,6 +22,7 @@ use crate::registry::hooks::{
 use crate::registry::types::{FloatingState, WindowState};
 use crate::registry::win32 as registry_win32;
 
+use super::borders::float_border_rect;
 use super::types::ScrollTilingManager;
 
 impl ScrollTilingManager {
@@ -92,16 +93,16 @@ impl ScrollTilingManager {
         let visible_rect = invisible_bounds.window_to_visible(window_rect);
         let wid = WindowId(hwnd);
 
-        // Outset the border rect by `(thickness - overlap)` to match the
-        // tile-side geometry from `animate_workspaces`, which seats the border
-        // overlay at the visible-content rect outset by the border inset so the
-        // ring sits in the surrounding gap and overlaps the content by `overlap`
-        // px. Without this outset the float border would shrink onto the content
-        // edge on the first resize. `Rect::inset(amount)` with a negative amount
-        // outsets — see its doc.
-        let border_outset =
-            self.config.borders.thickness as i32 - self.config.borders.overlap as i32;
-        let border_rect = visible_rect.inset(-border_outset);
+        // Seat the overlay at the visible rect outset by `(thickness − overlap)`
+        // — the float counterpart of the tile side's content inset — so the
+        // ring lands in the surrounding gap like a tiled border. The formula is
+        // shared with the creation path via `float_border_rect`, keeping the two
+        // paths visually identical.
+        let border_rect = float_border_rect(
+            visible_rect,
+            self.config.borders.thickness,
+            self.config.borders.overlap,
+        );
 
         // FLOAT_HWNS holds only active-workspace floats, so the window must be
         // in the active workspace's FloatingSpace. Guard the upsert with

@@ -1043,6 +1043,13 @@ impl ScrollTilingManager {
         let batches = [(source_actual, 0), (float_actual, 0)];
         self.animate_workspaces(&batches);
 
+        // Re-sync the toggled window's border: the registry state just flipped
+        // Tiling→Floating, so refresh_border_for re-resolves color (a focused
+        // toggler stays blue under focus-priority) and re-seats the overlay to
+        // the float outset geometry — the tile-era overlay would otherwise sit
+        // at the stale tile rect until the next drag fires store_float_rect.
+        self.refresh_border_for(focused.0);
+
         SocketResponse::Ok
     }
 
@@ -1086,6 +1093,12 @@ impl ScrollTilingManager {
         // f) Animate: single batch, both at y_offset 0.
         let batches = [(dest_actual, 0), (float_actual, 0)];
         self.animate_workspaces(&batches);
+
+        // Re-sync the toggled window's border: the registry state just flipped
+        // Floating→Tiling, so refresh_border_for re-resolves color. Tiled
+        // geometry is animator-owned, so only color/z-order are re-asserted
+        // here (refresh_border_for leaves tile overlay geometry untouched).
+        self.refresh_border_for(focused.0);
 
         SocketResponse::Ok
     }
