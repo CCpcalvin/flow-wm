@@ -48,31 +48,46 @@ visible = (canvas_col_right > viewport_left) && (canvas_col_left < viewport_righ
 
 This is a standard interval overlap test. Columns that overlap even by one pixel are projected at their real screen coordinates; columns with no overlap are parked.
 
-## Row rects: equal-height division
+## Row rects: source-of-truth heights
 
-Within a visible column, the monitor's available height (after subtracting `padding.up` and `padding.down`) is divided equally among the column's rows. Each window gets a `row_height = available_height / row_count`. This equal-division model is simple and predictable — all windows in a column are always the same height.
+Each `Row` in a column carries its own `height: i32` field, and projection consumes that value **verbatim** as the window's pixel height. There is no equal-division step here, no recomputation, no rescaling, no inset — projection simply stacks the rows. Equal-height distribution is performed exactly once, at mutation time, by [`distribute_heights`](../../src/layout/mutations.rs) (see [Mutations](./mutations.md)). Between mutations, row heights are intentionally stable so that future drag-resize or IPC-driven continuous-height adjustment can preserve user-customized heights.
+
+The vertical stacking model: starting at `y = monitor_y + padding.up + window_gap`, each row occupies `row.height` pixels, and a single `window_gap` separates consecutive rows:
+
+```
+y_cursor = monitor_y + padding.up + window_gap
+for row in column.rows:
+    window.rect = (col_x, y_cursor, col_width, row.height)
+    y_cursor += row.height + window_gap
+```
+
+This produces one `window_gap` between adjacent rows, one `window_gap` above the topmost row (after `padding.up`), and one trailing `window_gap` below the bottommost row (before `padding.down`). The `row.height` values are the sole determinant of where each window lands vertically.
 
 ## The container model: from column cell to window rect
 
-The relationship between the column's allocated cell and the actual window rect is where padding meets geometry. The window is inset within its row cell by `window_gap` on top and bottom:
+Because `row.height` is consumed as the literal window height, there is **no inset within a row cell**. Horizontally, the window fills the full `col_width` — the gap between columns comes from the slot model (the `window_gap` between slots), not from insetting the window. Vertically, each window's height is exactly `row.height`, and the gaps between windows come from the `+ window_gap` term in the stacking formula above.
 
 ```mermaid
 graph TB
-    subgraph RowCell["Row Cell (allocated height)"]
+    subgraph Column["Column (vertical stack)"]
         direction TB
-        MT["top margin: window_gap"]
-        W["Window Rect\nx = col_x\ny = cell_y + gap\nwidth = col_width\nheight = row_height - 2*gap"]
-        MB["bottom margin: window_gap"]
+        TG["top gap: window_gap (after padding.up)"]
+        W0["Row 0 Window\nx = col_x\ny = monitor_y + up + gap\nwidth = col_width\nheight = row.height[0]"]
+        G1["inter-row gap: window_gap"]
+        W1["Row 1 Window\nwidth = col_width\nheight = row.height[1]"]
+        BG["bottom gap: window_gap (before padding.down)"]
     end
 
-    MT --- W --- MB
+    TG --- W0 --- G1 --- W1 --- BG
 
-    style MT fill:#fdd,stroke:#999
-    style MB fill:#fdd,stroke:#999
-    style W fill:#dfd,stroke:#333,stroke-width:2px
+    style TG fill:#fdd,stroke:#999
+    style G1 fill:#fdd,stroke:#999
+    style BG fill:#fdd,stroke:#999
+    style W0 fill:#dfd,stroke:#333,stroke-width:2px
+    style W1 fill:#dfd,stroke:#333,stroke-width:2px
 ```
 
-Horizontally, the window fills the full `col_width` — there is no horizontal inset within the cell. The gap between columns comes from the slot model (the `window_gap` between slots), not from insetting the window. Vertically, the `window_gap` on top and bottom of each window produces `2 * window_gap` gap between adjacent rows and `window_gap` gap at the top and bottom edges of the tiling area.
+This is a deliberate departure from the earlier "equal cell division + inset" model. The new contract is: *the value on `Row.height` is the HWND height that Windows receives*. Anything that wants to change a window's height — equal redistribution, drag-resize, explicit IPC — must write to `Row.height` through the mutation layer; projection never second-guesses it.
 
 ## Screen-level margins
 
@@ -104,7 +119,7 @@ There are two parking zones:
 - **Left parking**: `monitor_left - col_width`. For columns whose canvas right edge is at or before the viewport left edge.
 - **Right parking**: `monitor_right`. For columns whose canvas left edge is at or beyond the viewport right edge.
 
-Parked windows use the same padding and row-division logic as visible windows, so when a column scrolls from parked to visible (or vice versa), its windows animate smoothly with consistent dimensions — there is no sudden resize or padding change at the boundary.
+Parked windows use the same `row.height`-stacking logic as visible windows, so when a column scrolls from parked to visible (or vice versa), its windows animate smoothly with consistent dimensions — there is no sudden resize or padding change at the boundary.
 
 ## Why projection is the only place padding lives
 

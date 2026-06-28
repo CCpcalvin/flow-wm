@@ -62,6 +62,7 @@ pub(super) fn derive_layout_config(app_config: &StmConfig, monitor: &MonitorInfo
     LayoutConfig {
         column_width,
         min_column_width_px: app_config.min_column_width_px,
+        min_window_height_px: app_config.min_window_height_px,
         padding: LayoutPadding {
             window_gap: app_config.padding.window_gap,
             up: app_config.padding.up,

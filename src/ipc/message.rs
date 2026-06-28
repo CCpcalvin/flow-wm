@@ -106,9 +106,10 @@ pub enum SocketMessage {
     /// intended movement based on the window's current state and the layout.
     ///
     /// - Tiled window, left/right → swap the entire column (delegates to
-    ///   [`SocketMessage::SwapColumn`]).
+    ///   [`SocketMessage::SwapColumn`]). Real cross-column move (extract +
+    ///   reinsert) is *[deferred — not yet wired]*.
     /// - Tiled window, up/down → swap with the adjacent window in the same
-    ///   column. *[deferred — not yet wired]*
+    ///   column (delegates to [`SocketMessage::SwapWindow`]).
     /// - Floating window, any direction → nudge by a configurable shift.
     ///   *[deferred — not yet wired]*
     ///
@@ -163,8 +164,27 @@ pub enum SocketMessage {
     ToggleMonocle,
     /// Place the focused window above (z-order).
     PlaceAbove,
-    /// Promote the focused window to master (first position).
-    Promote,
+    /// Promote the focused window out of its column into a new standalone column.
+    ///
+    /// The focused window is detached from its current column and inserted as
+    /// the sole row of a brand-new column placed immediately to the left or
+    /// right of the source column. The source column's remaining rows are
+    /// redistributed to equal heights. This is a no-op when the focused
+    /// window is already the only row in its column.
+    Promote {
+        /// Direction to spawn the new column (left or right of source).
+        direction: Direction,
+    },
+    /// Merge the focused window's row into the adjacent column.
+    ///
+    /// The focused window is removed from its current column and appended as
+    /// a new bottom row of the neighbour column. Both columns' row heights
+    /// are redistributed to equal shares. Vertical directions are rejected
+    /// (this is a horizontal-only operation).
+    MergeColumn {
+        /// Direction of the neighbour column to merge into (left or right).
+        direction: Direction,
+    },
     /// Close the focused window.
     CloseWindow,
 
@@ -461,7 +481,12 @@ mod tests {
             SocketMessage::ToggleFloat,
             SocketMessage::ToggleMonocle,
             SocketMessage::PlaceAbove,
-            SocketMessage::Promote,
+            SocketMessage::Promote {
+                direction: Direction::Left,
+            },
+            SocketMessage::MergeColumn {
+                direction: Direction::Right,
+            },
             SocketMessage::CloseWindow,
             SocketMessage::QueryWindowsAll,
             SocketMessage::QueryLayoutVirtual,
@@ -677,7 +702,12 @@ mod tests {
             SocketMessage::ToggleFloat,
             SocketMessage::ToggleMonocle,
             SocketMessage::PlaceAbove,
-            SocketMessage::Promote,
+            SocketMessage::Promote {
+                direction: Direction::Left,
+            },
+            SocketMessage::MergeColumn {
+                direction: Direction::Right,
+            },
             SocketMessage::CloseWindow,
             SocketMessage::QueryWindowsAll,
             SocketMessage::QueryLayoutVirtual,

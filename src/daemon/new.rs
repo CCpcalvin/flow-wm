@@ -110,6 +110,7 @@ impl ScrollTilingManager {
             monitor,
             layout_config.column_width,
             layout_config.min_column_width_px,
+            layout_config.min_window_height_px,
             layout_config.padding,
             app_config.columns_per_screen,
         );
@@ -223,6 +224,7 @@ impl ScrollTilingManager {
                 monitor,
                 layout_config.column_width,
                 layout_config.min_column_width_px,
+                layout_config.min_window_height_px,
                 layout_config.padding,
                 app_config.columns_per_screen,
             );

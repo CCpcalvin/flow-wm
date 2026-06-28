@@ -32,6 +32,11 @@ pub(super) struct LayoutConfig {
     /// Minimum column width in pixels.
     pub(super) min_column_width_px: u32,
 
+    /// Minimum per-row window height in pixels. Caps how many windows a
+    /// column can hold. Sourced directly from
+    /// [`StmConfig::min_window_height_px`].
+    pub(super) min_window_height_px: u32,
+
     /// Padding converted from config types to layout types.
     pub(super) padding: crate::layout::types::Padding,
 }

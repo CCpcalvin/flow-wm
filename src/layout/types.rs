@@ -23,10 +23,39 @@
 
 use crate::common::{Rect, WindowId};
 
+/// A single row (window slot) inside a [`Column`].
+///
+/// `height` is the **source of truth** for the row's pixel height — the
+/// projection layer ([`super::projection::project`]) consumes it verbatim
+/// when computing on-screen rectangles. Distribution of equal heights across
+/// the rows of a column happens at the **mutation layer** (see
+/// `distribute_heights` in `mutations.rs`) whenever row membership changes
+/// (`merge-column`, `promote`, `add_window_to_column`, `remove_window`).
+///
+/// Storing the height per row (rather than recomputing it during projection)
+/// is what unlocks future per-row resizing — drag-resize or IPC continuous
+/// height adjustment will simply overwrite `height` on the affected rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    /// The window occupying this row.
+    pub window_id: WindowId,
+    /// Pixel height of this row's window. Consumed verbatim by projection.
+    pub height: i32,
+}
+
+impl Row {
+    /// Create a row with an explicit pixel height.
+    #[must_use]
+    pub fn new(window_id: WindowId, height: i32) -> Self {
+        Self { window_id, height }
+    }
+}
+
 /// A column on the virtual canvas containing one or more stacked windows.
 ///
-/// Columns are the **vertical containers** in the layout. Windows within a
-/// column are always equally sized vertically (equal-height rows).
+/// Columns are the **vertical containers** in the layout. Each row holds a
+/// single window with its own explicit pixel [`Row::height`] — windows within
+/// a column need not share the same height once drag/IPC row-resize arrives.
 ///
 /// The column does **not** store pixel position — that is *implicit* from its
 /// index in [`VirtualLayout::columns`] plus the cumulative widths of preceding
@@ -37,10 +66,10 @@ use crate::common::{Rect, WindowId};
 /// ```text
 /// VirtualLayout (horizontal)
 /// ├── Column 0 (vertical)
-/// │   ├── Row 0: WindowId(1)
-/// │   └── Row 1: WindowId(2)
+/// │   ├── Row 0: Row { window_id: WindowId(1), height: 540 }
+/// │   └── Row 1: Row { window_id: WindowId(2), height: 540 }
 /// ├── Column 1
-/// │   └── Row 0: WindowId(3)
+/// │   └── Row 0: Row { window_id: WindowId(3), height: 1080 }
 /// └── ...
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -57,26 +86,32 @@ pub struct Column {
     /// (`column_shift = column_width + window_gap`); free-form widths arise
     /// from drag-resize and from `viewport_offset` adjustments.
     pub width_px: i32,
-    /// Window IDs ordered top-to-bottom within this column.
-    pub rows: Vec<WindowId>,
+    /// Rows (window slots) ordered top-to-bottom within this column.
+    pub rows: Vec<Row>,
 }
 
 impl Column {
-    /// Create a new column with a single window and the given pixel width.
+    /// Create a single-row column from an explicit [`Row`].
     ///
     /// `width_px` is taken as-is; mutation-layer bounds (min/abs_max) are not
     /// checked here — see [`Column::is_valid_width`] for the structural check.
+    /// The row's [`Row::height`] is likewise taken verbatim — callers that
+    /// need equal redistribution across rows should build the column via
+    /// [`Column::with_rows`] using `mutations::distribute_heights`.
     #[must_use]
-    pub fn new(width_px: i32, window: WindowId) -> Self {
+    pub fn with_row(width_px: i32, row: Row) -> Self {
         Self {
             width_px,
-            rows: vec![window],
+            rows: vec![row],
         }
     }
 
-    /// Create a column with multiple equally-sized rows.
+    /// Create a column from an explicit list of [`Row`]s.
+    ///
+    /// Use `mutations::distribute_heights(available, gap, n)` to compute
+    /// equal-with-remainder heights when row membership changes.
     #[must_use]
-    pub fn with_equal_rows(width_px: i32, rows: Vec<WindowId>) -> Self {
+    pub fn with_rows(width_px: i32, rows: Vec<Row>) -> Self {
         Self { width_px, rows }
     }
 
@@ -142,8 +177,8 @@ impl VirtualLayout {
     #[must_use]
     pub fn find_window(&self, id: WindowId) -> Option<(usize, usize)> {
         for (col_idx, col) in self.columns.iter().enumerate() {
-            for (row_idx, wid) in col.rows.iter().enumerate() {
-                if *wid == id {
+            for (row_idx, row) in col.rows.iter().enumerate() {
+                if row.window_id == id {
                     return Some((col_idx, row_idx));
                 }
             }
@@ -316,8 +351,13 @@ mod tests {
     fn virtual_layout_find_window() {
         let id_a = WindowId(1);
         let id_b = WindowId(2);
-        let layout =
-            VirtualLayout::with_columns(vec![Column::new(960, id_a), Column::new(960, id_b)], 0);
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_row(960, Row::new(id_a, 0)),
+                Column::with_row(960, Row::new(id_b, 0)),
+            ],
+            0,
+        );
         assert_eq!(layout.find_window(id_a), Some((0, 0)));
         assert_eq!(layout.find_window(id_b), Some((1, 0)));
         assert_eq!(layout.find_window(WindowId(99)), None);
@@ -327,8 +367,11 @@ mod tests {
     fn virtual_layout_window_count() {
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::with_equal_rows(960, vec![WindowId(1), WindowId(2)]),
-                Column::new(960, WindowId(3)),
+                Column::with_rows(
+                    960,
+                    vec![Row::new(WindowId(1), 0), Row::new(WindowId(2), 0)],
+                ),
+                Column::with_row(960, Row::new(WindowId(3), 0)),
             ],
             0,
         );
@@ -339,9 +382,9 @@ mod tests {
     fn column_valid_width() {
         // Structural check only: strictly positive. Config-dependent min/max
         // bounds are enforced at the mutation sites.
-        assert!(Column::new(1, WindowId(1)).is_valid_width());
-        assert!(Column::new(960, WindowId(1)).is_valid_width());
-        assert!(!Column::new(0, WindowId(1)).is_valid_width());
-        assert!(!Column::new(-1, WindowId(1)).is_valid_width());
+        assert!(Column::with_row(1, Row::new(WindowId(1), 0)).is_valid_width());
+        assert!(Column::with_row(960, Row::new(WindowId(1), 0)).is_valid_width());
+        assert!(!Column::with_row(0, Row::new(WindowId(1), 0)).is_valid_width());
+        assert!(!Column::with_row(-1, Row::new(WindowId(1), 0)).is_valid_width());
     }
 }

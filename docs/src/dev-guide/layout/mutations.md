@@ -11,11 +11,13 @@ Every layout change in ScrollingTilingManager is expressed as a **pure function*
 | Navigation | Scroll left | `scroll_left(layout, config)` | Decrements `viewport_offset` by one visible column step. Clamped to 0. |
 | Navigation | Scroll right | `scroll_right(layout, config)` | Increments `viewport_offset` by one visible column step. Clamped to the max offset where the rightmost column edge meets the viewport right edge. |
 | Structural | Swap column | `swap_column(layout, focused, dir, config)` | Swaps the focused window's entire column with its left or right neighbor. Calls `ensure_column_visible` to scroll if the focused column moved off-screen. Vertical directions return `None`. |
-| Structural | Swap window | `swap_window(layout, focused, dir, config)` | Swaps the focused window with a specific adjacent window. For left/right, picks the nearest row in the adjacent column. For up/down, swaps rows within the same column. |
-| Structural | Add window | `add_window(layout, window, config)` | Appends a new column to the right end of the canvas at `column_width`. No viewport adjustment — the caller decides whether to scroll. |
+| Structural | Swap window | `swap_window(layout, focused, dir, config)` | Swaps the focused window with a specific adjacent window. For left/right, picks the nearest row in the adjacent column and swaps the entire `Row { window_id, height }` (height travels with the window). For up/down, swaps rows within the same column. Row counts are preserved on both sides, so heights are *not* redistributed. |
+| Structural | Add window | `add_window(layout, window, config)` | Appends a new column to the right end of the canvas at `column_width`. The column's single row is seeded with the n=1 distributed height. No viewport adjustment — the caller decides whether to scroll. |
 | Structural | Insert after focused | `insert_window_after_focused(layout, focused, window, config)` | Inserts a new column immediately after the focused window's column. Calls `ensure_column_visible` on the new column. |
-| Structural | Add to column | `add_window_to_column(layout, col_idx, window)` | Appends a window as a new row in an existing column. |
-| Structural | Remove window | `remove_window(layout, window, config)` | Removes a window from its column. If the column becomes empty, the column is removed entirely. Clamps `viewport_offset` to prevent scrolling past the new rightmost column. |
+| Structural | Add to column | `add_window_to_column(layout, col_idx, window, config)` | Appends a window as a new bottom row in an existing column, then redistributes all rows in that column to equal heights via `distribute_heights`. |
+| Structural | Merge column | `merge_column(layout, focused, dir, config)` | Detaches the focused window from its column and appends it as a new bottom row of the left/right neighbour column. Redistributes both columns to equal heights. Returns `None` if there is no neighbour, the direction is vertical, or `min_window_height_px` would be violated in the destination column. |
+| Structural | Promote window | `promote_window(layout, focused, dir, config)` | Extracts the focused window into a new single-row column placed to the left/right of the source column. Redistributes the source column's remaining rows. No-op (`None`) when the focused window is already alone in its column, or when the direction is vertical. |
+| Structural | Remove window | `remove_window(layout, window, config)` | Removes a window from its column. If the column still has rows, redistributes them to equal heights; if the column becomes empty, the column is removed entirely. Clamps `viewport_offset` to prevent scrolling past the new rightmost column. |
 | Structural | Initialize windows | `initialize_windows(ids, config, focus_idx, widths)` | Builds the initial layout from a list of window IDs. Each becomes a single-row column. When `widths` is `Some`, each width is quantized to the nearest slot-ladder rung (clamped to `[column_width, abs_max_width]`); when `None`, all columns use `column_width`. Sets `viewport_offset` via the canvas-width fit predicate (see [Center behaviors](#center-behaviors-three-modes)). |
 | Sizing | Expand column | `expand_column(layout, focused, config)` | Grows the focused column by one rung on the slot ladder. Two-step top jumps to `abs_max_width`. No-op if already at `abs_max_width`. |
 | Sizing | Shrink column | `shrink_column(layout, focused, config)` | Shrinks the focused column by one rung. Reverses the two-step top. No-op if already at `column_width` (ladder floor). |
@@ -49,6 +51,40 @@ The ladder is defined by: `column_shift = column_width + window_gap` (one slot s
 
 Expand snaps **up** to the next rung using `floor((W - column_width) / column_shift)` to find the current rung, then advancing `n` by 1. Shrink snaps **down** using the same logic in reverse with `ceil`. Free-form widths from drag-resize that fall between rungs are handled gracefully: expand snaps them up to the next boundary, shrink snaps them down.
 
+## Row heights: source-of-truth model
+
+Each `Row` carries its own `height: i32` field. **Projection consumes this value verbatim as the window's pixel height** — it never recomputes, rescales, or insets. The only producer of equal-height values is `distribute_heights`, invoked at mutation time whenever the row membership of a column changes.
+
+### `distribute_heights(n, available, gap)`
+
+Divides `available` pixels among `n` rows using the user-spec formula:
+
+```
+numerator  = available - (n + 1) * gap
+base       = numerator / n            (integer division)
+remainder  = numerator % n            (0..n-1)
+heights[i] = base + (if i < remainder { 1 } else { 0 })
+```
+
+The `(n + 1) * gap` term accounts for one gap above the topmost row, one gap below the bottommost row, and `n - 1` gaps between rows — totalling `n + 1` gaps. The `remainder` pixels lost to integer division are distributed `+1` to the top `remainder` rows, so the layout is deterministic and tile-tight.
+
+Defensive cases: `n == 0` returns an empty `Vec`; a non-positive numerator returns all zeros (the layout will look wrong but the function will not panic).
+
+`available` is `monitor_height - padding.up - padding.down` (the work area vertical extent). The minimum-row budget is enforced by `MutationConfig.min_window_height_px` — mutations that would produce a row below this threshold reject the operation and return `None`.
+
+### When redistribution happens
+
+| Mutation | Row count change | Redistributes? |
+|----------|------------------|-----------------|
+| `add_window_to_column` | column n → n+1 | yes (destination column) |
+| `remove_window` | column n → n-1 (or column removed) | yes (remaining rows) |
+| `merge_column` | source n → n-1, destination m → m+1 | yes (both columns) |
+| `promote_window` | source n → n-1, new column 0 → 1 | yes (source column) |
+| `swap_window` | no count change on either side | **no** — `Row { window_id, height }` swaps as an opaque unit so any user-customized height travels with the window |
+| `focus` / `scroll` / `expand_column` / `shrink_column` / `set_column_width` | no row membership change | no |
+
+This split preserves future drag-resize state: when a user adjusts one window's height continuously (planned), swaps and focus changes will not stomp on that customization. Only operations that change *which* windows coexist in a column recompute equal shares.
+
 ## Key algorithms
 
 ### `ensure_column_visible`
@@ -77,7 +113,23 @@ Two insertion strategies exist. `add_window` simply appends a new column at the 
 
 ### `remove_window`
 
-When a window is removed, it is spliced out of its column's `rows` vector. If the column becomes empty (no remaining rows), the entire column is removed from the `columns` vector. The `viewport_offset` is then clamped to `max_offset = max(total_canvas - monitor_width, 0)` to prevent the viewport from scrolling past the (now shorter) canvas. Focus fallback — choosing which window to focus next after removal — is handled by `ScrollingSpace` using `next_available_window`, not by the mutation itself.
+When a window is removed, it is spliced out of its column's `rows` vector. If the column still has rows, they are redistributed via `distribute_heights(n-1, ...)` so the freed vertical space is reclaimed equally; if the column becomes empty (no remaining rows), the entire column is removed from the `columns` vector. The `viewport_offset` is then clamped to `max_offset = max(total_canvas - monitor_width, 0)` to prevent the viewport from scrolling past the (now shorter) canvas. Focus fallback — choosing which window to focus next after removal — is handled by `ScrollingSpace` using `next_available_window`, not by the mutation itself.
+
+### `merge_column` and `promote_window`
+
+These two operations reshape which windows coexist in which columns; both redistribute row heights because they change row counts.
+
+**`merge_column(layout, focused, dir, config)`** detaches the focused window from its column and appends it as a new bottom row of the left/right neighbour column. Both the source column (which loses a row) and the destination column (which gains a row) are redistributed via `distribute_heights`. Three rejection paths return `None`:
+
+- No neighbour in the requested direction (already at canvas edge).
+- Vertical direction (`Up`/`Down`) — merge is a horizontal-only operation.
+- *Speculative min-height guard*: the destination's post-merge heights are pre-computed; if any would fall below `min_window_height_px`, the layout is left untouched. The pre-computed `heights` Vec is then reused when applying the mutation, so the check and the apply cannot diverge.
+
+When the source column empties out and is removed, the destination's index may shift: for `direction == Right`, `dst_after_removal` collapses to the original `src_col` (everything to the right shifts down by one); for `direction == Left`, the destination index is unaffected.
+
+**`promote_window(layout, focused, dir, config)`** is the inverse shape: it extracts the focused window from a multi-row column into a new single-row column placed to the left or right of the source. The source column's remaining rows are redistributed; the new column's single row is seeded with the n=1 distributed height. No-op when the focused window is already alone in its column (the user spec defines this as a non-event, not an error). Vertical directions return `None`.
+
+Both operations end with `ensure_column_visible` on the destination (merge) or the new column (promote), so the focused window is brought on-screen as part of the same diff.
 
 ### `initialize_windows`
 
