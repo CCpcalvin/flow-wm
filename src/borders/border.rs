@@ -427,7 +427,7 @@ impl BorderInner {
     /// - **Resize / shape change that fits the existing buffer** (the common
     ///   resize-animation frame): re-composite into the reused grow-only DIB
     ///   (clear + [`composite_ring`] from a cached corner tile) and re-upload.
-    ///   No `CreateDIBSection`, no 4×4 supersample — the hot-path win.
+    ///   No `CreateDIBSection`, no per-pixel area integration — the hot-path win.
     /// - **Shape change that outgrows the buffer** (crossed a power-of-two
     ///   capacity boundary) or first paint: allocate a fresh capacity-sized DIB
     ///   and composite into it.
@@ -703,7 +703,7 @@ impl CachedSurface {
     /// handle. Clears the `w × h` region to transparent, re-renders the corner
     /// coverage tile only when the effective `(radius, thickness)` changed, then
     /// composites edges + corners via [`composite_ring`]. This is the cheap
-    /// resize-frame path that avoids `CreateDIBSection` + 4×4 supersampling.
+    /// resize-frame path that avoids `CreateDIBSection` + per-pixel area integration.
     ///
     /// [`buffer_fits`]: CachedSurface::buffer_fits
     fn render_ring(&mut self, w: i32, h: i32, style: &BorderStyle) {
@@ -955,12 +955,41 @@ unsafe impl Send for CachedSurface {}
 /// DIB sections with `biBitCount = 32` and `biCompression = BI_RGB` lay each
 /// pixel out as `(blue, green, red, alpha)` from low to high address. Read as
 /// a little-endian `u32`, that is `(alpha << 24) | (red << 16) | (green << 8) | blue`.
+///
+/// This is STRAIGHT (non-premultiplied) alpha — appropriate for opaque band
+/// fills (`alpha = 0xFF`, where straight and premultiplied coincide). For
+/// partial-coverage pixels written to the layered window's
+/// `AC_SRC_ALPHA`-blended DIB, use [`pack_premultiplied`] instead: the
+/// `BLENDFUNCTION` contract requires source RGB to be scaled by alpha.
 #[must_use]
 pub(crate) const fn pack_bgra(color: Color, alpha: u8) -> u32 {
     let r = color.r as u32;
     let g = color.g as u32;
     let b = color.b as u32;
     let a = alpha as u32;
+    (a << 24) | (r << 16) | (g << 8) | b
+}
+
+/// Pack `rgb` (low 24 bits, `0xRRGGBB`) and `alpha` into a PREMULTIPLIED BGRA
+/// `u32` for the layered window's `AC_SRC_ALPHA` blend.
+///
+/// Each RGB channel is scaled by `alpha / 255` with round-to-nearest division
+/// (`(channel * alpha + 127) / 255`), so Windows's premultiplied `AC_SRC_OVER`
+/// operator reproduces the correct perceptual colour at partial coverage
+/// instead of adding the full-intensity RGB that a straight-alpha pack would
+/// feed it (the cause of the "white edge at corner" — see
+/// `docs/src/dev-guide/borders.md`). For `alpha = 255` this is the identity,
+/// matching [`pack_bgra`]'s opaque output, so callers may use either at full
+/// coverage.
+#[must_use]
+pub(crate) fn pack_premultiplied(rgb: u32, alpha: u8) -> u32 {
+    let a = u32::from(alpha);
+    let r = ((rgb >> 16) & 0xFF) * a;
+    let g = ((rgb >> 8) & 0xFF) * a;
+    let b = (rgb & 0xFF) * a;
+    let r = (r + 127) / 255;
+    let g = (g + 127) / 255;
+    let b = (b + 127) / 255;
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
@@ -971,16 +1000,19 @@ pub(crate) const fn pack_bgra(color: Color, alpha: u8) -> u32 {
 /// [`CachedSurface::recolor`] to swap a ring's colour without recomputing its
 /// geometry or disturbing the AA coverage — so a focus change never re-aliases
 /// the rounded corners.
+///
+/// The output is premultiplied (see [`pack_premultiplied`]): the new RGB is
+/// scaled by the preserved coverage alpha so the layered window's
+/// `AC_SRC_ALPHA` blend reproduces the correct perceptual colour.
 #[must_use]
 pub(crate) fn recolor_pixel(px: u32, new_color: Color) -> u32 {
     let a = (px >> 24) & 0xFF;
     if a == 0 {
         return px;
     }
-    let r = new_color.r as u32;
-    let g = new_color.g as u32;
-    let b = new_color.b as u32;
-    (a << 24) | (r << 16) | (g << 8) | b
+    let rgb =
+        (u32::from(new_color.r) << 16) | (u32::from(new_color.g) << 8) | u32::from(new_color.b);
+    pack_premultiplied(rgb, a as u8)
 }
 
 /// Map a [`CornerPreference`] to the OUTER corner radius (in pixels) for the
@@ -1018,10 +1050,10 @@ fn corner_radius_px(pref: CornerPreference, thickness: usize) -> usize {
 /// Test whether the point `(x, y)` lies inside a rounded rectangle with
 /// top-left `(ox, oy)`, pixel size `w × h`, and corner radius `cr`.
 ///
-/// Float-valued so the anti-aliased ring renderer can supersample at
-/// sub-pixel offsets (see [`fill_border_ring`]). `cr` is assumed ≤
-/// `min(w, h) / 2` (callers clamp). With `cr == 0.0` this reduces to a plain
-/// axis-aligned rectangle test. Pure and allocation-free.
+/// Float-valued for geometric exactness. Kept as a test oracle — the production
+/// renderer uses closed-form area integration (see [`corner_pixel_alpha`]).
+/// `cr` is assumed ≤ `min(w, h) / 2` (callers clamp). With `cr == 0.0` this
+/// reduces to a plain axis-aligned rectangle test. Pure and allocation-free.
 ///
 /// Test-only oracle: the production render path uses [`composite_ring`] /
 /// [`render_corner_coverage`] instead; this remains as the geometric reference
@@ -1058,6 +1090,111 @@ fn in_rounded_rect(x: f64, y: f64, ox: f64, oy: f64, w: f64, h: f64, cr: f64) ->
     dx * dx + dy * dy <= cr * cr
 }
 
+/// Indefinite integral of the chord half-length `sqrt(r^2 - y^2)` for a circle
+/// of radius `r`, used by [`pixel_circle_area_q1`] to evaluate the exact
+/// pixel-circle intersection area in closed form.
+///
+/// `G(y, r) = (y * sqrt(r^2 - y^2) + r^2 * asin(y / r)) / 2`. The input `y` is
+/// clamped to `[-r, r]` so callers needn't pre-clip; for `|y| > r` the
+/// integrand is zero and the antiderivative stays constant (matching the
+/// definite-integral behaviour). `r == 0` returns `0.0`.
+fn circle_segment_antiderivative(y: f64, r: f64) -> f64 {
+    if r == 0.0 {
+        return 0.0;
+    }
+    let r2 = r * r;
+    let yc = y.clamp(-r, r);
+    let chord = (r2 - yc * yc).max(0.0).sqrt();
+    (yc * chord + r2 * (yc / r).asin()) * 0.5
+}
+
+/// Exact area of intersection of the axis-aligned rectangle `[u0, u1] × [v0,
+/// v1]` with a circle of radius `r` centred at the origin.
+///
+/// Requires `u0 >= 0` and `v0 >= 0` (upper-right quadrant relative to the
+/// centre); other quadrants are reached by reflecting the pixel before
+/// calling. Quick-rejects when the closest corner `(u0, v0)` is outside the
+/// circle and quick-accepts when the farthest corner `(u1, v1)` is inside, so
+/// the expensive `asin` / `sqrt` path only runs for the thin band of pixels
+/// the arc actually crosses. Geometry reference: the corner coverage math is
+/// described in `docs/src/dev-guide/borders.md`.
+fn pixel_circle_area_q1(u0: f64, u1: f64, v0: f64, v1: f64, r: f64) -> f64 {
+    debug_assert!(
+        u0 >= 0.0 && v0 >= 0.0 && u1 > u0 && v1 > v0 && r >= 0.0,
+        "pixel_circle_area_q1 requires the upper-right quadrant"
+    );
+    // Quick reject: closest corner (u0, v0) outside the circle.
+    if u0 * u0 + v0 * v0 >= r * r {
+        return 0.0;
+    }
+    // Quick accept: farthest corner (u1, v1) inside the circle.
+    if u1 * u1 + v1 * v1 <= r * r {
+        return (u1 - u0) * (v1 - v0);
+    }
+    // Partial: the arc crosses the pixel. Find the heights at which the
+    // circle's right boundary x = sqrt(r^2 - y^2) equals u0 and u1; the
+    // integrand changes form at these crossings.
+    let y_u1 = (r * r - u1 * u1).max(0.0).sqrt();
+    let y_u0 = (r * r - u0 * u0).max(0.0).sqrt();
+    // Segment 1: heights where chord >= u1 → the full pixel width is covered.
+    let seg1_hi = v1.min(y_u1);
+    let seg1 = (seg1_hi - v0).max(0.0) * (u1 - u0);
+    // Segment 2: heights where u0 < chord < u1 → integrate chord(y) - u0.
+    let seg2_lo = v0.max(y_u1);
+    let seg2_hi = v1.min(y_u0);
+    let seg2 = if seg2_lo < seg2_hi {
+        circle_segment_antiderivative(seg2_hi, r)
+            - circle_segment_antiderivative(seg2_lo, r)
+            - u0 * (seg2_hi - seg2_lo)
+    } else {
+        0.0
+    };
+    seg1 + seg2
+}
+
+/// Compute the exact-area anti-aliased coverage (`0..=255`) for ONE pixel of a
+/// rounded ring corner.
+///
+/// `px`, `py`: the pixel's integer coords in the same frame as the arc centre
+/// `(cx, cy)`. `outer_r` / `inner_r`: the concentric outer and inner arc
+/// radii. `in_inner_corner`: whether the pixel lies in the inner box's corner
+/// region for THIS corner (where the inner arc subtracts coverage); pass
+/// `false` for pixels that only the outer arc reaches.
+///
+/// The pixel is reflected about `(cx, cy)` into the upper-right quadrant
+/// before the exact intersection area is computed by
+/// [`pixel_circle_area_q1`]. Shared by [`render_corner_coverage`] (the cached
+/// tile renderer) and [`fill_border_ring`] (the per-pixel reference path), so
+/// the two stay byte-identical by construction.
+fn corner_pixel_alpha(
+    px: usize,
+    py: usize,
+    cx: usize,
+    cy: usize,
+    outer_r: f64,
+    inner_r: f64,
+    in_inner_corner: bool,
+) -> u8 {
+    let (u0, u1) = if px < cx {
+        ((cx - px - 1) as f64, (cx - px) as f64)
+    } else {
+        ((px - cx) as f64, (px + 1 - cx) as f64)
+    };
+    let (v0, v1) = if py < cy {
+        ((cy - py - 1) as f64, (cy - py) as f64)
+    } else {
+        ((py - cy) as f64, (py + 1 - cy) as f64)
+    };
+    let area_outer = pixel_circle_area_q1(u0, u1, v0, v1, outer_r);
+    let area_inner = if in_inner_corner {
+        pixel_circle_area_q1(u0, u1, v0, v1, inner_r)
+    } else {
+        0.0
+    };
+    let cov = (area_outer - area_inner).clamp(0.0, 1.0);
+    (cov * 255.0).round() as u8
+}
+
 /// Fill the outer `thickness`-pixel ring of a `width * height` pixel buffer
 /// with `color`, leaving the interior transparent (`0`).
 ///
@@ -1068,11 +1205,13 @@ fn in_rounded_rect(x: f64, y: f64, ox: f64, oy: f64, w: f64, h: f64, cr: f64) ->
 /// [`corner_radius_px`] for how the caller derives `corner_radius` from a
 /// [`CornerPreference`].
 ///
-/// Rounded rings (nonzero `corner_radius`) are rendered with 4×4 supersampled
-/// anti-aliasing: each pixel's alpha is set from the fraction of 16 sub-samples
-/// that land inside the ring, smoothing the diagonal arc edges. The square
-/// fast path (`corner_radius == 0`) keeps its exact slice fill — pixel-aligned
-/// edges gain nothing from AA.
+/// Rounded rings (nonzero `corner_radius`) are rendered with exact-area
+/// anti-aliasing: each corner pixel's alpha is the exact fraction of its area
+/// falling inside the ring annulus, computed analytically by
+/// [`corner_pixel_alpha`] (closed-form circular-segment integration). The
+/// straight, pixel-aligned bands are solid-filled. The square fast path
+/// (`corner_radius == 0`) keeps its exact slice fill — pixel-aligned edges gain
+/// nothing from AA.
 ///
 /// The caller must size `pixels` to exactly `width * height` and zero it
 /// first; this function writes `color` (with a per-pixel alpha byte on rounded
@@ -1084,7 +1223,7 @@ fn in_rounded_rect(x: f64, y: f64, ox: f64, oy: f64, w: f64, h: f64, cr: f64) ->
 /// Panics if `pixels.len() != width * height`.
 ///
 /// Test-only oracle: [`composite_ring`] replaced this on the production render
-/// path — this slow supersampled reference is kept to verify byte-exact parity
+/// path — this slow per-pixel reference is kept to verify byte-exact parity
 /// (see `composite_ring_matches_fill_border_ring_across_geometry_sweep`).
 /// Compiled in all configurations so doc-links resolve; the attribute only
 /// silences the non-test dead-code lint.
@@ -1139,57 +1278,78 @@ pub(crate) fn fill_border_ring(
     // of the ring iff it is inside the outer rounded rect AND outside the
     // inner rounded rect.
     //
-    // We render with 4×4 supersampled anti-aliasing: each pixel is sampled at
-    // 16 sub-points and its alpha set from the fraction landing inside the
-    // ring. The straight, pixel-aligned edges are unaffected (all sub-samples
-    // agree → full or zero coverage); only the diagonal arcs gain partial
-    // alpha. `color` carries `0xFF` alpha; we keep its RGB and substitute the
-    // per-pixel coverage alpha.
+    // We fill the straight, pixel-aligned bands solidly (their edges have no
+    // diagonal, so AA adds nothing) and compute the exact pixel-∩-annulus area
+    // for each corner pixel via [`corner_pixel_alpha`]. Both this path and
+    // [`render_corner_coverage`] share [`corner_pixel_alpha`], so they stay
+    // byte-identical and [`composite_ring`] matches this reference exactly.
     let inner_radius = r.saturating_sub(t);
-    let inner_w = width.saturating_sub(2 * t);
-    let inner_h = height.saturating_sub(2 * t);
     let rgb = color & 0x00FF_FFFF;
-    // Sub-pixel sample offsets for 4×4 supersampling: the centre of each
-    // ¼-pixel cell.
-    const OFFSETS: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
-    let (wf, hf) = (width as f64, height as f64);
-    let (tf, rf) = (t as f64, r as f64);
-    let (inner_wf, inner_hf, inner_rf) = (inner_w as f64, inner_h as f64, inner_radius as f64);
+    let outer_r = r as f64;
+    let inner_r = inner_radius as f64;
 
-    // The ring only ever lives within `r` pixels of some edge (the outer `t`
-    // straight band, or up to radius `r` at the corners). Pixels deeper than
-    // `r + 1` from every edge are solidly inside the inner rect and can never
-    // be part of the ring, so we skip them — making the per-rebuild cost
-    // proportional to the border perimeter, not the window area.
-    let frame = (r + 1).min(width).min(height);
-    let bottom_start = height.saturating_sub(frame);
-    let right_start = width.saturating_sub(frame);
+    // Straight bands: same four-slice layout as [`composite_ring`]. Top and
+    // bottom rows fill the full width minus the corner columns; the left and
+    // right columns fill the `t`-px gutters between the corner rows. Overlap
+    // is harmless (the same `color` lands on shared pixels).
+    for y in 0..t {
+        let row = y * width;
+        pixels[row + r..row + (width - r)].fill(color);
+    }
+    for y in (height - t)..height {
+        let row = y * width;
+        pixels[row + r..row + (width - r)].fill(color);
+    }
+    for y in r..(height - r) {
+        let row = y * width;
+        pixels[row..row + t].fill(color);
+        pixels[row + (width - t)..row + width].fill(color);
+    }
 
-    for y in 0..height {
-        let row_start = y * width;
-        let in_v_band = y < frame || y >= bottom_start;
-        for x in 0..width {
-            // Skip the deep interior — never part of the ring, leave it 0.
-            if !in_v_band && x >= frame && x < right_start {
-                continue;
+    // Four corners. The inner arc only subtracts coverage where the pixel lies
+    // in the inner box's corner region for THIS corner — the `[t, r) × [t, r)`
+    // window at the matching corner of the buffer. For integer pixel
+    // boundaries and integer `t`, each pixel is entirely inside or outside
+    // that region, so the test is a simple coordinate compare.
+    //
+    // Top-left: arc centre (r, r), inner corner region [t, r) × [t, r).
+    for py in 0..r {
+        for px in 0..r {
+            let in_inner = px >= t && py >= t;
+            let alpha = corner_pixel_alpha(px, py, r, r, outer_r, inner_r, in_inner);
+            if alpha > 0 {
+                pixels[py * width + px] = pack_premultiplied(rgb, alpha);
             }
-            let mut hits = 0u32;
-            let xf = x as f64;
-            let yf = y as f64;
-            for &ox in &OFFSETS {
-                let sx = xf + ox;
-                for &oy in &OFFSETS {
-                    let sy = yf + oy;
-                    if in_rounded_rect(sx, sy, 0.0, 0.0, wf, hf, rf)
-                        && !in_rounded_rect(sx, sy, tf, tf, inner_wf, inner_hf, inner_rf)
-                    {
-                        hits += 1;
-                    }
-                }
+        }
+    }
+    // Top-right: arc centre (width - r, r), inner region [width-r, width-t) × [t, r).
+    for py in 0..r {
+        for px in (width - r)..width {
+            let in_inner = px < width - t && py >= t;
+            let alpha = corner_pixel_alpha(px, py, width - r, r, outer_r, inner_r, in_inner);
+            if alpha > 0 {
+                pixels[py * width + px] = pack_premultiplied(rgb, alpha);
             }
-            if hits > 0 {
-                let alpha = (hits * 255) / 16;
-                pixels[row_start + x] = (alpha << 24) | rgb;
+        }
+    }
+    // Bottom-left: arc centre (r, height - r), inner region [t, r) × [height-r, height-t).
+    for py in (height - r)..height {
+        for px in 0..r {
+            let in_inner = px >= t && py < height - t;
+            let alpha = corner_pixel_alpha(px, py, r, height - r, outer_r, inner_r, in_inner);
+            if alpha > 0 {
+                pixels[py * width + px] = pack_premultiplied(rgb, alpha);
+            }
+        }
+    }
+    // Bottom-right: arc centre (width-r, height-r), inner region [width-r, width-t) × [height-r, height-t).
+    for py in (height - r)..height {
+        for px in (width - r)..width {
+            let in_inner = px < width - t && py < height - t;
+            let alpha =
+                corner_pixel_alpha(px, py, width - r, height - r, outer_r, inner_r, in_inner);
+            if alpha > 0 {
+                pixels[py * width + px] = pack_premultiplied(rgb, alpha);
             }
         }
     }
@@ -1211,20 +1371,21 @@ const fn next_capacity(n: i32) -> i32 {
 /// (`0..=255`).
 ///
 /// This is the window-size-independent piece of the 9-slice border composite.
-/// By the arc geometry of [`fill_border_ring`], a sub-sample `(sx, sy)` with
-/// `sx, sy < radius` lies in the ring iff it is inside the OUTER corner arc
+/// By the arc geometry of [`fill_border_ring`], a pixel `(px, py)` with
+/// `px, py < radius` lies in the ring iff it is inside the OUTER corner arc
 /// (centre `(radius, radius)`, radius `radius`) and outside the INNER corner
 /// arc (same centre, radius `radius - thickness`). Neither test consults the
-/// window's `width` or `height` — the straight-edge branches of
-/// [`in_rounded_rect`] require `lx >= corner_radius`, impossible inside the
-/// corner square — so this tile is reusable across every window size that
-/// shares `(radius, thickness)`.
+/// window's `width` or `height`, so this tile is reusable across every window
+/// size that shares `(radius, thickness)`.
 ///
-/// Coverage uses the same 4×4 supersample grid (`OFFSETS`) as
-/// [`fill_border_ring`], so [`composite_ring`] is pixel-identical to
-/// `fill_border_ring` for the corner region (verified by the parity tests in
-/// `mod tests`). Returns an empty `Vec` for `radius == 0` (square ring: no
-/// corners to pre-render).
+/// Coverage is the EXACT pixel-∩-annulus area computed analytically by
+/// [`corner_pixel_alpha`] (closed-form circular-segment integration — see
+/// `docs/src/dev-guide/borders.md`), which yields the full `0..=255` coverage
+/// range instead of the 17 discrete levels a 4×4 supersampler would produce.
+/// [`composite_ring`] is pixel-identical to [`fill_border_ring`] for the
+/// corner region because both paths share [`corner_pixel_alpha`] (verified by
+/// the parity tests in `mod tests`). Returns an empty `Vec` for
+/// `radius == 0` (square ring: no corners to pre-render).
 ///
 /// `radius` and `thickness` are the ALREADY-CLAMPED effective values — i.e.
 /// `radius = corner_radius.min(half)` and `thickness = thickness.min(half)`
@@ -1239,37 +1400,18 @@ pub(crate) fn render_corner_coverage(radius: usize, thickness: usize) -> Vec<u8>
     let r = radius;
     let t = thickness.min(r);
     let inner_radius = r.saturating_sub(t);
+    let outer_r = r as f64;
+    let inner_r = inner_radius as f64;
     let mut coverage = vec![0u8; r * r];
-    // Same sub-pixel grid as `fill_border_ring` — symmetry of `OFFSETS` about
-    // 0.5 is what lets the other three corners be produced by reflection.
-    const OFFSETS: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
-    let rf = r as f64;
-    let outer_r2 = rf * rf;
-    let tf = t as f64;
-    let inner_r2 = (inner_radius as f64) * (inner_radius as f64);
-    for y in 0..r {
-        let yf = y as f64;
-        for x in 0..r {
-            let xf = x as f64;
-            let mut hits = 0u32;
-            for &ox in &OFFSETS {
-                let sx = xf + ox;
-                let dx = sx - rf;
-                for &oy in &OFFSETS {
-                    let sy = yf + oy;
-                    let dy = sy - rf;
-                    let d2 = dx * dx + dy * dy;
-                    let inside_outer = d2 <= outer_r2;
-                    // Inside the inner arc only once past its top-left corner
-                    // (`sx >= t && sy >= t`); otherwise the sub-sample sits in
-                    // the ring's straight band (definitely not interior).
-                    let inside_inner = sx >= tf && sy >= tf && d2 <= inner_r2;
-                    if inside_outer && !inside_inner {
-                        hits += 1;
-                    }
-                }
-            }
-            coverage[y * r + x] = ((hits * 255) / 16) as u8;
+    for py in 0..r {
+        for px in 0..r {
+            // Inner arc only reaches pixels past the inner box's top-left
+            // corner `(t, t)`; for integer pixel boundaries and integer `t`
+            // each pixel lies entirely inside or outside that region, never
+            // straddling.
+            let in_inner_corner = px >= t && py >= t;
+            coverage[py * r + px] =
+                corner_pixel_alpha(px, py, r, r, outer_r, inner_r, in_inner_corner);
         }
     }
     coverage
@@ -1280,9 +1422,10 @@ pub(crate) fn render_corner_coverage(radius: usize, thickness: usize) -> Vec<u8>
 ///
 /// The other three corners reuse the single top-left tile rendered by
 /// [`render_corner_coverage`] via reflection. Reflection is exact because the
-/// supersample grid `OFFSETS` is symmetric about `0.5` (`1 - ox` permutes
-/// `OFFSETS`), so a mirrored tile presents the same sub-sample multiset to the
-/// arc test as the directly-rendered corner would.
+/// ring annulus is symmetric about both axes through the arc centre: a pixel
+/// `(px, py)` reflected to `(r-1-px, py)` (or `(px, r-1-py)`) presents the same
+/// `(u, v)` distances to the arc centre, so [`corner_pixel_alpha`] yields the
+/// same coverage for the mirrored layout.
 #[derive(Clone, Copy)]
 struct CornerPos {
     /// Screen column of the tile's left edge.
@@ -1338,7 +1481,7 @@ fn blit_corner(
             let cov = coverage[ty * r + tx];
             if cov > 0 {
                 let x = if flip_x { ox + r - 1 - tx } else { ox + tx };
-                pixels[y * stride + x] = (u32::from(cov) << 24) | rgb;
+                pixels[y * stride + x] = pack_premultiplied(rgb, cov);
             }
         }
     }
@@ -1348,7 +1491,7 @@ fn blit_corner(
 /// plus four solid edge fills — the resize-frame hot-path replacement for
 /// [`fill_border_ring`].
 ///
-/// Instead of re-running the 4×4 supersample on every `WM_SIZE`, this blits the
+/// Instead of re-running per-pixel area integration on every `WM_SIZE`, this blits the
 /// pre-rendered `corner_coverage` (produced once per `(radius, thickness)` by
 /// [`render_corner_coverage`]) into the four corners and fills the straight
 /// edge bands with a flat `color`. The output is byte-identical to
@@ -1692,9 +1835,9 @@ mod tests {
     /// `in_rounded_rect`: a point lying exactly ON the corner arc
     /// (`dx² + dy² == cr²`) is treated as inside (the comparison is `<=`).
     ///
-    /// Pinning this boundary behaviour keeps the 4×4 supersampling coverage
-    /// curve stable — a regression to `<` would thin the rendered arc by one
-    /// sub-pixel and subtly dim the AA boundary pixels.
+    /// Pinning this boundary behaviour keeps the coverage curve stable — a
+    /// regression to `<` would thin the rendered arc by one sub-pixel and
+    /// subtly dim the AA boundary pixels.
     #[test]
     fn in_rounded_rect_arc_boundary_point_is_inside() {
         // 10×10 rect, radius 5. Top-left arc centre is at (5, 5).
@@ -1702,6 +1845,86 @@ mod tests {
         assert!(in_rounded_rect(5.0, 0.0, 0.0, 0.0, 10.0, 10.0, 5.0));
         // Point just outside the arc (4, 0): dx = -1, dy = -5 → 1 + 25 = 26 > 25.
         assert!(!in_rounded_rect(4.0, 0.0, 0.0, 0.0, 10.0, 10.0, 5.0));
+    }
+
+    /// `pixel_circle_area_q1` for the full `[0, R] × [0, R]` quadrant bounding
+    /// box equals the exact quarter-circle area `πR²/4`.
+    #[test]
+    fn pixel_circle_area_q1_matches_quarter_circle() {
+        let r = 5.0_f64;
+        let area = pixel_circle_area_q1(0.0, r, 0.0, r, r);
+        let expected = std::f64::consts::PI * r * r / 4.0;
+        assert!(
+            (area - expected).abs() < 1e-9,
+            "quarter-circle area: got {area}, expected {expected}"
+        );
+    }
+
+    /// A pixel entirely outside the circle has zero area.
+    #[test]
+    fn pixel_circle_area_q1_outside_is_zero() {
+        // Pixel [6,7]×[6,7], circle radius 5 → closest corner (6,6) at distance √72 > 5.
+        assert_eq!(pixel_circle_area_q1(6.0, 7.0, 6.0, 7.0, 5.0), 0.0);
+    }
+
+    /// A pixel entirely inside the circle has full pixel area.
+    #[test]
+    fn pixel_circle_area_q1_inside_is_pixel_area() {
+        // Pixel [0,1]×[0,1], circle radius 5 → farthest corner (1,1) at distance √2 < 5.
+        assert_eq!(pixel_circle_area_q1(0.0, 1.0, 0.0, 1.0, 5.0), 1.0);
+        // Non-unit pixel [0.5,1.5]×[0.5,1.5] entirely inside → area = 1.0.
+        assert_eq!(pixel_circle_area_q1(0.5, 1.5, 0.5, 1.5, 5.0), 1.0);
+    }
+
+    /// `pack_premultiplied` scales RGB channels by `alpha/255` (round-to-nearest)
+    /// and preserves the alpha byte in the high 8 bits.
+    #[test]
+    fn pack_premultiplied_scales_channels() {
+        // White at α=128: each channel = (255*128+127)/255 = 128.
+        assert_eq!(pack_premultiplied(0x00FF_FFFF, 128), 0x8080_8080);
+        // #AABBCC at α=128: R=(170*128+127)/255=85, G=(187*128+127)/255=94, B=(204*128+127)/255=102.
+        assert_eq!(pack_premultiplied(0x00AA_BB_CC, 0x80), 0x8055_5E66);
+    }
+
+    /// `pack_premultiplied` is identity at α=255 (premultiplying by 1.0).
+    #[test]
+    fn pack_premultiplied_identity_at_full_alpha() {
+        assert_eq!(pack_premultiplied(0x00FF_FFFF, 0xFF), 0xFFFF_FFFF);
+        assert_eq!(pack_premultiplied(0x00AA_BB_CC, 0xFF), 0xFFAA_BBCC);
+    }
+
+    /// `pack_premultiplied` at α=0 produces all-zero (fully transparent).
+    #[test]
+    fn pack_premultiplied_zero_alpha_is_zero() {
+        assert_eq!(pack_premultiplied(0x00FF_FFFF, 0), 0);
+        assert_eq!(pack_premultiplied(0x00AA_BB_CC, 0), 0);
+    }
+
+    /// `circle_segment_antiderivative` is zero at the centre, negative at
+    /// `y = -r`, positive at `y = r`, and monotonic in between.
+    #[test]
+    fn circle_segment_antiderivative_endpoints_and_monotonic() {
+        let r = 4.0_f64;
+        assert_eq!(circle_segment_antiderivative(0.0, r), 0.0);
+        let g_neg = circle_segment_antiderivative(-r, r);
+        let g_pos = circle_segment_antiderivative(r, r);
+        assert!(g_neg < 0.0, "G(-r) must be negative, got {g_neg}");
+        assert!(g_pos > 0.0, "G(r) must be positive, got {g_pos}");
+        // Symmetric: G(-r) == -G(r) (antisymmetric about origin).
+        assert!(
+            (g_neg + g_pos).abs() < 1e-9,
+            "G(-r) + G(r) must be 0, got {}",
+            g_neg + g_pos
+        );
+        // G(r) = r²π/4 (quarter-circle area).
+        let quarter = r * r * std::f64::consts::PI / 4.0;
+        assert!(
+            (g_pos - quarter).abs() < 1e-9,
+            "G(r) must be πr²/4, got {g_pos}, expected {quarter}"
+        );
+        // Monotonic: midpoint between 0 and r is between G(0) and G(r).
+        let g_mid = circle_segment_antiderivative(r * 0.5, r);
+        assert!(g_mid > 0.0 && g_mid < g_pos, "G must be monotonic");
     }
 
     /// Rounded ring on a square-ish buffer: the four extreme corner pixels
@@ -1775,18 +1998,16 @@ mod tests {
             "extreme corners + interior must stay transparent"
         );
         // The arc must be graded — a range of coverage levels — not a binary
-        // edge with a stray half-pixel. A correct 4×4 sampler produces several
-        // distinct hit counts (1..15) as the arc sweeps across pixels.
+        // edge with a stray half-pixel. Exact-area integration produces many
+        // distinct values as the arc sweeps across pixels.
         assert!(
             partial_alphas.len() >= 2,
             "AA arc must show a graded coverage gradient, found only {:?}",
             partial_alphas
         );
         // The ring shape is symmetric about the buffer center, so an unbiased
-        // sampler must yield a symmetric alpha map. A sampler whose sub-pixel
-        // offsets cluster in one quadrant (e.g. only [0, 0.5)) shifts the arc
-        // edges toward that quadrant and breaks this symmetry — this is the
-        // guard that catches a biased supersample grid.
+        // area calculation must yield a symmetric alpha map. A bug that shifts
+        // the arc centre or reflects incorrectly breaks this symmetry.
         for y in 0..H {
             for x in 0..W {
                 let px = buf[y * W + x];
@@ -1840,7 +2061,9 @@ mod tests {
     fn recolor_pixel_preserves_alpha_and_swaps_rgb() {
         let original = pack_bgra(color(0x11, 0x22, 0x33), 0x80);
         let recolored = recolor_pixel(original, color(0xAA, 0xBB, 0xCC));
-        assert_eq!(recolored, pack_bgra(color(0xAA, 0xBB, 0xCC), 0x80));
+        // Premultiplied output: RGB scaled by alpha/255, alpha byte preserved.
+        assert_eq!(recolored, pack_premultiplied(0x00AA_BB_CC, 0x80));
+        assert_eq!(recolored >> 24, 0x80, "alpha byte must be preserved");
     }
 
     /// `recolor_pixel` leaves fully-transparent pixels untouched (alpha 0), so
@@ -2156,7 +2379,7 @@ mod tests {
     /// corner it emits the full coverage range — `0` (outside the outer arc /
     /// interior), `255` (the solid straight-band part of the tile), and several
     /// intermediate levels along the arc. A binary edge (only 0 / 255) would
-    /// mean the supersampler regressed to nearest-neighbour.
+    /// mean the area integration regressed to a step function.
     #[test]
     fn render_corner_coverage_emits_graded_arc() {
         // r=15, t=3 (matches the 40×40 rounded-ring case).
@@ -2445,10 +2668,10 @@ mod tests {
         );
         for ty in 0..r {
             for tx in 0..r {
-                let expected_alpha = u32::from(cov[ty * r + tx]);
+                let expected_alpha = cov[ty * r + tx];
                 assert_eq!(
                     buf[ty * r + tx],
-                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    pack_premultiplied(0x00FF_FFFF, expected_alpha),
                     "no-flip blit wrong at ({tx},{ty})"
                 );
             }
@@ -2477,10 +2700,10 @@ mod tests {
         );
         for ty in 0..r {
             for tx in 0..r {
-                let expected_alpha = u32::from(cov[ty * r + (r - 1 - tx)]);
+                let expected_alpha = cov[ty * r + (r - 1 - tx)];
                 assert_eq!(
                     buf[ty * r + tx],
-                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    pack_premultiplied(0x00FF_FFFF, expected_alpha),
                     "flip_x blit wrong at ({tx},{ty})"
                 );
             }
@@ -2508,10 +2731,10 @@ mod tests {
         );
         for ty in 0..r {
             for tx in 0..r {
-                let expected_alpha = u32::from(cov[(r - 1 - ty) * r + tx]);
+                let expected_alpha = cov[(r - 1 - ty) * r + tx];
                 assert_eq!(
                     buf[ty * r + tx],
-                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    pack_premultiplied(0x00FF_FFFF, expected_alpha),
                     "flip_y blit wrong at ({tx},{ty})"
                 );
             }
@@ -2539,10 +2762,10 @@ mod tests {
         );
         for ty in 0..r {
             for tx in 0..r {
-                let expected_alpha = u32::from(cov[(r - 1 - ty) * r + (r - 1 - tx)]);
+                let expected_alpha = cov[(r - 1 - ty) * r + (r - 1 - tx)];
                 assert_eq!(
                     buf[ty * r + tx],
-                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    pack_premultiplied(0x00FF_FFFF, expected_alpha),
                     "flip_xy blit wrong at ({tx},{ty})"
                 );
             }
@@ -2576,7 +2799,7 @@ mod tests {
         assert_eq!(buf[4], 0, "zero-coverage pixel must be skipped");
         assert_eq!(
             buf[0],
-            (u32::from(cov[0]) << 24) | 0x00FF_FFFF,
+            pack_premultiplied(0x00FF_FFFF, cov[0]),
             "non-zero pixel at (0,0) must be written"
         );
     }
@@ -2618,7 +2841,7 @@ mod tests {
                 let src = cov[ty * r + tx];
                 assert_eq!(
                     buf[dst_y * stride + dst_x],
-                    (u32::from(src) << 24) | 0x00FF_FFFF,
+                    pack_premultiplied(0x00FF_FFFF, src),
                     "offset+stride blit wrong at src ({tx},{ty}) -> dst ({dst_x},{dst_y})"
                 );
             }

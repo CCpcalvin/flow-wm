@@ -142,8 +142,10 @@ single entry point for border lifecycle changes. It resolves the desired
   to `window.border`. `create` seeds the z-order by seating the overlay just
   above `target_hwnd`.
 
-That rect is read from the window's state: `tiled_rect` for active tiles, the
-stored `rect` for active floats.
+That rect is read from the window's state: `tiled_rect` for active tiles; for
+active floats the stored `rect` is outset by `(thickness − overlap)` via
+`float_border_rect`, so a float border's ring sits in the surrounding gap like
+a tiled border's, even before the first drag.
 
 ### Focus changes are O(1)
 
@@ -223,9 +225,12 @@ both paths — and any future caller — automatically get a correct bitmap.
 The daemon's existing `EVENT_OBJECT_LOCATIONCHANGE` subscription (filtered to
 active-workspace floats — see [Event Pipelines](./event-pipelines.md)) already
 tracks floating window positions. `store_float_rect` computes the visible rect
-and mirrors it into `FloatingState::Active { rect }`. After that update, it now
-also calls `border.set_geometry(visible_rect)` — reusing the same rect
-computation, no extra OS query.
+and mirrors it into `FloatingState::Active { rect }`. After that update, it
+seats the overlay via `float_border_rect(visible_rect)` — the visible rect
+outset by `(thickness − overlap)` so the ring lands in the surrounding gap,
+matching the ring geometry of a tiled border (whose content the animator insets
+by the same amount). The same helper is used at border creation in
+`refresh_border_for`, so a freshly created float border matches one mid-drag.
 
 This means float borders follow the window in real time during drags, driven by
 the *same* hook that already tracks the float rect. No second hook, no extra
@@ -332,7 +337,16 @@ Each border overlay is a `WS_EX_LAYERED` window painted via
    the window's rounded corners instead of drawing a square halo. See
    [Corner preference](#corner-preference).
 3. **Upload** via `UpdateLayeredWindow` with `ULW_ALPHA` + a `BLENDFUNCTION`
-   that uses `AC_SRC_ALPHA` per-pixel alpha.
+   that uses `AC_SRC_ALPHA` per-pixel alpha. `AC_SRC_ALPHA` requires the source
+   bitmap to carry **premultiplied** ARGB: each RGB channel must already be
+   scaled by its pixel's alpha/255, because the compositor's over-operator is
+   `result = src.RGB + dst.RGB·(1 − src.α)` and does not re-scale the source
+   channels. Every pixel writer in the pipeline (`fill_border_ring`,
+   `blit_corner`, `recolor_pixel`) encodes via `pack_premultiplied`, so
+   partial-coverage pixels at corner arcs blend to the correct perceptual
+   colour rather than producing a bright fringe where the unscaled RGB is
+   added at full intensity. Opaque fills (α=255) are identity under
+   premultiplication and use the simpler `pack_bgra`.
 
 The overlay's extended style makes it click-through (`WS_EX_TRANSPARENT`) and
 invisible to the taskbar/Alt+Tab (`WS_EX_TOOLWINDOW`). It never takes focus
@@ -363,18 +377,29 @@ stays a uniform `thickness` wide around a concentric arc:
 
 `fill_border_ring` has a **square fast-path** (radius 0: a slice-fill — exact,
 because the edges are pixel-aligned) and a **rounded path**. The rounded path
-**4×4-supersamples** each pixel: it tests 16 sub-pixel sample points against
-membership in the outer rounded rect *and not* the inner rounded rect, then
-writes a per-pixel alpha proportional to the sample hit count. This
-anti-aliases the corner arcs — the only edges that aren't pixel-aligned —
-without pulling in a Direct2D/DirectComposition dependency. To keep the
-per-rebuild cost proportional to perimeter rather than area, only pixels
-within `(radius + 1)` px of an edge are touched; the deep interior and far
-exterior are skipped. The ring bitmap is cached (rebuilt only on shape change),
-so the supersample cost is paid rarely — recolors swap the RGB channels in
-place while preserving each pixel's coverage alpha. The DWM read fails open
-(returns `Default`) if the attribute can't be read. Microsoft does not document
-the exact pixel radii; 8 px / 4 px are the observed Win11 values.
+anti-aliases the corner arcs — the only edges that aren't pixel-aligned — using
+**exact pixel-circle area integration** rather than stochastic supersampling.
+For each pixel in the `[0, r] × [0, r]` corner tile, coverage is computed
+analytically as `area(pixel ∩ outer circle) − area(pixel ∩ inner circle)`, both
+circles concentric at the arc centre `(r, r)` with radii `r` and
+`r − thickness` respectively. The area formula is closed-form, built on the
+antiderivative `G(y) = (y·√(R²−y²) + R²·asin(y/R)) / 2`; quick-reject and
+quick-accept tests on the pixel's nearest and farthest corners short-circuit
+the common fully-inside and fully-outside cases. This yields a continuous
+256-level gradient at the fringe (versus the 17 discrete levels a 4×4
+supersample grid would produce), avoiding banding on long arcs without pulling
+in a Direct2D/DirectComposition dependency.
+
+The per-tile cost is paid once per `(radius, thickness)` pair and cached. Three
+of the four corners are reproduced by reflection, because the annulus is
+symmetric about the arc centre. `composite_ring` (the production hot path)
+blits the cached tiles plus solid straight-band fills; `fill_border_ring`
+(the test reference oracle) recomputes the same coverage per pixel via the
+shared `corner_pixel_alpha` helper, keeping the two paths byte-identical.
+Recolors swap the RGB channels in place via `recolor_pixel` while preserving
+each pixel's coverage alpha. The DWM read fails open (returns `Default`) if the
+attribute can't be read. Microsoft does not document the exact pixel radii;
+8 px / 4 px are the observed Win11 values.
 
 ## Configuration
 
