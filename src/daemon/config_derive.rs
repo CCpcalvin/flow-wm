@@ -156,23 +156,25 @@ mod tests {
 
     /// Build a default [`StmConfig`] with animation enabled and a given duration.
     fn make_enabled_config(duration_ms: u32) -> StmConfig {
-        let mut cfg = StmConfig::default();
-        cfg.animation = AnimationConfig {
-            enabled: true,
-            duration_ms,
-            ..AnimationConfig::default()
-        };
-        cfg
+        StmConfig {
+            animation: AnimationConfig {
+                enabled: true,
+                duration_ms,
+                ..AnimationConfig::default()
+            },
+            ..StmConfig::default()
+        }
     }
 
     /// Build a [`StmConfig`] with animation disabled.
     fn make_disabled_config() -> StmConfig {
-        let mut cfg = StmConfig::default();
-        cfg.animation = AnimationConfig {
-            enabled: false,
-            ..AnimationConfig::default()
-        };
-        cfg
+        StmConfig {
+            animation: AnimationConfig {
+                enabled: false,
+                ..AnimationConfig::default()
+            },
+            ..StmConfig::default()
+        }
     }
 
     // W2-related: verify derive_animator_config with Duration::ZERO sentinel

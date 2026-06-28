@@ -311,7 +311,9 @@ mod tests {
         let nested = temp.path().join("a").join("b").join("logs");
         let file_path = nested.join("stmd-test.log");
 
-        let file = open_log_file(&file_path, true).expect("open_log_file failed");
+        // The returned handle is intentionally unused: the test only verifies
+        // that `open_log_file` creates the file and its parent directories.
+        let _file = open_log_file(&file_path, true).expect("open_log_file failed");
         assert!(
             file_path.exists(),
             "log file should exist after open_log_file"

@@ -130,7 +130,7 @@ mod tests {
         let ref_path = ref_path.trim_start_matches("#/");
         let anim_props = parsed
             .pointer(&format!("/{ref_path}/properties"))
-            .expect(&format!("resolved ref {ref_path} has properties"));
+            .unwrap_or_else(|| panic!("resolved ref {ref_path} has properties"));
 
         let obj = anim_props
             .as_object()
@@ -162,9 +162,9 @@ mod tests {
             let ref_path = ref_str.trim_start_matches("#/");
             parsed
                 .pointer(&format!("/{ref_path}"))
-                .expect(&format!("definition {ref_path} exists"))
+                .unwrap_or_else(|| panic!("definition {ref_path} exists"))
                 .as_object()
-                .expect(&format!("definition {ref_path} is object"))
+                .unwrap_or_else(|| panic!("definition {ref_path} is object"))
         } else {
             easing_schema
         };

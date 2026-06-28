@@ -1086,15 +1086,16 @@ default_action = "foobar"
                 easing: variant,
                 ..AnimationConfig::default()
             };
-            let toml_str = toml::to_string(&wrapper).expect(&format!("serialize {expected_kebab}"));
+            let toml_str =
+                toml::to_string(&wrapper).unwrap_or_else(|_| panic!("serialize {expected_kebab}"));
             assert!(
                 toml_str.contains(&format!("easing = \"{expected_kebab}\"")),
                 "serialization should contain 'easing = \"{expected_kebab}\"', got:\n{toml_str}"
             );
 
             // Verify deserialization produces the original variant
-            let parsed: AnimationConfig =
-                toml::from_str(&toml_str).expect(&format!("deserialize {expected_kebab}"));
+            let parsed: AnimationConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|_| panic!("deserialize {expected_kebab}"));
             assert_eq!(
                 parsed.easing, variant,
                 "round-trip mismatch for {expected_kebab}"

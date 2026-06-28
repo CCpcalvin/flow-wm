@@ -909,7 +909,8 @@ mod tests {
         // Microsoft Win32 event-constant values (verify invariant).
         assert_eq!(EVENT_OBJECT_SHOW, 0x8002);
         assert_eq!(EVENT_OBJECT_HIDE, 0x8003);
-        assert!(EVENT_OBJECT_SHOW < EVENT_OBJECT_HIDE);
+        // Ordering invariant checked at compile time (operands are const).
+        const _: () = assert!(EVENT_OBJECT_SHOW < EVENT_OBJECT_HIDE);
     }
 
     #[test]
@@ -947,9 +948,10 @@ mod tests {
         assert_eq!(EVENT_OBJECT_LOCATIONCHANGE, 0x800B);
         // STATECHANGE < LOCATIONCHANGE < NAMECHANGE. Each is registered as a
         // single-event hook so the ranges stay disjoint; LOCATIONCHANGE is
-        // additionally callback-filtered to float windows only.
-        assert!(EVENT_OBJECT_STATECHANGE < EVENT_OBJECT_LOCATIONCHANGE);
-        assert!(EVENT_OBJECT_LOCATIONCHANGE < EVENT_OBJECT_NAMECHANGE);
+        // additionally callback-filtered to float windows only. Checked at
+        // compile time (operands are const).
+        const _: () = assert!(EVENT_OBJECT_STATECHANGE < EVENT_OBJECT_LOCATIONCHANGE);
+        const _: () = assert!(EVENT_OBJECT_LOCATIONCHANGE < EVENT_OBJECT_NAMECHANGE);
     }
 
     #[test]

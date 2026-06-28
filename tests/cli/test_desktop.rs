@@ -293,7 +293,7 @@ pub fn start_test_daemon_with_extra_args(
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     const DETACHED: u32 = 0x00000200 | 0x08000000;
 
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd = std::process::Command::new(exe);
     cmd.arg("--desktop")
         .arg(desktop_name)
         .env("STM_PIPE_NAME", pipe)
@@ -304,7 +304,7 @@ pub fn start_test_daemon_with_extra_args(
     // racy). The pipe name is unique per test, so it keys a unique temp log;
     // the daemon truncates the file on each start. A caller that explicitly
     // passes its own `--log-file` in `extra_args` wins.
-    let already_redirected = extra_args.iter().any(|a| *a == "--log-file");
+    let already_redirected = extra_args.contains(&"--log-file");
     if !already_redirected {
         let safe: String = pipe
             .chars()
