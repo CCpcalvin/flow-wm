@@ -424,7 +424,13 @@ impl BorderInner {
     ///   the layered window and the compositor follows.
     /// - **Color-only change** (focus switch Focused ↔ Unfocused, same size):
     ///   recolor the cached DIB pixels in place and re-upload. No DIB realloc.
-    /// - **Shape change** (size / thickness / corner): rebuild the cache.
+    /// - **Resize / shape change that fits the existing buffer** (the common
+    ///   resize-animation frame): re-composite into the reused grow-only DIB
+    ///   (clear + [`composite_ring`] from a cached corner tile) and re-upload.
+    ///   No `CreateDIBSection`, no 4×4 supersample — the hot-path win.
+    /// - **Shape change that outgrows the buffer** (crossed a power-of-two
+    ///   capacity boundary) or first paint: allocate a fresh capacity-sized DIB
+    ///   and composite into it.
     ///
     /// The overlay HWND itself is positioned separately by
     /// [`set_geometry`](Border::set_geometry); this only updates pixels.
@@ -458,24 +464,38 @@ impl BorderInner {
             surface.upload(overlay_hwnd, &rect);
             return;
         }
-        // Shape changed (size / thickness / corner) or first paint: build a
-        // fresh surface, upload it, and replace the cache (dropping the old
-        // one frees its GDI handles).
-        if let Some(surface) = CachedSurface::build(w, h, &style) {
-            surface.upload(overlay_hwnd, &rect);
-            *surface_guard = Some(surface);
+        // Shape changed (size / thickness / corner) or first paint. Prefer the
+        // grow-only reuse path: if the existing DIB is large enough, re-composite
+        // into it (cheap clear + composite_ring) without re-allocating.
+        let reused = match surface_guard.as_mut() {
+            Some(surface) if surface.buffer_fits(w, h) => {
+                surface.render_ring(w, h, &style);
+                surface.upload(overlay_hwnd, &rect);
+                true
+            }
+            _ => false,
+        };
+        if !reused {
+            // Buffer too small (or no surface yet): allocate a fresh
+            // capacity-sized DIB, composite, upload, and replace the cache
+            // (dropping the old one frees its GDI handles).
+            if let Some(surface) = CachedSurface::build(w, h, &style) {
+                surface.upload(overlay_hwnd, &rect);
+                *surface_guard = Some(surface);
+            }
+            // GDI failure: leave the previous cache intact so a transient
+            // failure doesn't lose the last good bitmap.
         }
-        // GDI failure: leave the previous cache intact so a transient failure
-        // doesn't lose the last good bitmap.
     }
 
     /// Repaint the border at the overlay's current geometry.
     ///
     /// Called by `overlay_wnd_proc` when the overlay receives `WM_SIZE`
     /// (its dimensions changed via `SetWindowPos`). Because the size changed,
-    /// [`paint`](Self::paint) rebuilds the bitmap via `CachedSurface::build`
-    /// to match the new dimensions and re-uploads it — fixing the
-    /// stale-bitmap artifact that previously occurred during resize
+    /// [`paint`](Self::paint) re-composites the bitmap — usually into the
+    /// reused grow-only DIB via [`CachedSurface::render_ring`], only allocating
+    /// a fresh DIB at power-of-two capacity crossings — and re-uploads it,
+    /// fixing the stale-bitmap artifact that previously occurred during resize
     /// animations (`expand-column`, `shrink-column`, etc.).
     ///
     /// No-op if the overlay is destroyed or its rect cannot be queried.
@@ -607,15 +627,33 @@ impl Border {
 /// is paired with its `Delete*` in [`Drop`], so replacing a `CachedSurface`
 /// (e.g. on a shape change) frees the prior surface's resources.
 struct CachedSurface {
-    /// Pixel width / height the DIB was created for.
+    /// Logical pixel width / height the ring was last composited at. Always
+    /// `<= buf_w / buf_h`. `UpdateLayeredWindow` uploads exactly this size.
     w: i32,
     h: i32,
+    /// DIB allocation size (power-of-two capacity, grow-only). The buffer at
+    /// `bits` is `buf_w × buf_h`; the ring is composited into the top-left
+    /// `w × h` region at stride `buf_w`. Reused across resizes that fit, so a
+    /// smooth resize animation only re-runs `CreateDIBSection` at power-of-two
+    /// capacity crossings — not every frame.
+    buf_w: i32,
+    buf_h: i32,
     /// Ring thickness (`style.width_px`) baked into the cached pixels.
     thickness: u32,
     /// Corner preference baked into the cached ring shape.
     corner: CornerPreference,
     /// The color currently baked into the cached pixels.
     color: Color,
+    /// Cached alpha-coverage tile for the corner (top-left quadrant) at the
+    /// effective `(tile_r, tile_t)` geometry. Re-rendered only when the
+    /// effective `(r, t)` changes (i.e. thickness / corner-pref change, or the
+    /// window shrinks enough to clamp the radius); stable across ordinary
+    /// resizes, which is what makes the composite path cheap.
+    coverage: Vec<u8>,
+    /// Effective `(radius, thickness)` the `coverage` tile was rendered for.
+    /// `usize::MAX` sentinel forces a first render in `build`.
+    tile_r: usize,
+    tile_t: usize,
     /// Memory DC the bitmap is selected into; reused for every upload.
     hdc_mem: HDC,
     /// The DIB section handle. Owns the pixel buffer at `bits`.
@@ -623,9 +661,11 @@ struct CachedSurface {
     /// Object displaced when `bitmap` was selected into `hdc_mem`; restored on
     /// drop so `DeleteObject(bitmap)` succeeds.
     old_obj: HGDIOBJ,
-    /// Pointer into the DIB section's pixel buffer (`len` u32s). Valid for the
-    /// lifetime of `bitmap`; written through to recolor without re-allocating.
+    /// Pointer into the DIB section's pixel buffer (`len` u32s, laid out at
+    /// stride `buf_w`). Valid for the lifetime of `bitmap`; written through to
+    /// recolor / recomposite without re-allocating.
     bits: *mut u32,
+    /// `buf_w * buf_h` — total u32s in the DIB buffer.
     len: usize,
 }
 
@@ -652,12 +692,82 @@ impl CachedSurface {
             && self.corner == style.corner_preference
     }
 
-    /// Allocate a `w × h` DIB + memory DC and fill the ring for `style`.
+    /// Whether the grow-only DIB can hold a `w × h` ring without reallocating.
+    fn buffer_fits(&self, w: i32, h: i32) -> bool {
+        w <= self.buf_w && h <= self.buf_h
+    }
+
+    /// Re-composite the ring into the existing DIB for `style` at `(w, h)`.
     ///
-    /// Returns `None` if any GDI call fails (logged at `trace`); the caller
-    /// leaves the previous cache intact so a transient failure doesn't lose
-    /// the last good bitmap.
+    /// Assumes [`buffer_fits`] holds (caller checks; debug-asserted); does NOT touch any GDI
+    /// handle. Clears the `w × h` region to transparent, re-renders the corner
+    /// coverage tile only when the effective `(radius, thickness)` changed, then
+    /// composites edges + corners via [`composite_ring`]. This is the cheap
+    /// resize-frame path that avoids `CreateDIBSection` + 4×4 supersampling.
+    ///
+    /// [`buffer_fits`]: CachedSurface::buffer_fits
+    fn render_ring(&mut self, w: i32, h: i32, style: &BorderStyle) {
+        debug_assert!(self.buffer_fits(w, h), "caller must ensure buffer_fits");
+        let thickness = style.width_px as usize;
+        let corner_radius = corner_radius_px(style.corner_preference, thickness);
+        let half = (w as usize).min(h as usize) / 2;
+        let t = thickness.min(half);
+        let r = corner_radius.min(half);
+
+        // Re-render the corner tile only when the effective geometry changed
+        // (thickness / corner-pref config change, or a shrink that clamps the
+        // radius). Stable across ordinary resizes.
+        if r != self.tile_r || t != self.tile_t {
+            self.coverage = render_corner_coverage(r, t);
+            self.tile_r = r;
+            self.tile_t = t;
+        }
+
+        let stride = self.buf_w as usize;
+        let wu = w as usize;
+        let hu = h as usize;
+        // SAFETY: `bits` owns `len = buf_w*buf_h` u32s; we touch `[0, wu)` of
+        // each of the first `hu` rows, all in-bounds since `wu <= buf_w` and
+        // `hu <= buf_h` (buffer_fits). Confined to this call, not aliased.
+        unsafe {
+            for y in 0..hu {
+                std::ptr::write_bytes(self.bits.add(y * stride), 0, wu);
+            }
+            let pixels = std::slice::from_raw_parts_mut(self.bits, self.len);
+            let colored = pack_bgra(style.color, 0xFF);
+            composite_ring(
+                pixels,
+                BufferLayout {
+                    stride,
+                    width: wu,
+                    height: hu,
+                },
+                thickness,
+                corner_radius,
+                &self.coverage,
+                colored,
+            );
+        }
+
+        self.w = w;
+        self.h = h;
+        self.thickness = style.width_px;
+        self.corner = style.corner_preference;
+        self.color = style.color;
+    }
+
+    /// Allocate a DIB sized to the next power-of-two capacity ≥ `(w, h)` plus a
+    /// memory DC, then composite the ring into the top-left `w × h` region.
+    ///
+    /// The power-of-two capacity is what makes the DIB grow-only: a smooth
+    /// resize animation only crosses a power-of-two boundary `O(log n)` times,
+    /// so `CreateDIBSection` runs a handful of times across a whole animation
+    /// instead of every frame. Returns `None` if any GDI call fails (logged at
+    /// `trace`); the caller leaves the previous cache intact so a transient
+    /// failure doesn't lose the last good bitmap.
     fn build(w: i32, h: i32, style: &BorderStyle) -> Option<Self> {
+        let buf_w = next_capacity(w);
+        let buf_h = next_capacity(h);
         // SAFETY: GetDC / CreateCompatibleDC / CreateDIBSection / SelectObject
         // are well-formed for these arguments. Each Create* is paired with
         // cleanup either on this error path or in `Drop`.
@@ -675,16 +785,18 @@ impl CachedSurface {
                 return None;
             }
 
-            // Top-down 32-bit ARGB DIB section (negative biHeight = top-down).
+            // Top-down 32-bit ARGB DIB section (negative biHeight = top-down),
+            // allocated at the power-of-two capacity so it can be reused across
+            // resizes that fit.
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
+                    biWidth: buf_w,
+                    biHeight: -buf_h,
                     biPlanes: 1,
                     biBitCount: 32,
                     biCompression: BI_RGB.0,
-                    biSizeImage: (w as u32) * (h as u32) * 4,
+                    biSizeImage: (buf_w as u32) * (buf_h as u32) * 4,
                     biXPelsPerMeter: 0,
                     biYPelsPerMeter: 0,
                     biClrUsed: 0,
@@ -710,57 +822,63 @@ impl CachedSurface {
                 return None;
             }
 
-            // Populate pixels: outer thickness-px ring colored, interior 0.
-            let len = (w as usize) * (h as usize);
+            let len = (buf_w as usize) * (buf_h as usize);
             let bits = bits_ptr as *mut u32;
+            // Zero the whole capacity once; `render_ring` clears the logical
+            // `w × h` region each subsequent composite.
             std::ptr::write_bytes(bits, 0, len);
-            // SAFETY: CreateDIBSection sized the buffer to `len` u32s; the
-            // slice borrow is confined to the fill call and is not aliased.
-            let pixels = std::slice::from_raw_parts_mut(bits, len);
-            let thickness = style.width_px as usize;
-            let corner_radius = corner_radius_px(style.corner_preference, thickness);
-            let colored = pack_bgra(style.color, 0xFF);
-            fill_border_ring(
-                pixels,
-                w as usize,
-                h as usize,
-                thickness,
-                corner_radius,
-                colored,
-            );
 
             // Select the bitmap into the memory DC for UpdateLayeredWindow.
             let old_obj = SelectObject(hdc_mem, bitmap.into());
 
-            Some(CachedSurface {
+            let mut surface = CachedSurface {
                 w,
                 h,
+                buf_w,
+                buf_h,
                 thickness: style.width_px,
                 corner: style.corner_preference,
                 color: style.color,
+                coverage: Vec::new(),
+                // Force `render_ring` to render the tile on first composite.
+                tile_r: usize::MAX,
+                tile_t: usize::MAX,
                 hdc_mem,
                 bitmap,
                 old_obj,
                 bits,
                 len,
-            })
+            };
+            surface.render_ring(w, h, style);
+            Some(surface)
         }
     }
 
     /// Recolor the cached ring pixels to `new_color` in place.
     ///
     /// Each pixel's alpha is its anti-aliasing coverage (from
-    /// [`fill_border_ring`]); recoloring keeps that coverage and swaps only the
+    /// [`composite_ring`]); recoloring keeps that coverage and swaps only the
     /// RGB channels, so AA stays crisp across focus changes. Fully transparent
-    /// pixels (alpha `0`) are left untouched.
+    /// pixels (alpha `0`) are left untouched. Only the logical `w × h` region
+    /// is walked (at stride `buf_w`), skipping the grow-only capacity padding.
     fn recolor(&mut self, new_color: Color) {
-        // SAFETY: `bits` points into the DIB section owned by `self.bitmap`,
-        // sized `len` u32s; the slice borrow is confined to this call and is
-        // not aliased by anything else.
+        let stride = self.buf_w as usize;
+        let w = self.w as usize;
+        let h = self.h as usize;
+        debug_assert!(
+            w <= self.buf_w as usize && h <= self.buf_h as usize,
+            "recolor bounds derived from render_ring/build invariant"
+        );
+        // SAFETY: `bits` owns `len = buf_w*buf_h` u32s; for each of the first
+        // `h` rows we borrow a `w`-px slice starting at `y*stride`, in-bounds
+        // since `w <= buf_w` and `h <= buf_h`. Confined to this call.
         unsafe {
-            let pixels = std::slice::from_raw_parts_mut(self.bits, self.len);
-            for px in pixels.iter_mut() {
-                *px = recolor_pixel(*px, new_color);
+            for y in 0..h {
+                let row = self.bits.add(y * stride);
+                let pixels = std::slice::from_raw_parts_mut(row, w);
+                for px in pixels.iter_mut() {
+                    *px = recolor_pixel(*px, new_color);
+                }
             }
         }
         self.color = new_color;
@@ -904,6 +1022,11 @@ fn corner_radius_px(pref: CornerPreference, thickness: usize) -> usize {
 /// sub-pixel offsets (see [`fill_border_ring`]). `cr` is assumed ≤
 /// `min(w, h) / 2` (callers clamp). With `cr == 0.0` this reduces to a plain
 /// axis-aligned rectangle test. Pure and allocation-free.
+///
+/// Test-only oracle: the production render path uses [`composite_ring`] /
+/// [`render_corner_coverage`] instead; this remains as the geometric reference
+/// exercised by [`fill_border_ring`] under `#[cfg(test)]`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn in_rounded_rect(x: f64, y: f64, ox: f64, oy: f64, w: f64, h: f64, cr: f64) -> bool {
     if w <= 0.0 || h <= 0.0 {
         return false;
@@ -959,6 +1082,13 @@ fn in_rounded_rect(x: f64, y: f64, ox: f64, oy: f64, w: f64, h: f64, cr: f64) ->
 /// # Panics
 ///
 /// Panics if `pixels.len() != width * height`.
+///
+/// Test-only oracle: [`composite_ring`] replaced this on the production render
+/// path — this slow supersampled reference is kept to verify byte-exact parity
+/// (see `composite_ring_matches_fill_border_ring_across_geometry_sweep`).
+/// Compiled in all configurations so doc-links resolve; the attribute only
+/// silences the non-test dead-code lint.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fill_border_ring(
     pixels: &mut [u32],
     width: usize,
@@ -1063,6 +1193,303 @@ pub(crate) fn fill_border_ring(
             }
         }
     }
+}
+
+/// Grow-only DIB capacity for a given logical dimension.
+///
+/// Rounds up to the next power of two so a smooth resize animation only
+/// reallocates `O(log n)` times across its full range instead of every frame.
+/// `n` is clamped to at least `1` (a zero-sized buffer is never useful).
+#[must_use]
+const fn next_capacity(n: i32) -> i32 {
+    let n = if n < 1 { 1 } else { n as usize };
+    n.next_power_of_two() as i32
+}
+
+/// Pre-render the alpha-coverage tile for ONE rounded corner (the top-left
+/// quadrant) as a `radius × radius` byte buffer of per-pixel coverage
+/// (`0..=255`).
+///
+/// This is the window-size-independent piece of the 9-slice border composite.
+/// By the arc geometry of [`fill_border_ring`], a sub-sample `(sx, sy)` with
+/// `sx, sy < radius` lies in the ring iff it is inside the OUTER corner arc
+/// (centre `(radius, radius)`, radius `radius`) and outside the INNER corner
+/// arc (same centre, radius `radius - thickness`). Neither test consults the
+/// window's `width` or `height` — the straight-edge branches of
+/// [`in_rounded_rect`] require `lx >= corner_radius`, impossible inside the
+/// corner square — so this tile is reusable across every window size that
+/// shares `(radius, thickness)`.
+///
+/// Coverage uses the same 4×4 supersample grid (`OFFSETS`) as
+/// [`fill_border_ring`], so [`composite_ring`] is pixel-identical to
+/// `fill_border_ring` for the corner region (verified by the parity tests in
+/// `mod tests`). Returns an empty `Vec` for `radius == 0` (square ring: no
+/// corners to pre-render).
+///
+/// `radius` and `thickness` are the ALREADY-CLAMPED effective values — i.e.
+/// `radius = corner_radius.min(half)` and `thickness = thickness.min(half)`
+/// where `half = width.min(height) / 2`, exactly as [`fill_border_ring`]
+/// clamps. Callers key the tile cache by these effective values so a tiny
+/// window (whose radius clamps down) fetches the right tile.
+#[must_use]
+pub(crate) fn render_corner_coverage(radius: usize, thickness: usize) -> Vec<u8> {
+    if radius == 0 {
+        return Vec::new();
+    }
+    let r = radius;
+    let t = thickness.min(r);
+    let inner_radius = r.saturating_sub(t);
+    let mut coverage = vec![0u8; r * r];
+    // Same sub-pixel grid as `fill_border_ring` — symmetry of `OFFSETS` about
+    // 0.5 is what lets the other three corners be produced by reflection.
+    const OFFSETS: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
+    let rf = r as f64;
+    let outer_r2 = rf * rf;
+    let tf = t as f64;
+    let inner_r2 = (inner_radius as f64) * (inner_radius as f64);
+    for y in 0..r {
+        let yf = y as f64;
+        for x in 0..r {
+            let xf = x as f64;
+            let mut hits = 0u32;
+            for &ox in &OFFSETS {
+                let sx = xf + ox;
+                let dx = sx - rf;
+                for &oy in &OFFSETS {
+                    let sy = yf + oy;
+                    let dy = sy - rf;
+                    let d2 = dx * dx + dy * dy;
+                    let inside_outer = d2 <= outer_r2;
+                    // Inside the inner arc only once past its top-left corner
+                    // (`sx >= t && sy >= t`); otherwise the sub-sample sits in
+                    // the ring's straight band (definitely not interior).
+                    let inside_inner = sx >= tf && sy >= tf && d2 <= inner_r2;
+                    if inside_outer && !inside_inner {
+                        hits += 1;
+                    }
+                }
+            }
+            coverage[y * r + x] = ((hits * 255) / 16) as u8;
+        }
+    }
+    coverage
+}
+
+/// Placement of one corner tile: the screen-space origin of the tile's `(0,0)`
+/// plus mirror flags.
+///
+/// The other three corners reuse the single top-left tile rendered by
+/// [`render_corner_coverage`] via reflection. Reflection is exact because the
+/// supersample grid `OFFSETS` is symmetric about `0.5` (`1 - ox` permutes
+/// `OFFSETS`), so a mirrored tile presents the same sub-sample multiset to the
+/// arc test as the directly-rendered corner would.
+#[derive(Clone, Copy)]
+struct CornerPos {
+    /// Screen column of the tile's left edge.
+    ox: usize,
+    /// Screen row of the tile's top edge.
+    oy: usize,
+    /// Mirror horizontally (top-right / bottom-right corners).
+    flip_x: bool,
+    /// Mirror vertically (bottom-left / bottom-right corners).
+    flip_y: bool,
+}
+
+/// Layout of the destination pixel buffer for [`composite_ring`].
+///
+/// `stride` is the number of `u32`s per row and may exceed `width` when
+/// compositing into a grow-only DIB whose allocation is wider than the logical
+/// image (the DIB's own row stride, which `UpdateLayeredWindow` reads with
+/// `size = (width, height)`). For a tight buffer, pass `stride == width`.
+#[derive(Clone, Copy)]
+pub(crate) struct BufferLayout {
+    stride: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Blit one cached corner coverage tile into `pixels` at [`CornerPos`].
+///
+/// `stride` is the number of `u32`s per row of `pixels` — it may exceed the
+/// logical image `width` when compositing into a grow-only DIB whose
+/// allocation is wider than the current ring. Zero-coverage pixels are skipped
+/// (leaving the pre-zeroed buffer at `0`), matching [`fill_border_ring`]'s
+/// "write only when `hits > 0`" rule.
+///
+/// Internal helper — the caller ([`composite_ring`]) upholds `ox + r ≤ width`,
+/// `oy + r ≤ height`, and `stride ≥ width`, so all writes stay in-bounds.
+fn blit_corner(
+    pixels: &mut [u32],
+    stride: usize,
+    coverage: &[u8],
+    r: usize,
+    rgb: u32,
+    pos: CornerPos,
+) {
+    let CornerPos {
+        ox,
+        oy,
+        flip_x,
+        flip_y,
+    } = pos;
+    for ty in 0..r {
+        let y = if flip_y { oy + r - 1 - ty } else { oy + ty };
+        for tx in 0..r {
+            let cov = coverage[ty * r + tx];
+            if cov > 0 {
+                let x = if flip_x { ox + r - 1 - tx } else { ox + tx };
+                pixels[y * stride + x] = (u32::from(cov) << 24) | rgb;
+            }
+        }
+    }
+}
+
+/// Composite the border ring into `pixels` from a cached corner coverage tile
+/// plus four solid edge fills — the resize-frame hot-path replacement for
+/// [`fill_border_ring`].
+///
+/// Instead of re-running the 4×4 supersample on every `WM_SIZE`, this blits the
+/// pre-rendered `corner_coverage` (produced once per `(radius, thickness)` by
+/// [`render_corner_coverage`]) into the four corners and fills the straight
+/// edge bands with a flat `color`. The output is byte-identical to
+/// `fill_border_ring(pixels, width, height, thickness, corner_radius, color)`
+/// for the same arguments — the parity tests in `mod tests` pin this — but the
+/// per-frame cost drops from `O(perimeter × 16)` float tests plus a fresh
+/// `CreateDIBSection` to `O(perimeter)` solid fills plus four small blits.
+///
+/// `layout` ([`BufferLayout`]) gives the destination buffer's row `stride`
+/// alongside the logical image `width` / `height`; `stride` may exceed `width`
+/// when compositing into a grow-only DIB whose allocation is wider than the
+/// image (the DIB's own row stride, which `UpdateLayeredWindow` reads with
+/// `size = (width, height)`). Pass `stride = width` for a tight buffer.
+///
+/// Contract — geometry identical to [`fill_border_ring`]:
+/// - `pixels.len()` must be at least `stride * height` (panics otherwise).
+/// - The `width × height` region at `pixels[y*stride + x]` must be pre-zeroed;
+///   ring pixels are written and the interior + outside-arc corner cutouts are
+///   left at `0`.
+/// - `corner_coverage` must be the tile for the EFFECTIVE clamped geometry,
+///   i.e. `render_corner_coverage(r, t)` with `r`/`t` clamped as below. It is
+///   ignored when the effective radius is `0` (square ring), so an empty slice
+///   is acceptable there. Must contain at least `r * r` bytes otherwise.
+/// - `color` should carry `0xFF` alpha (the rounded path derives edge alpha
+///   from coverage, which is `255` on straight bands).
+///
+/// # Panics
+///
+/// Panics if `pixels.len() < stride * height`, or if `corner_coverage` is
+/// shorter than `r * r` for a nonzero effective radius.
+pub(crate) fn composite_ring(
+    pixels: &mut [u32],
+    layout: BufferLayout,
+    thickness: usize,
+    corner_radius: usize,
+    corner_coverage: &[u8],
+    color: u32,
+) {
+    let BufferLayout {
+        stride,
+        width,
+        height,
+    } = layout;
+    assert!(
+        pixels.len() >= stride * height,
+        "pixels buffer must hold at least stride * height"
+    );
+    if width == 0 || height == 0 {
+        return;
+    }
+    // Mirror `fill_border_ring`'s clamping exactly so the cached tile is keyed
+    // by the same effective (r, t) the rasteriser would use.
+    let half = width.min(height) / 2;
+    let t = thickness.min(half);
+    if t == 0 {
+        return;
+    }
+    let r = corner_radius.min(half);
+    let rgb = color & 0x00FF_FFFF;
+
+    // Four straight edge fills between the corner tiles. For `r == 0` these
+    // alone reproduce `fill_border_ring`'s square fast path (the ranges grow
+    // to cover the full row/column; overlaps land on identical `color`).
+    // Each row write stays within the logical `width` (the stride padding to
+    // the right is never touched).
+    // Top + bottom bands: the full row minus the corner columns.
+    for y in 0..t {
+        let row = y * stride;
+        pixels[row + r..row + (width - r)].fill(color);
+    }
+    for y in (height - t)..height {
+        let row = y * stride;
+        pixels[row + r..row + (width - r)].fill(color);
+    }
+    // Left + right bands: the `t`-px columns between the corner rows.
+    for y in r..(height - r) {
+        let row = y * stride;
+        pixels[row..row + t].fill(color);
+        pixels[row + (width - t)..row + width].fill(color);
+    }
+
+    if r == 0 {
+        return;
+    }
+    debug_assert!(
+        corner_coverage.len() >= r * r,
+        "corner_coverage must hold at least r*r bytes for a nonzero radius"
+    );
+    // Four corners: top-left is the canonical tile; the others are reflections.
+    blit_corner(
+        pixels,
+        stride,
+        corner_coverage,
+        r,
+        rgb,
+        CornerPos {
+            ox: 0,
+            oy: 0,
+            flip_x: false,
+            flip_y: false,
+        },
+    );
+    blit_corner(
+        pixels,
+        stride,
+        corner_coverage,
+        r,
+        rgb,
+        CornerPos {
+            ox: width - r,
+            oy: 0,
+            flip_x: true,
+            flip_y: false,
+        },
+    );
+    blit_corner(
+        pixels,
+        stride,
+        corner_coverage,
+        r,
+        rgb,
+        CornerPos {
+            ox: 0,
+            oy: height - r,
+            flip_x: false,
+            flip_y: true,
+        },
+    );
+    blit_corner(
+        pixels,
+        stride,
+        corner_coverage,
+        r,
+        rgb,
+        CornerPos {
+            ox: width - r,
+            oy: height - r,
+            flip_x: true,
+            flip_y: true,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -1549,5 +1976,654 @@ mod tests {
             inner.surface.lock().unwrap().is_none(),
             "zero-area rect must not allocate a cached surface"
         );
+    }
+
+    // ── 9-slice composite parity ──────────────────────────────────────
+    //
+    // `composite_ring` is the resize-frame hot-path replacement for
+    // `fill_border_ring`. Its correctness contract is byte-exact parity: given
+    // the same buffer + args (and the matching cached corner tile), it MUST
+    // produce identical output. The sweep below covers square rings (r == 0),
+    // rounded rings, exact `2R` widths (corners meet edge-to-edge), `2R+1`
+    // (one-pixel straight band), degenerate radii that clamp down, and a
+    // realistic full-size window.
+
+    /// Mirror `fill_border_ring`'s internal clamping so the test renders the
+    /// coverage tile keyed by the SAME effective `(t, r)` the compositor uses.
+    fn effective_geometry(
+        width: usize,
+        height: usize,
+        thickness: usize,
+        corner_radius: usize,
+    ) -> (usize, usize) {
+        let half = width.min(height) / 2;
+        (thickness.min(half), corner_radius.min(half))
+    }
+
+    /// Render the matching corner tile and diff `composite_ring` against
+    /// `fill_border_ring` pixel by pixel, failing with the offending
+    /// coordinate + effective geometry for fast triage.
+    fn assert_parity(width: usize, height: usize, thickness: usize, corner_radius: usize) {
+        let (t, r) = effective_geometry(width, height, thickness, corner_radius);
+        let coverage = render_corner_coverage(r, t);
+        let colored = pack_bgra(color(0x42, 0x7A, 0xFF), 0xFF);
+        let mut expected = vec![0u32; width * height];
+        let mut actual = vec![0u32; width * height];
+        fill_border_ring(
+            &mut expected,
+            width,
+            height,
+            thickness,
+            corner_radius,
+            colored,
+        );
+        composite_ring(
+            &mut actual,
+            BufferLayout {
+                stride: width,
+                width,
+                height,
+            },
+            thickness,
+            corner_radius,
+            &coverage,
+            colored,
+        );
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                assert_eq!(
+                    actual[idx], expected[idx],
+                    "composite != fill_border_ring at ({x},{y}) for \
+                     W={width} H={height} T={thickness} R={corner_radius} \
+                     (effective t={t} r={r})",
+                );
+            }
+        }
+    }
+
+    /// Byte-exact parity across the geometry sweep. This is THE correctness
+    /// gate for the optimisation: if `composite_ring` ever drifts from
+    /// `fill_border_ring`, one of these cases fails with the exact coordinate.
+    #[test]
+    fn composite_ring_matches_fill_border_ring_across_geometry_sweep() {
+        // Square rings (r == 0): edges-only composite must equal the slice fill.
+        assert_parity(3, 3, 1, 0);
+        assert_parity(5, 5, 2, 0);
+        assert_parity(6, 3, 1, 0);
+        assert_parity(4, 4, 100, 0); // thickness clamps to half.
+
+        // Rounded rings of assorted sizes (the AA-producing cases).
+        assert_parity(11, 11, 1, 4);
+        assert_parity(11, 11, 3, 4);
+        assert_parity(40, 40, 3, 15);
+        assert_parity(33, 21, 2, 9);
+
+        // Exact 2R width/height: corner tiles meet edge-to-edge (no straight
+        // band between them).
+        assert_parity(10, 20, 2, 5); // width == 2*r
+        assert_parity(20, 10, 2, 5); // height == 2*r
+        // 2R+1: exactly one pixel of straight band between the corners.
+        assert_parity(11, 22, 2, 5);
+
+        // Degenerate: requested radius ≥ half the dimension, so it clamps down.
+        // The compositor must fetch the clamped-r tile, not the requested one.
+        assert_parity(5, 5, 1, 8); // half=2 → r clamps 8→2.
+        assert_parity(7, 9, 3, 20); // half=3 → r clamps 20→3, t=3 → inner 0.
+
+        // Realistic full-size window (the actual jank scenario).
+        assert_parity(1600, 900, 3, 11); // Rounded + thickness 3.
+        assert_parity(1600, 900, 3, 7); // RoundedSmall + thickness 3.
+
+        // Zero thickness: both paths are no-ops (fully transparent).
+        assert_parity(20, 20, 0, 5);
+    }
+
+    /// The grow-only DIB path composites with `stride > width` (the buffer is
+    /// allocated at power-of-two capacity, wider than the logical image). This
+    /// proves that path still matches `fill_border_ring` pixel-for-pixel in the
+    /// logical `w × h` region, and that the stride-padding columns are left
+    /// untouched at `0`.
+    #[test]
+    fn composite_ring_with_wider_stride_matches_fill_border_ring() {
+        let (width, height, thickness, corner_radius) = (40, 30, 3, 9);
+        let (t, r) = effective_geometry(width, height, thickness, corner_radius);
+        let coverage = render_corner_coverage(r, t);
+        let colored = pack_bgra(color(0x42, 0x7A, 0xFF), 0xFF);
+
+        // Tight reference via fill_border_ring.
+        let mut expected = vec![0u32; width * height];
+        fill_border_ring(
+            &mut expected,
+            width,
+            height,
+            thickness,
+            corner_radius,
+            colored,
+        );
+
+        // Wider-stride buffer (stride = width + 11, like a pow2 capacity slack).
+        // Extra rows beyond `height` also pad the buffer vertically.
+        let stride = width + 11;
+        let buf_h = height + 5;
+        let mut actual = vec![0u32; stride * buf_h];
+        composite_ring(
+            &mut actual,
+            BufferLayout {
+                stride,
+                width,
+                height,
+            },
+            thickness,
+            corner_radius,
+            &coverage,
+            colored,
+        );
+
+        // The logical w×h region (read at `stride`) must match the tight output.
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(
+                    actual[y * stride + x],
+                    expected[y * width + x],
+                    "stride composite != fill_border_ring at ({x},{y})"
+                );
+            }
+        }
+        // Stride padding to the right of the image must stay zero (untouched).
+        for y in 0..height {
+            for x in width..stride {
+                assert_eq!(
+                    actual[y * stride + x],
+                    0,
+                    "stride padding polluted at ({x},{y})"
+                );
+            }
+        }
+        // Rows below the image must stay zero too.
+        for y in height..buf_h {
+            for x in 0..stride {
+                assert_eq!(
+                    actual[y * stride + x],
+                    0,
+                    "vertical padding polluted at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// `render_corner_coverage` is the source of the graded AA: for a realistic
+    /// corner it emits the full coverage range — `0` (outside the outer arc /
+    /// interior), `255` (the solid straight-band part of the tile), and several
+    /// intermediate levels along the arc. A binary edge (only 0 / 255) would
+    /// mean the supersampler regressed to nearest-neighbour.
+    #[test]
+    fn render_corner_coverage_emits_graded_arc() {
+        // r=15, t=3 (matches the 40×40 rounded-ring case).
+        let cov = render_corner_coverage(15, 3);
+        assert_eq!(cov.len(), 15 * 15);
+        let distinct: std::collections::HashSet<u8> = cov.iter().copied().collect();
+        assert!(distinct.contains(&0), "extreme corner + interior must be 0");
+        assert!(
+            distinct.contains(&255),
+            "solid straight-band part of the tile must be fully covered"
+        );
+        assert!(
+            distinct.len() >= 3,
+            "arc must show a graded coverage gradient, got {distinct:?}"
+        );
+    }
+
+    /// `render_corner_coverage(0, _)` is the square-ring case: no corners, so
+    /// the tile is empty and `composite_ring` must fall back to edge fills
+    /// alone — still byte-identical to `fill_border_ring`.
+    #[test]
+    fn render_corner_coverage_zero_radius_is_empty() {
+        assert!(render_corner_coverage(0, 3).is_empty());
+        let mut expected = vec![0u32; 6 * 4];
+        let mut actual = vec![0u32; 6 * 4];
+        let colored = pack_bgra(color(0, 0, 0), 0xFF);
+        fill_border_ring(&mut expected, 6, 4, 1, 0, colored);
+        composite_ring(
+            &mut actual,
+            BufferLayout {
+                stride: 6,
+                width: 6,
+                height: 4,
+            },
+            1,
+            0,
+            &[],
+            colored,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    // ── next_capacity (pure grow-only allocator) ──────────────────────
+
+    /// `next_capacity` clamps non-positive dimensions to `1` so a zero-sized
+    /// DIB is never requested (a `CreateDIBSection` with `biWidth <= 0` would
+    /// fail). This pins the `n < 1 → 1` branch — a regression that dropped the
+    /// clamp would surface as `next_power_of_two` panicking on a negative
+    /// `usize` cast.
+    #[test]
+    fn next_capacity_non_positive_clamps_to_one() {
+        assert_eq!(next_capacity(0), 1);
+        assert_eq!(next_capacity(-1), 1);
+        assert_eq!(next_capacity(-1024), 1);
+    }
+
+    /// `next_capacity` rounds UP to the next power of two so the DIB is
+    /// grow-only: a smooth resize animation only crosses a pow2 boundary
+    /// `O(log n)` times. Exact powers of two are returned unchanged.
+    #[test]
+    fn next_capacity_rounds_up_to_next_power_of_two() {
+        assert_eq!(next_capacity(1), 1);
+        assert_eq!(next_capacity(2), 2);
+        assert_eq!(next_capacity(3), 4);
+        assert_eq!(next_capacity(5), 8);
+        assert_eq!(next_capacity(1024), 1024, "exact pow2 stays put");
+        assert_eq!(next_capacity(1025), 2048, "one past pow2 rounds up");
+        assert_eq!(next_capacity(1600), 2048, "realistic window width");
+    }
+
+    // ── composite_ring early-return + panic contracts ─────────────────
+
+    /// `composite_ring` with `width == 0` or `height == 0` is a documented
+    /// no-op (the buffer is left untouched). Pin this independently of the
+    /// parity sweep, which never passes a zero dimension. Uses a non-zero
+    /// sentinel fill so any accidental write is observable.
+    #[test]
+    fn composite_ring_zero_dimension_leaves_buffer_untouched() {
+        // width == 0 branch.
+        let mut buf_w = vec![0xDEAD_BEEF_u32; 64];
+        composite_ring(
+            &mut buf_w,
+            BufferLayout {
+                stride: 8,
+                width: 0,
+                height: 8,
+            },
+            2,
+            0,
+            &[],
+            0xFFFF00FF,
+        );
+        assert!(
+            buf_w.iter().all(|&p| p == 0xDEAD_BEEF),
+            "zero-width composite must not write any pixel"
+        );
+
+        // height == 0 branch.
+        let mut buf_h = vec![0xDEAD_BEEF_u32; 64];
+        composite_ring(
+            &mut buf_h,
+            BufferLayout {
+                stride: 8,
+                width: 8,
+                height: 0,
+            },
+            2,
+            0,
+            &[],
+            0xFFFF00FF,
+        );
+        assert!(
+            buf_h.iter().all(|&p| p == 0xDEAD_BEEF),
+            "zero-height composite must not write any pixel"
+        );
+    }
+
+    /// `composite_ring` with `thickness` clamped to `0` (either explicitly 0
+    /// or `≥ half`) hits the `if t == 0 { return; }` branch BEFORE any edge
+    /// fill or corner blit. Buffer must stay untouched. This is the contract
+    /// `CachedSurface::render_ring` relies on for degenerate tiny-window
+    /// paints.
+    #[test]
+    fn composite_ring_zero_thickness_leaves_buffer_untouched() {
+        let mut buf = vec![0xDEAD_BEEF_u32; 100];
+        composite_ring(
+            &mut buf,
+            BufferLayout {
+                stride: 10,
+                width: 10,
+                height: 10,
+            },
+            0,
+            4, // would normally trigger corner blits, but t==0 returns first
+            &[],
+            0xFFFF00FF,
+        );
+        assert!(
+            buf.iter().all(|&p| p == 0xDEAD_BEEF),
+            "zero-thickness composite must not write any pixel"
+        );
+    }
+
+    /// Documented `# Panics`: caller must size `pixels` to at least
+    /// `stride * height`. Pin the contract guard so a future refactor that
+    /// drops the `assert!` is caught.
+    #[should_panic(expected = "pixels buffer must hold at least stride * height")]
+    #[test]
+    fn composite_ring_panics_when_buffer_smaller_than_stride_times_height() {
+        // stride*height = 8*2 = 16, but buf.len() = 10.
+        let mut buf = vec![0u32; 10];
+        composite_ring(
+            &mut buf,
+            BufferLayout {
+                stride: 8,
+                width: 8,
+                height: 2,
+            },
+            1,
+            0,
+            &[],
+            0xFFFF00FF,
+        );
+    }
+
+    /// Documented contract: `corner_coverage` must hold at least `r * r` bytes
+    /// for a nonzero effective radius. In debug the `debug_assert!` fires with
+    /// a descriptive message; in release the subsequent `blit_corner` index
+    /// goes out of bounds and panics from stdlib. Either way this test sees a
+    /// panic — bare `#[should_panic]` (no `expected`) is intentional so the
+    /// test passes in both profiles.
+    #[should_panic]
+    #[test]
+    fn composite_ring_panics_when_corner_coverage_shorter_than_r_squared() {
+        // half = 5, r = 4.min(5) = 4 → coverage needs ≥ 16 bytes; we pass 3.
+        let mut buf = vec![0u32; 100];
+        composite_ring(
+            &mut buf,
+            BufferLayout {
+                stride: 10,
+                width: 10,
+                height: 10,
+            },
+            1,
+            4,
+            &[0u8, 0, 0],
+            0xFFFF00FF,
+        );
+    }
+
+    // ── render_corner_coverage: thickness clamp + invariants ──────────
+
+    /// `render_corner_coverage` clamps `thickness` to `radius` internally
+    /// (`t = thickness.min(r)`), so an oversized thickness matches the
+    /// thickness-equals-radius case exactly. Guards against removing the
+    /// `.min(r)` clamp (which would let `inner_radius = r.saturating_sub(t)`
+    /// still be correct but would mis-key the cache in `render_ring`).
+    #[test]
+    fn render_corner_coverage_oversized_thickness_clamps_to_radius() {
+        let cov_clamped = render_corner_coverage(5, 100);
+        let cov_at_radius = render_corner_coverage(5, 5);
+        assert_eq!(
+            cov_clamped, cov_at_radius,
+            "thickness > radius must clamp to t == radius"
+        );
+    }
+
+    /// Tile size is exactly `radius * radius` bytes across a range of radii.
+    /// The compositor indexes `coverage[ty * r + tx]` with `tx, ty < r`, so a
+    /// short tile would panic at blit time. The existing `emits_graded_arc`
+    /// test only checks r=15; this pins the size invariant parametrically.
+    #[test]
+    fn render_corner_coverage_size_is_radius_squared() {
+        for r in [1usize, 2, 3, 5, 8, 12] {
+            assert_eq!(
+                render_corner_coverage(r, r / 2).len(),
+                r * r,
+                "tile for r={r} must be r*r bytes"
+            );
+        }
+    }
+
+    /// The arc test `(sx - rf)² + (sy - rf)² ≤ rf²` is symmetric under
+    /// `x ↔ y`, so the coverage tile must equal its own transpose
+    /// (`cov[y*r + x] == cov[x*r + y]`). This is the geometric property that
+    /// lets `blit_corner`'s `flip_x`/`flip_y` reproduce the other three
+    /// corners from a single tile. A regression that broke the sampler's
+    /// symmetry would also break bottom-left/top-right parity, but this pins
+    /// the invariant directly with a precise coordinate.
+    #[test]
+    fn render_corner_coverage_tile_is_transpose_symmetric() {
+        let r = 12;
+        let cov = render_corner_coverage(r, 4);
+        for y in 0..r {
+            for x in 0..r {
+                assert_eq!(
+                    cov[y * r + x],
+                    cov[x * r + y],
+                    "tile must be symmetric under transpose at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    // ── blit_corner: flip + zero-coverage + offset/stride ─────────────
+    //
+    // `blit_corner` is the leaf that places the cached corner tile into one of
+    // the four screen corners via `CornerPos` reflection flags. The parity
+    // sweep covers it integration-style; these pin each flip combination
+    // directly so a regression in the reflection index math is caught with a
+    // precise coordinate, not a diff against the oracle.
+
+    /// Build a small identifiable coverage tile where each byte encodes its
+    /// own `(tx, ty)` coordinate as `tx*16 + ty + 1`. The `+ 1` keeps every
+    /// byte non-zero so `blit_corner`'s zero-coverage skip branch never fires
+    /// — the mirror direction is then observable at every destination pixel.
+    fn identifiable_coverage(r: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(r * r);
+        for ty in 0..r {
+            for tx in 0..r {
+                v.push((tx * 16 + ty + 1) as u8);
+            }
+        }
+        v
+    }
+
+    /// No-flip blit writes the tile verbatim at the screen origin (the
+    /// top-left-corner case in `composite_ring`).
+    #[test]
+    fn blit_corner_no_flip_writes_tile_verbatim_at_origin() {
+        let r = 4;
+        let cov = identifiable_coverage(r);
+        let mut buf = vec![0u32; r * r];
+        blit_corner(
+            &mut buf,
+            r,
+            &cov,
+            r,
+            0x00FF_FFFF,
+            CornerPos {
+                ox: 0,
+                oy: 0,
+                flip_x: false,
+                flip_y: false,
+            },
+        );
+        for ty in 0..r {
+            for tx in 0..r {
+                let expected_alpha = u32::from(cov[ty * r + tx]);
+                assert_eq!(
+                    buf[ty * r + tx],
+                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    "no-flip blit wrong at ({tx},{ty})"
+                );
+            }
+        }
+    }
+
+    /// `flip_x = true` mirrors the tile horizontally: the rightmost source
+    /// column lands at the leftmost destination column (the top-right corner).
+    #[test]
+    fn blit_corner_flip_x_mirrors_horizontally() {
+        let r = 4;
+        let cov = identifiable_coverage(r);
+        let mut buf = vec![0u32; r * r];
+        blit_corner(
+            &mut buf,
+            r,
+            &cov,
+            r,
+            0x00FF_FFFF,
+            CornerPos {
+                ox: 0,
+                oy: 0,
+                flip_x: true,
+                flip_y: false,
+            },
+        );
+        for ty in 0..r {
+            for tx in 0..r {
+                let expected_alpha = u32::from(cov[ty * r + (r - 1 - tx)]);
+                assert_eq!(
+                    buf[ty * r + tx],
+                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    "flip_x blit wrong at ({tx},{ty})"
+                );
+            }
+        }
+    }
+
+    /// `flip_y = true` mirrors the tile vertically (the bottom-left corner).
+    #[test]
+    fn blit_corner_flip_y_mirrors_vertically() {
+        let r = 4;
+        let cov = identifiable_coverage(r);
+        let mut buf = vec![0u32; r * r];
+        blit_corner(
+            &mut buf,
+            r,
+            &cov,
+            r,
+            0x00FF_FFFF,
+            CornerPos {
+                ox: 0,
+                oy: 0,
+                flip_x: false,
+                flip_y: true,
+            },
+        );
+        for ty in 0..r {
+            for tx in 0..r {
+                let expected_alpha = u32::from(cov[(r - 1 - ty) * r + tx]);
+                assert_eq!(
+                    buf[ty * r + tx],
+                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    "flip_y blit wrong at ({tx},{ty})"
+                );
+            }
+        }
+    }
+
+    /// `flip_x && flip_y` rotates the tile 180° (the bottom-right corner).
+    #[test]
+    fn blit_corner_flip_xy_rotates_180() {
+        let r = 4;
+        let cov = identifiable_coverage(r);
+        let mut buf = vec![0u32; r * r];
+        blit_corner(
+            &mut buf,
+            r,
+            &cov,
+            r,
+            0x00FF_FFFF,
+            CornerPos {
+                ox: 0,
+                oy: 0,
+                flip_x: true,
+                flip_y: true,
+            },
+        );
+        for ty in 0..r {
+            for tx in 0..r {
+                let expected_alpha = u32::from(cov[(r - 1 - ty) * r + (r - 1 - tx)]);
+                assert_eq!(
+                    buf[ty * r + tx],
+                    (expected_alpha << 24) | 0x00FF_FFFF,
+                    "flip_xy blit wrong at ({tx},{ty})"
+                );
+            }
+        }
+    }
+
+    /// Zero-coverage bytes are skipped (the destination is left at its
+    /// pre-zeroed value), matching `fill_border_ring`'s "write only when
+    /// hits > 0" rule. A regression that wrote `(0 << 24) | rgb` would paint
+    /// a transparent-RGB value over the cleared buffer and break parity.
+    #[test]
+    fn blit_corner_skips_zero_coverage_pixels() {
+        // r=3 tile with a zero at the centre (tx=1, ty=1); rest non-zero.
+        let cov = vec![1u8, 2, 3, 4, 0, 6, 7, 8, 9];
+        let mut buf = vec![0u32; 9];
+        blit_corner(
+            &mut buf,
+            3,
+            &cov,
+            3,
+            0x00FF_FFFF,
+            CornerPos {
+                ox: 0,
+                oy: 0,
+                flip_x: false,
+                flip_y: false,
+            },
+        );
+        // The zero-coverage centre is at tile coords (tx=1, ty=1) → index 4
+        // in a row-major r=3 tile (ty*r + tx = 1*3 + 1 = 4).
+        assert_eq!(buf[4], 0, "zero-coverage pixel must be skipped");
+        assert_eq!(
+            buf[0],
+            (u32::from(cov[0]) << 24) | 0x00FF_FFFF,
+            "non-zero pixel at (0,0) must be written"
+        );
+    }
+
+    /// `blit_corner` honours `ox`/`oy` to place the tile at a non-origin
+    /// screen position within a larger, strided buffer — the production
+    /// layout for non-top-left corners (which pass `ox = width - r`, stride
+    /// = `buf_w`). Verifies the stride-offset destination indexing that the
+    /// grow-only DIB path depends on.
+    #[test]
+    fn blit_corner_places_tile_at_offset_with_stride() {
+        let r = 2;
+        let cov = identifiable_coverage(r);
+        let stride = 8;
+        let width = 6;
+        let height = 5;
+        let mut buf = vec![0u32; stride * height];
+        // Bottom-right corner placement with 180° rotation (the production
+        // bottom-right case).
+        let ox = width - r;
+        let oy = height - r;
+        blit_corner(
+            &mut buf,
+            stride,
+            &cov,
+            r,
+            0x00FF_FFFF,
+            CornerPos {
+                ox,
+                oy,
+                flip_x: true,
+                flip_y: true,
+            },
+        );
+        for ty in 0..r {
+            for tx in 0..r {
+                let dst_x = ox + (r - 1 - tx);
+                let dst_y = oy + (r - 1 - ty);
+                let src = cov[ty * r + tx];
+                assert_eq!(
+                    buf[dst_y * stride + dst_x],
+                    (u32::from(src) << 24) | 0x00FF_FFFF,
+                    "offset+stride blit wrong at src ({tx},{ty}) -> dst ({dst_x},{dst_y})"
+                );
+            }
+        }
+        // Pixel outside the placed tile stays untouched.
+        assert_eq!(buf[0], 0, "buffer outside the tile placement must stay 0");
     }
 }
