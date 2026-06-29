@@ -19,10 +19,20 @@
 //!    just beyond the edge keeps scroll-in/out animations short and smooth.
 //!
 //! Columns are laid out in **slots** of width `col_width + window_gap`, so the
-//! visual gap between adjacent windows comes from the slot structure (the canvas
-//! starts at `window_gap`). Vertically, `window_gap` is applied as top/bottom
-//! inset within each row; screen-level top/bottom margins come from
-//! `padding.up` / `padding.down`.
+//! visual gap between adjacent columns comes from the slot structure (the canvas
+//! starts at `window_gap`). Vertically, rows are stacked with one `window_gap`
+//! between consecutive rows plus a leading `window_gap` after `padding.up`;
+//! screen-level top/bottom margins come from `padding.up` / `padding.down`.
+//!
+//! # Row heights are source-of-truth here
+//!
+//! Each [`Row`](crate::layout::types::Row)'s `height` field is consumed
+//! **verbatim** as the window's pixel height. Projection never recomputes,
+//! rescales, or insets row heights — it only stacks them. Equal distribution
+//! of available vertical space happens once, at mutation time
+//! ([`distribute_heights`](crate::layout::mutations::distribute_heights)),
+//! whenever row membership changes (add/remove/merge/promote). Between
+//! mutations, heights are stable so the user can drag-resize later.
 //!
 //! # Padding lives here
 //!
@@ -90,39 +100,20 @@ pub fn project(
 
         let visible = canvas_col_right > viewport_left && canvas_col_left < viewport_right;
 
-        if visible {
-            let screen_x = monitor_rect.x + (canvas_col_left - viewport_left);
-            project_column_rows(
-                column,
-                screen_x,
-                monitor_rect,
-                col_width,
-                padding,
-                &mut entries,
-            );
+        // Determine the screen x for this column's windows. Visible columns get
+        // their real screen position; off-screen columns get a deterministic
+        // parking position exactly one column-width beyond the nearest edge.
+        let x = if visible {
+            monitor_rect.x + (canvas_col_left - viewport_left)
         } else if canvas_col_right <= viewport_left {
             // Off-screen left: park one column-width beyond the left edge
-            let park_x = monitor_rect.x - col_width;
-            park_column_rows(
-                column,
-                park_x,
-                monitor_rect,
-                col_width,
-                padding,
-                &mut entries,
-            );
+            monitor_rect.x - col_width
         } else {
             // Off-screen right: park one column-width beyond the right edge
-            let park_x = monitor_rect.x + monitor_rect.width;
-            park_column_rows(
-                column,
-                park_x,
-                monitor_rect,
-                col_width,
-                padding,
-                &mut entries,
-            );
-        }
+            monitor_rect.x + monitor_rect.width
+        };
+
+        stack_column_rows(column, x, monitor_rect, col_width, padding, &mut entries);
 
         // Advance by slot width (col_width + window_gap)
         canvas_x += col_width + slot_gap;
@@ -131,101 +122,50 @@ pub fn project(
     ActualLayout { entries }
 }
 
-/// Project a visible column's rows into actual entries.
+/// Stack a column's rows into actual entries at the given screen x.
 ///
-/// Rows are packed (no inter-row gap). Each window is inset by
-/// `padding.window_gap` vertically (top/bottom) within its allocated row cell.
-/// Horizontally, the window fills the full `col_width` — the gap between columns
-/// comes from the slot model in [`project`].
+/// Each row's [`height`](crate::layout::types::Row::height) is consumed
+/// **verbatim** as the window's pixel height. Rows are stacked downward with
+/// one `padding.window_gap` between consecutive rows, plus a leading
+/// `padding.window_gap` after `padding.up`. The window fills the full
+/// `col_width` horizontally — inter-column gaps come from the slot model in
+/// [`project`].
+///
+/// The same stacking is used for **visible** and **parked** columns. Only the
+/// `x` argument differs (real screen position vs. parked offset). This keeps
+/// window dimensions identical across parked ↔ visible transitions so the
+/// animation engine can interpolate smoothly.
 ///
 /// The resulting [`ActualEntry::rect`](crate::layout::ActualEntry::rect) is the
 /// final HWND rect.
-fn project_column_rows(
+fn stack_column_rows(
     column: &Column,
-    col_x: i32,
+    x: i32,
     monitor_rect: Rect,
     col_width: i32,
     padding: &Padding,
     entries: &mut Vec<ActualEntry>,
 ) {
-    let available_height = monitor_rect.height - padding.up - padding.down;
-    let row_count = column.rows.len();
-    if row_count == 0 {
+    if column.rows.is_empty() {
         return;
     }
 
-    let usable_height = available_height.max(0);
-    let mut y = monitor_rect.y + padding.up;
+    // First row starts one gap below the top padding edge; each subsequent row
+    // starts one gap below the previous row's bottom.
+    let mut y = monitor_rect.y + padding.up + padding.window_gap;
 
-    for (i, window_id) in column.rows.iter().enumerate() {
-        let row_height = compute_row_height(i, row_count, usable_height);
-
+    for row in &column.rows {
         entries.push(ActualEntry {
-            window_id: *window_id,
+            window_id: row.window_id,
             rect: Rect {
-                x: col_x,
-                y: y + padding.window_gap,
+                x,
+                y,
                 width: col_width,
-                height: (row_height - 2 * padding.window_gap).max(0),
+                height: row.height,
             },
         });
-
-        y += row_height;
+        y += row.height + padding.window_gap;
     }
-}
-
-/// Park an off-screen column's rows at a hidden but deterministic position.
-///
-/// Parked windows use the same padding as visible windows, so when a window
-/// transitions from parked → visible (or vice versa), the animation is smooth
-/// and the window dimensions remain consistent.
-///
-/// **Left parking**: `monitor_left - col_width` — for columns scrolled past the left edge.
-/// **Right parking**: `monitor_right` — for columns scrolled past the right edge. Parked positions
-/// are deterministic: one column-width beyond the nearest viewport edge.
-fn park_column_rows(
-    column: &Column,
-    park_x: i32,
-    monitor_rect: Rect,
-    col_width: i32,
-    padding: &Padding,
-    entries: &mut Vec<ActualEntry>,
-) {
-    let available_height = monitor_rect.height - padding.up - padding.down;
-    let row_count = column.rows.len();
-    if row_count == 0 {
-        return;
-    }
-
-    let usable_height = available_height.max(0);
-    let mut y = monitor_rect.y + padding.up;
-
-    for (i, window_id) in column.rows.iter().enumerate() {
-        let height = compute_row_height(i, row_count, usable_height);
-
-        entries.push(ActualEntry {
-            window_id: *window_id,
-            rect: Rect {
-                x: park_x,
-                y: y + padding.window_gap,
-                width: col_width,
-                height: (height - 2 * padding.window_gap).max(0),
-            },
-        });
-
-        y += height;
-    }
-}
-
-/// Compute the pixel height for a row (always equal division).
-///
-/// All rows within a column have equal height. If custom row ratios are
-/// needed in the future, this is the function to modify.
-fn compute_row_height(_index: usize, row_count: usize, usable_height: i32) -> i32 {
-    if row_count == 0 {
-        return 0;
-    }
-    usable_height / row_count as i32
 }
 
 /// Compute the canvas width consumed by all columns using the slot model.
@@ -260,6 +200,7 @@ pub fn column_step_width(column: &Column, window_gap: i32) -> i32 {
 mod tests {
     use super::*;
     use crate::common::WindowId;
+    use crate::layout::types::Row;
 
     fn test_monitor() -> MonitorInfo {
         MonitorInfo {
@@ -282,15 +223,21 @@ mod tests {
 
     #[test]
     fn project_single_column_fills_monitor() {
-        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
+        // Row height pre-distributed by mutation layer: (1080 - 2*4) / 1 = 1072.
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_row(1920, Row::new(WindowId(1), 1072))],
+            0,
+        );
         let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 1);
         let entry = &actual.entries[0];
         assert_eq!(entry.window_id, WindowId(1));
-        // width_px=1920; Slot model: canvas starts at window_gap=4, window fills full width
+        // Slot model: canvas starts at window_gap=4, window fills full width
         // window x = 0 + (4 - 0) = 4
         // window width = 1920 (full column width, no horizontal inset)
+        // y = monitor_y + padding.up + window_gap = 0 + 0 + 4 = 4
+        // height = row.height (consumed verbatim) = 1072
         assert_eq!(entry.rect.x, 4);
         assert_eq!(entry.rect.y, 4);
         assert_eq!(entry.rect.width, 1920);
@@ -300,7 +247,10 @@ mod tests {
     #[test]
     fn project_two_equal_columns() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
+            vec![
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+            ],
             0,
         );
         let actual = project(&layout, &test_monitor(), &test_padding());
@@ -319,10 +269,11 @@ mod tests {
 
     #[test]
     fn project_column_with_two_rows() {
+        // Two rows stacked: each height 534, gap 4.
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(
+            vec![Column::with_rows(
                 1920,
-                vec![WindowId(1), WindowId(2)],
+                vec![Row::new(WindowId(1), 534), Row::new(WindowId(2), 534)],
             )],
             0,
         );
@@ -330,6 +281,7 @@ mod tests {
 
         assert_eq!(actual.entries.len(), 2);
         assert_eq!(actual.entries[0].rect.x, actual.entries[1].rect.x);
+        // row 0 y = 4, row 1 y = 4 + 534 + 4 = 542
         assert!(actual.entries[1].rect.y > actual.entries[0].rect.y);
     }
 
@@ -342,7 +294,10 @@ mod tests {
         // Slot model: col 0 at canvas_x=4, col 1 at canvas_x=4+960+4=968
         // viewport_offset = 968 means viewport starts at col 1's canvas position
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
+            vec![
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+            ],
             968, // offset = start of col 1's slot
         );
         let actual = project(&layout, &monitor, &padding);
@@ -362,9 +317,9 @@ mod tests {
         // Slot model: col 0 at canvas_x=4, col 1 at canvas_x=968, col 2 at canvas_x=1932
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(960, WindowId(1)),
-                Column::new(960, WindowId(2)),
-                Column::new(960, WindowId(3)), // off-screen right
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+                Column::with_row(960, Row::new(WindowId(3), 0)), // off-screen right
             ],
             0,
         );
@@ -383,7 +338,10 @@ mod tests {
     #[test]
     fn canvas_width_two_columns() {
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
+            vec![
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+            ],
             0,
         );
         // Slot model: window_gap(4) + (960+4) + (960+4) = 4 + 964 + 964 = 1932
@@ -397,9 +355,9 @@ mod tests {
         // Positive: 240px + 720px + 960px columns
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(240, WindowId(1)),
-                Column::new(720, WindowId(2)),
-                Column::new(960, WindowId(3)),
+                Column::with_row(240, Row::new(WindowId(1), 0)),
+                Column::with_row(720, Row::new(WindowId(2), 0)),
+                Column::with_row(960, Row::new(WindowId(3), 0)),
             ],
             0,
         );
@@ -429,7 +387,10 @@ mod tests {
             down: 0,
         };
         let layout = VirtualLayout::with_columns(
-            vec![Column::new(960, WindowId(1)), Column::new(960, WindowId(2))],
+            vec![
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+            ],
             0,
         );
         let actual = project(&layout, &test_monitor(), &zero_padding);
@@ -449,11 +410,11 @@ mod tests {
         // viewport at 1932: visible [1932, 3852)
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(960, WindowId(1)),
-                Column::new(960, WindowId(2)),
-                Column::new(960, WindowId(3)),
-                Column::new(960, WindowId(4)),
-                Column::new(960, WindowId(5)),
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+                Column::with_row(960, Row::new(WindowId(3), 0)),
+                Column::with_row(960, Row::new(WindowId(4), 0)),
+                Column::with_row(960, Row::new(WindowId(5), 0)),
             ],
             1932, // offset: start of col 2's slot
         );
@@ -481,9 +442,9 @@ mod tests {
         // viewport at 968 shows col 1 and col 2
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(960, WindowId(1)),
-                Column::new(960, WindowId(2)),
-                Column::new(960, WindowId(3)),
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+                Column::with_row(960, Row::new(WindowId(3), 0)),
             ],
             968, // offset past col 0
         );
@@ -504,9 +465,9 @@ mod tests {
         // Slot model: col 0 at canvas_x=4, col 1 at canvas_x=968, col 2 at canvas_x=1932
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(960, WindowId(1)),
-                Column::new(960, WindowId(2)),
-                Column::new(960, WindowId(3)),
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+                Column::with_row(960, Row::new(WindowId(3), 0)),
             ],
             500, // non-zero offset
         );
@@ -524,26 +485,32 @@ mod tests {
 
     #[test]
     fn project_two_rows_equal_height() {
-        // Positive: two windows in one column are always equal height
+        // Two rows pre-distributed equally by mutation layer.
+        // User formula: (1080 - (2+1)*4) / 2 = 1068 / 2 = 534 each.
         let layout = VirtualLayout::with_columns(
-            vec![Column::with_equal_rows(
+            vec![Column::with_rows(
                 1920,
-                vec![WindowId(1), WindowId(2)],
+                vec![Row::new(WindowId(1), 534), Row::new(WindowId(2), 534)],
             )],
             0,
         );
         let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 2);
-        // Each row = 1080 / 2 = 540, window height = 540 - 2*4 = 532
-        assert_eq!(actual.entries[0].rect.height, 532);
-        assert_eq!(actual.entries[1].rect.height, 532);
+        // row.height consumed verbatim — no inset applied by projection.
+        assert_eq!(actual.entries[0].rect.height, 534);
+        assert_eq!(actual.entries[1].rect.height, 534);
+        // row 0 y = 0 + 0 + 4 = 4
+        assert_eq!(actual.entries[0].rect.y, 4);
+        // row 1 y = 4 + 534 + 4 = 542
+        assert_eq!(actual.entries[1].rect.y, 542);
     }
 
     #[test]
     fn project_single_column_narrow_width() {
         // Positive: narrow 240px column
-        let layout = VirtualLayout::with_columns(vec![Column::new(240, WindowId(1))], 0);
+        let layout =
+            VirtualLayout::with_columns(vec![Column::with_row(240, Row::new(WindowId(1), 0))], 0);
         let actual = project(&layout, &test_monitor(), &test_padding());
 
         assert_eq!(actual.entries.len(), 1);
@@ -562,7 +529,8 @@ mod tests {
     #[test]
     fn canvas_width_single_column() {
         // Positive: single column → window_gap + col_width + window_gap
-        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
+        let layout =
+            VirtualLayout::with_columns(vec![Column::with_row(1920, Row::new(WindowId(1), 0))], 0);
         // 4 + (1920 + 4) = 1928
         assert_eq!(canvas_width(&layout, 4), 1928);
     }
@@ -572,11 +540,11 @@ mod tests {
         // Positive: 5 × 960px columns → 4 + 5*(960+4) = 4 + 4820 = 4824
         let layout = VirtualLayout::with_columns(
             vec![
-                Column::new(960, WindowId(1)),
-                Column::new(960, WindowId(2)),
-                Column::new(960, WindowId(3)),
-                Column::new(960, WindowId(4)),
-                Column::new(960, WindowId(5)),
+                Column::with_row(960, Row::new(WindowId(1), 0)),
+                Column::with_row(960, Row::new(WindowId(2), 0)),
+                Column::with_row(960, Row::new(WindowId(3), 0)),
+                Column::with_row(960, Row::new(WindowId(4), 0)),
+                Column::with_row(960, Row::new(WindowId(5), 0)),
             ],
             0,
         );
@@ -591,16 +559,43 @@ mod tests {
             up: 10,
             down: 40,
         };
-        let layout = VirtualLayout::with_columns(vec![Column::new(1920, WindowId(1))], 0);
+        // Row height pre-distributed: available = 1080 - 10 - 40 = 1030,
+        // (1030 - 2*4) / 1 = 1022.
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_row(1920, Row::new(WindowId(1), 1022))],
+            0,
+        );
         let actual = project(&layout, &test_monitor(), &padding);
 
         assert_eq!(actual.entries.len(), 1);
         let entry = &actual.entries[0];
-        // Column height = 1080, available = 1080 - 10 - 40 = 1030
-        // Row height = 1030, window y = 0 + 10 + 4 = 14
-        // Window height = 1030 - 2*4 = 1022
+        // y = monitor_y + padding.up + window_gap = 0 + 10 + 4 = 14
+        // height = row.height consumed verbatim = 1022
         // Slot model: window x = window_gap = 4, width = 1920 (no horizontal inset)
         assert_eq!(entry.rect.y, 14);
         assert_eq!(entry.rect.height, 1022);
+    }
+
+    #[test]
+    fn project_consumes_row_height_verbatim_uneven() {
+        // Rows need NOT be equal — projection is a pure consumer of row.height.
+        // This test pins the source-of-truth contract: whatever heights the
+        // mutation layer hands us, we stack verbatim.
+        let layout = VirtualLayout::with_columns(
+            vec![Column::with_rows(
+                960,
+                vec![Row::new(WindowId(1), 200), Row::new(WindowId(2), 800)],
+            )],
+            0,
+        );
+        let actual = project(&layout, &test_monitor(), &test_padding());
+
+        assert_eq!(actual.entries.len(), 2);
+        // row 0: y = 0 + 0 + 4 = 4, height = 200 verbatim
+        assert_eq!(actual.entries[0].rect.y, 4);
+        assert_eq!(actual.entries[0].rect.height, 200);
+        // row 1: y = 4 + 200 + 4 = 208, height = 800 verbatim
+        assert_eq!(actual.entries[1].rect.y, 208);
+        assert_eq!(actual.entries[1].rect.height, 800);
     }
 }

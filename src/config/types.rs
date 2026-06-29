@@ -113,6 +113,18 @@ pub struct StmConfig {
     /// Minimum column width in pixels. Columns cannot be resized below this.
     pub min_column_width_px: u32,
 
+    /// Minimum row height in pixels — the floor for any single window's
+    /// allocated height inside a column.
+    ///
+    /// This bounds the maximum number of rows (windows) that can stack inside
+    /// one column: a column cannot grow rows beyond `available_height /
+    /// min_window_height_px`. It is also the lower clamp for future
+    /// drag-resize / IPC continuous-height adjustment of individual rows.
+    ///
+    /// See (`docs/src/dev-guide/layout/mutations.md`) for the height-
+    /// distribution formula and the `merge-column` / `promote` operations.
+    pub min_window_height_px: u32,
+
     /// Padding settings.
     pub padding: Padding,
 
@@ -139,6 +151,7 @@ impl Default for StmConfig {
             columns_per_screen: 4,
             column_width: None,
             min_column_width_px: 640,
+            min_window_height_px: 100,
             padding: Padding::default(),
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
@@ -247,6 +260,9 @@ impl StmConfig {
         }
         if self.min_column_width_px == 0 {
             return Err("min_column_width_px must be positive, got 0".into());
+        }
+        if self.min_window_height_px == 0 {
+            return Err("min_window_height_px must be positive, got 0".into());
         }
         if let Some(cw) = self.column_width
             && self.min_column_width_px > cw
@@ -706,6 +722,7 @@ mod tests {
         assert_eq!(parsed.columns_per_screen, 4);
         assert_eq!(parsed.column_width, None);
         assert_eq!(parsed.min_column_width_px, 640);
+        assert_eq!(parsed.min_window_height_px, 100);
         assert_eq!(parsed.padding.window_gap, 16);
         assert_eq!(parsed.padding.up, 0);
         assert_eq!(parsed.padding.down, 0);
@@ -834,6 +851,7 @@ strategy = "original_slot"
             columns_per_screen: 3,
             column_width: Some(1200),
             min_column_width_px: 400,
+            min_window_height_px: 120,
             padding: Padding {
                 window_gap: 6,
                 up: 10,
@@ -867,6 +885,7 @@ strategy = "original_slot"
         assert_eq!(parsed.columns_per_screen, 3);
         assert_eq!(parsed.column_width, Some(1200));
         assert_eq!(parsed.min_column_width_px, 400);
+        assert_eq!(parsed.min_window_height_px, 120);
         assert_eq!(parsed.padding.window_gap, 6);
         assert_eq!(parsed.padding.up, 10);
         assert_eq!(parsed.padding.down, 40);
@@ -1038,6 +1057,25 @@ strategy = "original_slot"
                 .validate()
                 .unwrap_err()
                 .contains("min_column_width_px")
+        );
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_min_window_height() {
+        // Negative: min_window_height_px == 0 is invalid (would allow zero-
+        // height windows). The validation must reject it with a descriptive
+        // error message naming the field.
+        let config = StmConfig {
+            min_window_height_px: 0,
+            ..StmConfig::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("min_window_height_px"),
+            "error message must name the offending field"
         );
     }
 
@@ -1266,15 +1304,16 @@ default_action = "foobar"
                 easing: variant,
                 ..AnimationConfig::default()
             };
-            let toml_str = toml::to_string(&wrapper).expect(&format!("serialize {expected_kebab}"));
+            let toml_str =
+                toml::to_string(&wrapper).unwrap_or_else(|_| panic!("serialize {expected_kebab}"));
             assert!(
                 toml_str.contains(&format!("easing = \"{expected_kebab}\"")),
                 "serialization should contain 'easing = \"{expected_kebab}\"', got:\n{toml_str}"
             );
 
             // Verify deserialization produces the original variant
-            let parsed: AnimationConfig =
-                toml::from_str(&toml_str).expect(&format!("deserialize {expected_kebab}"));
+            let parsed: AnimationConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|_| panic!("deserialize {expected_kebab}"));
             assert_eq!(
                 parsed.easing, variant,
                 "round-trip mismatch for {expected_kebab}"

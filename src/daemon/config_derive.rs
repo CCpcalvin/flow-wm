@@ -62,6 +62,7 @@ pub(super) fn derive_layout_config(app_config: &StmConfig, monitor: &MonitorInfo
     LayoutConfig {
         column_width,
         min_column_width_px: app_config.min_column_width_px,
+        min_window_height_px: app_config.min_window_height_px,
         padding: LayoutPadding {
             window_gap: app_config.padding.window_gap,
             up: app_config.padding.up,
@@ -156,23 +157,25 @@ mod tests {
 
     /// Build a default [`StmConfig`] with animation enabled and a given duration.
     fn make_enabled_config(duration_ms: u32) -> StmConfig {
-        let mut cfg = StmConfig::default();
-        cfg.animation = AnimationConfig {
-            enabled: true,
-            duration_ms,
-            ..AnimationConfig::default()
-        };
-        cfg
+        StmConfig {
+            animation: AnimationConfig {
+                enabled: true,
+                duration_ms,
+                ..AnimationConfig::default()
+            },
+            ..StmConfig::default()
+        }
     }
 
     /// Build a [`StmConfig`] with animation disabled.
     fn make_disabled_config() -> StmConfig {
-        let mut cfg = StmConfig::default();
-        cfg.animation = AnimationConfig {
-            enabled: false,
-            ..AnimationConfig::default()
-        };
-        cfg
+        StmConfig {
+            animation: AnimationConfig {
+                enabled: false,
+                ..AnimationConfig::default()
+            },
+            ..StmConfig::default()
+        }
     }
 
     // W2-related: verify derive_animator_config with Duration::ZERO sentinel

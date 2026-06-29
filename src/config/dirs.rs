@@ -498,9 +498,8 @@ mod tests {
         unsafe { std::env::remove_var(CONFIG_DIR_ENV) };
         let dir = resolve_config_dir(None);
         // Restore
-        match original {
-            Some(val) => unsafe { std::env::set_var(CONFIG_DIR_ENV, val) },
-            None => {}
+        if let Some(val) = original {
+            unsafe { std::env::set_var(CONFIG_DIR_ENV, val) }
         }
         // The path should end with stm and contain .config
         let path_str = dir.to_string_lossy();

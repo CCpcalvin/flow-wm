@@ -151,9 +151,29 @@ enum DispatchCommands {
     /// Move the focused window in the given direction.
     ///
     /// This is a semantic command — the daemon decides what "move" means
-    /// based on window state (tiled left/right = column swap; floating =
-    /// pixel nudge once supported).
+    /// based on window state and direction:
+    /// - tiled left/right → column swap (cross-column move is deferred);
+    /// - tiled up/down → within-column window swap;
+    /// - floating → pixel nudge (deferred).
     MoveWindow {
+        #[command(subcommand)]
+        direction: MoveDirection,
+    },
+    /// Merge the focused window's row into the adjacent column.
+    ///
+    /// Maps to [`SocketMessage::MergeColumn`]. The focused window is
+    /// detached from its column and appended as a new bottom row of the
+    /// neighbour column; both columns' row heights are redistributed.
+    MergeColumn {
+        #[command(subcommand)]
+        direction: HorizontalDirection,
+    },
+    /// Promote the focused window out of its column into a new standalone column.
+    ///
+    /// Maps to [`SocketMessage::Promote`]. The focused window is extracted
+    /// into a new single-row column placed to the left or right of the
+    /// source column. No-op when the window is already alone in its column.
+    Promote {
         #[command(subcommand)]
         direction: HorizontalDirection,
     },
@@ -253,18 +273,33 @@ enum FocusDirection {
     Down,
 }
 
-/// Horizontal direction for `stm dispatch swap-column|move-window <dir>`.
+/// Horizontal direction for `stm dispatch swap-column|merge-column|promote <dir>`.
 ///
-/// Only left/right is offered: column swaps are inherently horizontal, and
-/// the current `move-window` implementation resolves to a column swap for
-/// tiled windows. When `move-window` gains vertical (within-column) support,
-/// it will switch to a four-way direction enum of its own.
+/// Only left/right is offered: column swaps, merges, and promotes are
+/// inherently horizontal operations between adjacent columns.
 #[derive(Debug, Subcommand)]
 enum HorizontalDirection {
     /// Left.
     Left,
     /// Right.
     Right,
+}
+
+/// Cardinal direction for `stm dispatch move-window <dir>`.
+///
+/// All four directions are accepted: left/right resolve to a column swap
+/// (until a real cross-column move lands), and up/down resolve to a
+/// within-column window swap.
+#[derive(Debug, Subcommand)]
+enum MoveDirection {
+    /// Left.
+    Left,
+    /// Right.
+    Right,
+    /// Up.
+    Up,
+    /// Down.
+    Down,
 }
 
 fn main() {
@@ -480,6 +515,8 @@ fn cmd_dispatch(command: DispatchCommands) -> Result<(), String> {
         DispatchCommands::Focus { direction } => cmd_dispatch_focus(direction),
         DispatchCommands::SwapColumn { direction } => cmd_dispatch_swap_column(direction),
         DispatchCommands::MoveWindow { direction } => cmd_dispatch_move_window(direction),
+        DispatchCommands::MergeColumn { direction } => cmd_dispatch_merge_column(direction),
+        DispatchCommands::Promote { direction } => cmd_dispatch_promote(direction),
         DispatchCommands::ExpandColumn => {
             send_command(SocketMessage::ExpandColumn, "column expanded")
         }
@@ -532,18 +569,57 @@ fn cmd_dispatch_swap_column(direction: HorizontalDirection) -> Result<(), String
 
 /// Send a semantic move-window command to the daemon.
 ///
-/// Maps `stm dispatch move-window left|right` to [`SocketMessage::MoveWindow`].
-/// The daemon translates this into a concrete action based on window state.
-fn cmd_dispatch_move_window(direction: HorizontalDirection) -> Result<(), String> {
+/// Maps `stm dispatch move-window left|right|up|down` to [`SocketMessage::MoveWindow`].
+/// The daemon translates this into a concrete action based on window state
+/// and direction (column swap horizontally, row swap vertically).
+fn cmd_dispatch_move_window(direction: MoveDirection) -> Result<(), String> {
     let msg = match direction {
-        HorizontalDirection::Left => SocketMessage::MoveWindow {
+        MoveDirection::Left => SocketMessage::MoveWindow {
             direction: Direction::Left,
         },
-        HorizontalDirection::Right => SocketMessage::MoveWindow {
+        MoveDirection::Right => SocketMessage::MoveWindow {
             direction: Direction::Right,
+        },
+        MoveDirection::Up => SocketMessage::MoveWindow {
+            direction: Direction::Up,
+        },
+        MoveDirection::Down => SocketMessage::MoveWindow {
+            direction: Direction::Down,
         },
     };
     send_command(msg, "window moved")
+}
+
+/// Send a merge-column command to the daemon.
+///
+/// Maps `stm dispatch merge-column left|right` to [`SocketMessage::MergeColumn`].
+/// The focused window is merged into the adjacent column as a new bottom row.
+fn cmd_dispatch_merge_column(direction: HorizontalDirection) -> Result<(), String> {
+    let msg = match direction {
+        HorizontalDirection::Left => SocketMessage::MergeColumn {
+            direction: Direction::Left,
+        },
+        HorizontalDirection::Right => SocketMessage::MergeColumn {
+            direction: Direction::Right,
+        },
+    };
+    send_command(msg, "column merged")
+}
+
+/// Send a promote command to the daemon.
+///
+/// Maps `stm dispatch promote left|right` to [`SocketMessage::Promote`]. The
+/// focused window is extracted into a new single-row column on the chosen side.
+fn cmd_dispatch_promote(direction: HorizontalDirection) -> Result<(), String> {
+    let msg = match direction {
+        HorizontalDirection::Left => SocketMessage::Promote {
+            direction: Direction::Left,
+        },
+        HorizontalDirection::Right => SocketMessage::Promote {
+            direction: Direction::Right,
+        },
+    };
+    send_command(msg, "window promoted")
 }
 
 /// Send a set-window-mode command to the daemon.
@@ -965,7 +1041,7 @@ mod tests {
             Commands::Dispatch {
                 command:
                     DispatchCommands::MoveWindow {
-                        direction: HorizontalDirection::Left,
+                        direction: MoveDirection::Left,
                     },
             } => {}
             other => panic!("expected Dispatch::MoveWindow::Left, got: {other:?}"),
@@ -979,10 +1055,38 @@ mod tests {
             Commands::Dispatch {
                 command:
                     DispatchCommands::MoveWindow {
-                        direction: HorizontalDirection::Right,
+                        direction: MoveDirection::Right,
                     },
             } => {}
             other => panic!("expected Dispatch::MoveWindow::Right, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_move_window_up() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "move-window", "up"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::MoveWindow {
+                        direction: MoveDirection::Up,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::MoveWindow::Up, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_move_window_down() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "move-window", "down"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::MoveWindow {
+                        direction: MoveDirection::Down,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::MoveWindow::Down, got: {other:?}"),
         }
     }
 
@@ -996,14 +1100,83 @@ mod tests {
         );
     }
 
+    // --- merge-column parsing ---
+
     #[test]
-    fn parse_dispatch_move_window_vertical_fails() {
-        // Negative: move-window currently only accepts left/right (vertical is
-        // deferred — when added it will use its own four-way enum).
-        let result = Cli::try_parse_from(["stm", "dispatch", "move-window", "up"]);
+    fn parse_dispatch_merge_column_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "merge-column", "left"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::MergeColumn {
+                        direction: HorizontalDirection::Left,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::MergeColumn::Left, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_merge_column_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "merge-column", "right"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::MergeColumn {
+                        direction: HorizontalDirection::Right,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::MergeColumn::Right, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_merge_column_vertical_fails() {
+        // Negative: merge-column only accepts left/right (HorizontalDirection).
+        let result = Cli::try_parse_from(["stm", "dispatch", "merge-column", "up"]);
         assert!(
             result.is_err(),
-            "'move-window up' should fail (vertical not yet supported)"
+            "'merge-column up' should fail (only left/right)"
+        );
+    }
+
+    // --- promote parsing ---
+
+    #[test]
+    fn parse_dispatch_promote_left() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "promote", "left"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::Promote {
+                        direction: HorizontalDirection::Left,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::Promote::Left, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_promote_right() {
+        let cli = Cli::try_parse_from(["stm", "dispatch", "promote", "right"]).unwrap();
+        match cli.command {
+            Commands::Dispatch {
+                command:
+                    DispatchCommands::Promote {
+                        direction: HorizontalDirection::Right,
+                    },
+            } => {}
+            other => panic!("expected Dispatch::Promote::Right, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dispatch_promote_vertical_fails() {
+        // Negative: promote only accepts left/right (HorizontalDirection).
+        let result = Cli::try_parse_from(["stm", "dispatch", "promote", "down"]);
+        assert!(
+            result.is_err(),
+            "'promote down' should fail (only left/right)"
         );
     }
 

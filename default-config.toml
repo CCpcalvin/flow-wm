@@ -27,6 +27,12 @@ columns_per_screen = 4
 # Minimum column width in pixels. Columns cannot be resized below this.
 min_column_width_px = 640
 
+# Minimum row height in pixels — the floor for any single window's allocated
+# height inside a column. Bounds the maximum number of rows that can stack
+# inside one column, and the lower clamp for future drag / IPC continuous
+# height adjustment of individual rows.
+min_window_height_px = 100
+
 # Padding / spacing settings in pixels.
 #
 # - window_gap: uniform gap between all elements (windows and screen edges)

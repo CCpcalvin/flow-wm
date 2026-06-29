@@ -35,7 +35,7 @@ impl ScrollTilingManager {
                 let rows: Vec<serde_json::Value> = col
                     .rows
                     .iter()
-                    .map(|wid| serde_json::json!(wid.0))
+                    .map(|row| serde_json::json!({ "window_id": row.window_id.0, "height_px": row.height }))
                     .collect();
                 serde_json::json!({
                     "index": i,

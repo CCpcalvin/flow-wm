@@ -118,7 +118,8 @@ impl ScrollTilingManager {
             SocketMessage::SetWindow { mode } => self.dispatch_set_window(*mode),
             SocketMessage::ToggleMonocle => self.dispatch_toggle_monocle(),
             SocketMessage::PlaceAbove => unimplemented_command("place_above"),
-            SocketMessage::Promote => unimplemented_command("promote"),
+            SocketMessage::Promote { direction } => self.dispatch_promote_window(*direction),
+            SocketMessage::MergeColumn { direction } => self.dispatch_merge_column(*direction),
             SocketMessage::CloseWindow => self.dispatch_close_window(),
 
             // --- Queries ---
@@ -284,6 +285,45 @@ impl ScrollTilingManager {
         }
     }
 
+    /// Dispatch a **column merge** in the given horizontal direction.
+    ///
+    /// Calls [`ScrollingSpace::merge_column`](crate::workspace::ScrollingSpace::merge_column),
+    /// which detaches the focused window from its column and appends it as a
+    /// new bottom row of the neighbour column. Both columns' row heights are
+    /// redistributed to equal shares. Returns an error when there is no
+    /// neighbour, the direction is vertical, or the merge would violate
+    /// `min_window_height_px`.
+    fn dispatch_merge_column(&mut self, dir: Direction) -> SocketResponse {
+        match self.active_scrolling_mut().merge_column(dir) {
+            Some(diff) => {
+                self.animate_layout(&diff);
+                SocketResponse::Ok
+            }
+            None => SocketResponse::Error {
+                message: "cannot merge column in that direction".into(),
+            },
+        }
+    }
+
+    /// Dispatch a **window promote** in the given horizontal direction.
+    ///
+    /// Calls [`ScrollingSpace::promote_window`](crate::workspace::ScrollingSpace::promote_window),
+    /// which extracts the focused window from its column into a new
+    /// single-row column placed to the left or right of the source. No-op
+    /// (returns error) when the focused window is already alone in its
+    /// column.
+    fn dispatch_promote_window(&mut self, dir: Direction) -> SocketResponse {
+        match self.active_scrolling_mut().promote_window(dir) {
+            Some(diff) => {
+                self.animate_layout(&diff);
+                SocketResponse::Ok
+            }
+            None => SocketResponse::Error {
+                message: "cannot promote window in that direction".into(),
+            },
+        }
+    }
+
     /// Dispatch a semantic "move window" command.
     ///
     /// This is the daemon-side translation of the high-level
@@ -292,20 +332,25 @@ impl ScrollTilingManager {
     ///
     /// - **Tiled, left/right** → a column swap (delegates to
     ///   [`dispatch_swap_column`](Self::dispatch_swap_column)), since moving
-    ///   a tiled window horizontally *is* swapping its column.
-    /// - **Tiled, up/down** → a within-column window swap *(deferred)*.
+    ///   a tiled window horizontally *is* swapping its column. A proper
+    ///   cross-column move that preserves row membership is deferred.
+    /// - **Tiled, up/down** → a within-column window swap (delegates to
+    ///   [`dispatch_swap_window`](Self::dispatch_swap_window)).
     /// - **Floating, any direction** → a pixel nudge by a configurable shift
     ///   *(deferred)*.
     ///
-    /// For now only the tiled left/right path is wired, so `move-window`
-    /// behaves identically to `swap-column`. The branching structure is kept
-    /// as a single delegation point so that floating and up/down support can
-    /// be added later without changing the IPC protocol or keybindings.
+    /// The branching structure is kept as a single delegation point so that
+    /// floating and a real cross-column move can be added later without
+    /// changing the IPC protocol or keybindings.
     fn dispatch_move_window(&mut self, dir: Direction) -> SocketResponse {
         // TODO(floating): inspect the focused window's state and branch:
         //   - floating → nudge by config move_shift
-        //   - tiled up/down → dispatch_swap_window(dir)
-        self.dispatch_swap_column(dir)
+        // TODO(move-cross-column): real Left/Right move that preserves row
+        //   membership is deferred — for now Left/Right == swap-column.
+        match dir {
+            Direction::Up | Direction::Down => self.dispatch_swap_window(dir),
+            Direction::Left | Direction::Right => self.dispatch_swap_column(dir),
+        }
     }
 
     /// Dispatch a scroll-left command.

@@ -80,10 +80,10 @@ fn debug_titles(json: &serde_json::Value) -> String {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|w| {
+                .map(|w| {
                     let title = w["title"].as_str().unwrap_or("?");
                     let col = w["state"]["Tiling"]["Active"]["col"].as_i64();
-                    Some(format!("{title}@col{col:?}"))
+                    format!("{title}@col{col:?}")
                 })
                 .collect::<Vec<_>>()
                 .join(", ")

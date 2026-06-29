@@ -792,8 +792,8 @@ impl WindowRegistry {
         virtual_layout: &crate::layout::types::VirtualLayout,
     ) {
         for (col_idx, column) in virtual_layout.columns.iter().enumerate() {
-            for (row_idx, window_id) in column.rows.iter().enumerate() {
-                if let Some(window) = self.windows.get_mut(&window_id.0) {
+            for (row_idx, row) in column.rows.iter().enumerate() {
+                if let Some(window) = self.windows.get_mut(&row.window_id.0) {
                     window.state = WindowState::Tiling(TilingState::Active {
                         col: col_idx,
                         row: row_idx,
