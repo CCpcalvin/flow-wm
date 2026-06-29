@@ -103,6 +103,27 @@ operate on the **OS-focused window** (`registry.focused()`). The window that
 was focused before the transition is the same window that's focused after — the
 transition changes the window's *space*, not its *focus*.
 
+### Three entry points share one float-placement primitive
+
+The float-placement core (`register_float` in
+[`src/daemon/dispatch.rs`](../../src/daemon/dispatch.rs)) — add to
+`FloatingSpace`, mirror the rect into `FloatingState::Active`, and arm
+`add_float_hwnd` tracking — is reached from three call sites, so a float always
+ends up identically wired regardless of how it became a float:
+
+| Entry point | Trigger | Float rect |
+|-------------|---------|------------|
+| **`set-window float` / `cycle`** | explicit user toggle of a tiled window | centered (`centered_float_rect`) |
+| **`on_window_created` (runtime)** | a new window the rule pipeline classifies as `Float` | centered (`centered_float_rect`) — identical to a toggle |
+| **startup scan** | a `Float`-classified window already open when the daemon launched | its **current on-screen position** (adopted in place, not re-centred) |
+
+The runtime path exists because classification runs at creation time: without
+it, a rule-classified float would land in the registry yet stay absent from
+`FloatingSpace` (so workspace switching would strand it) and borderless until
+the user toggled it. The startup path adopts in place rather than animating to
+avoid interrupting the in-flight tiling init animation
+(`InterruptPolicy::RetargetFromCurrent`).
+
 ### Tile → Float: Pop to Center
 
 1. `ScrollingSpace::remove_window(focused)` — removes the tile from the

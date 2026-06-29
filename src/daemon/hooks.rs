@@ -22,8 +22,9 @@
 
 use crate::common::WindowId;
 use crate::registry::hooks::remove_float_hwnd;
-use crate::registry::types::{ReclassifyResult, VisibilityChange};
+use crate::registry::types::{FloatingState, ReclassifyResult, VisibilityChange, WindowState};
 use crate::registry::win32 as registry_win32;
+use windows::Win32::Foundation::HWND;
 
 use super::types::ScrollTilingManager;
 
@@ -38,16 +39,23 @@ impl ScrollTilingManager {
     ///      one `column_shift`, moves focus to the new window, and ensures it
     ///      is visible.
     ///    - `animate_layout(applied)` — animates the resulting layout change.
-    /// 3. If the window was floating, ignored, or skipped: no action needed.
+    /// 3. If the window was classified as floating: complete the float setup
+    ///    that an explicit `set-window float` performs — place it into the
+    ///    active [`FloatingSpace`](crate::workspace::FloatingSpace) at a
+    ///    centered rect, arm float-location tracking, animate, and attach a
+    ///    border. Without this, a rule-classified float would be tracked in the
+    ///    registry but invisible to workspace switching and borderless until
+    ///    the user toggled it. See (`docs/src/dev-guide/floating-space.md`).
+    /// 4. Ignored or already-tracked windows: no action needed.
     ///
     /// # Return value
     ///
     /// Returns `true` if [`handle_created`](crate::registry::WindowRegistry::handle_created)
-    /// processed the window (classified it as tiling, floating, or ignored).
-    /// Returns `false` if classification **failed** — the window is not yet
-    /// ready (not visible, no title, styles not finalized). The caller should
-    /// add the hwnd to the pending-creations retry list when this returns
-    /// `false`.
+    /// processed the window (classified it as tiling, floating, or ignored, or
+    /// it was already tracked). Returns `false` if classification **failed** —
+    /// the window is not yet ready (not visible, no title, styles not
+    /// finalized). The caller should add the hwnd to the pending-creations
+    /// retry list when this returns `false`.
     ///
     /// # Why classification can fail
     ///
@@ -67,48 +75,83 @@ impl ScrollTilingManager {
     /// [`ScrollingSpace::insert_window`](crate::workspace::ScrollingSpace::insert_window)
     /// for the full algorithm.
     pub(super) fn on_window_created(&mut self, hwnd: isize) -> bool {
+        // `was_tracked` distinguishes a FRESH registration (this call just
+        // classified the window) from a de-duplicated duplicate CREATE for an
+        // already-managed window. handle_created early-returns None on its
+        // `contains_key` gate for the latter; without this flag a freshly
+        // classified float (which still needs FloatingSpace init) would be
+        // indistinguishable from a duplicate of an already-initialised float.
+        let was_tracked = self.registry.is_tracked(hwnd);
+
+        // Tiling: handle_created returns Some only for a freshly-registered
+        // tiling window.
         if let Some(window_id) = self.registry.handle_created(hwnd) {
             let applied = self.active_scrolling_mut().insert_window(window_id);
             self.animate_layout(&applied);
+            self.reconcile_new_window_focus(hwnd);
+            return true;
+        }
 
-            // If this newly-registered window is the live OS foreground, sync
-            // the registry's focus tracker to it before refreshing its border.
-            // This fixes late-titled apps (Windows Terminal, recovered via
-            // NAMECHANGE/SHOW): their EVENT_SYSTEM_FOREGROUND either arrived
-            // before the window was tracked (so `set_focused` no-op'd on an
-            // untracked HWND) or hasn't arrived yet, leaving `focused()`
-            // pointing at the previous window and the new foreground border
-            // resolving to Unfocused. The live `GetForegroundWindow` query is
-            // authoritative and cheap.
-            let prev_focus = self.registry.focused().map(|id| id.0);
-            let now_foreground = registry_win32::get_foreground_window() == Some(hwnd);
-            if now_foreground {
-                self.registry.set_focused(hwnd);
-            }
+        // handle_created returned None. Sub-cases:
+        //  (1) freshly classified as Floating → needs FloatingSpace/border init;
+        //  (2) freshly classified as Ignored → tracked, no action, no retry;
+        //  (3) duplicate CREATE for an already-managed window → no action;
+        //  (4) classification failed (not visible / no title / styles pending)
+        //      → caller retries via pending_creations.
+        //
+        // Only a freshly-registered active float (case 1) requires work. It is
+        // identifiable as: not previously tracked, now in the registry as
+        // Floating(Active). register_float + animate complete the float setup
+        // that set_window_to_float performs for an explicit toggle, so an
+        // init-classified float ends up identical to a toggled one.
+        let fresh_float = !was_tracked
+            && self
+                .registry
+                .get_window(HWND(hwnd as *mut _))
+                .map(|w| matches!(w.state, WindowState::Floating(FloatingState::Active { .. })))
+                .unwrap_or(false);
 
-            // Border overlay: attach (or skip) based on the freshly-classified
-            // state. Tiling/Floating → attach; Ignored → no-op.
-            self.refresh_border_for(hwnd);
+        if fresh_float {
+            let float_rect = self.centered_float_rect(WindowId(hwnd));
+            let float_actual = self.register_float(WindowId(hwnd), float_rect);
+            self.animate_workspaces(&[(float_actual, 0)]);
+            self.reconcile_new_window_focus(hwnd);
+        }
 
-            // If focus moved to the new window, recolor the previous foreground
-            // (Focused → Unfocused). Mirrors `on_focus_changed`'s two-window
-            // refresh so the handoff is visually consistent.
-            if now_foreground
-                && let Some(prev) = prev_focus
-                && prev != hwnd
-            {
-                self.refresh_border_for(prev);
-            }
-            true
-        } else {
-            // Classification failed — either the window isn't ready yet
-            // (not visible, no title) or it was classified as floating/
-            // ignored (already registered). The caller adds the hwnd to
-            // the pending-creations retry list. For already-registered
-            // windows, handle_created returns None immediately on retry
-            // via its `contains_key` de-duplication gate, so the retry is
-            // cheap and the window is dropped after the retry limit — harmless.
-            false
+        // Report whether the window ended up tracked (classified) so the caller
+        // retries only genuinely-not-ready windows (case 4).
+        self.registry.is_tracked(hwnd)
+    }
+
+    /// Reconcile OS focus and border overlays for a freshly-tracked window
+    /// (tiling or floating), shared by both branches of [`on_window_created`].
+    ///
+    /// If the window is the live OS foreground, sync the registry's focus
+    /// tracker to it before refreshing its border so it paints `Focused`
+    /// immediately — late-titled apps (Windows Terminal, recovered via
+    /// NAMECHANGE/SHOW) have their `EVENT_SYSTEM_FOREGROUND` fire before they
+    /// are tracked, leaving `focused()` stale and the new foreground border
+    /// resolving to `Unfocused`. The live `GetForegroundWindow` query is
+    /// authoritative and cheap. Then recolor the previous foreground
+    /// (`Focused → Unfocused`), mirroring [`on_focus_changed`]'s two-window
+    /// refresh so the handoff is visually consistent.
+    fn reconcile_new_window_focus(&mut self, hwnd: isize) {
+        let prev_focus = self.registry.focused().map(|id| id.0);
+        let now_foreground = registry_win32::get_foreground_window() == Some(hwnd);
+        if now_foreground {
+            self.registry.set_focused(hwnd);
+        }
+
+        // Border overlay: attach (or skip) based on the freshly-classified
+        // state. Tiling/Floating → attach; Ignored → no-op.
+        self.refresh_border_for(hwnd);
+
+        // If focus moved to the new window, recolor the previous foreground.
+        if now_foreground
+            && let Some(prev) = prev_focus
+            && prev != hwnd
+        {
+            self.refresh_border_for(prev);
         }
     }
 

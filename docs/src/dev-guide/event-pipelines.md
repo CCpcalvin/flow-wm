@@ -33,7 +33,11 @@ sequenceDiagram
         STM->>Layout: insert_window(window_id)
         Layout-->>STM: AppliedLayout
         STM->>Anim: animate_layout(applied)
-    else Floating / Ignored / Not ready
+    else Classified as floating
+        STM->>FS: register_float(focused, centered_rect)
+        FS-->>STM: ActualLayout (floats)
+        STM->>Anim: animate_workspaces([(float_actual, 0)])
+    else Ignored / Not ready
         Note over STM: No layout action
     end
 ```
@@ -45,12 +49,19 @@ The full pipeline for a created window:
 2. `on_window_created()` calls `registry.handle_created(hwnd)`, which runs the
    full classification pipeline: visibility check, title check, Alt-Tab visibility,
    owner check, rule evaluation. Returns `Some(WindowId)` if the window is
-   classified as tiling; `None` if floating, ignored, or not yet ready.
+   classified as tiling; `None` otherwise (the handler then inspects the
+   registry to distinguish a fresh float from ignored / not-ready).
 3. If tiling, `ScrollingSpace::insert_window()` places the new column
    immediately after the focused window, shifts right-side columns, and moves
    focus to the new window.
-4. `animate_layout()` converts the `AppliedLayout` into animation targets and
-   submits them to the `WindowAnimator`.
+4. If freshly classified as floating, the handler completes the same float setup
+   an explicit `set-window float` performs — `centered_rect` →
+   `FloatingSpace::add` → registry state `Floating(Active { rect })` →
+   `add_float_hwnd` tracking → `animate_workspaces` → border attach — so a
+   rule-classified float is indistinguishable from a toggled one. See
+   [Floating Space](./floating-space.md).
+5. `animate_layout()` / `animate_workspaces()` convert the result into animation
+   targets and submit them to the `WindowAnimator`.
 
 If classification fails (window not yet visible or titled), the hwnd is added to
 `pending_creations` and retried on subsequent loop iterations until it passes or
@@ -140,7 +151,7 @@ animation if the columns are the same width.
 | Owned by another window (tooltip, etc.) | Skip |
 | Already tracked (de-dup) | Skip |
 | Matches an ignore rule (maximized, fullscreen, explicit) | Register as `Ignored`, no layout |
-| Classified as floating | Register as `Floating`, no layout |
+| Classified as floating | Register as `Floating`, add to active `FloatingSpace` (centered), animate, attach border |
 | Classified as tiling | Register as `Tiling::Active`, `insert_window()` next to focused, animate |
 
 ### Destroyed (`EVENT_OBJECT_DESTROY`)

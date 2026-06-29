@@ -25,14 +25,16 @@ use std::time::Duration;
 
 use crate::animation::WindowAnimator;
 use crate::animation::backend::win32::Win32Backend;
-use crate::common::WindowId;
+use crate::common::{Rect, WindowId};
 use crate::config::dirs::history_rules_path_in;
 use crate::config::history::HistoryStore;
 use crate::config::types::{StmConfig, WindowRulesConfig};
 use crate::ipc::transport::PipeServer;
 use crate::layout::types::MonitorInfo;
+use crate::registry::types::{FloatingState, WindowState};
 use crate::registry::{WindowRegistry, hooks, win32 as registry_win32};
 use crate::workspace::{Monitor, ScrollingSpace, Workspace, WorkspaceId};
+use windows::Win32::Foundation::HWND;
 
 use super::animation::animate_layout_raw;
 use super::config_derive;
@@ -270,9 +272,63 @@ impl ScrollTilingManager {
             pending_creations: Vec::new(),
             float_resume_deadline: None,
         };
+        // Adopt pre-existing float-classified windows (found during the init
+        // scan) into workspace 1's FloatingSpace, at their current on-screen
+        // position. Without this they'd be tracked in the registry but absent
+        // from FloatingSpace (so workspace switching would strand them) and
+        // borderless (refresh_all_border_styles below would seat a border at
+        // their zero placeholder rect). No animation: a separate animate call
+        // would interrupt the in-flight tiling init animation
+        // (InterruptPolicy::RetargetFromCurrent). The windows are already where
+        // they should be, so adoption-in-place is both safe and non-disruptive.
+        manager.populate_existing_floats();
         // Initial border overlay attach for windows found during the scan.
-        // Idempotent and O(N) where N = tracked windows.
+        // Idempotent and O(N) where N = tracked windows. Runs after
+        // populate_existing_floats so float overlays seat at the adopted rect.
         manager.refresh_all_border_styles();
         Ok(manager)
+    }
+
+    /// Adopt every pre-existing float-classified window into the active
+    /// workspace's [`FloatingSpace`](crate::workspace::FloatingSpace).
+    ///
+    /// Mirrors the float setup that [`on_window_created`](super::ScrollTilingManager::on_window_created)
+    /// performs for a freshly-classified float, but for windows that were
+    /// already open when the daemon launched. Each float is registered at its
+    /// **current on-screen position** (via [`current_visible_rect`], falling
+    /// back to [`centered_float_rect`](Self::centered_float_rect)) rather than
+    /// being yanked to centre — the daemon adopting an existing window should
+    /// not move it. No animation is submitted: the tiling init animation is
+    /// already in flight, and a second batch would replace it
+    /// (`InterruptPolicy::RetargetFromCurrent`).
+    fn populate_existing_floats(&mut self) {
+        // Snapshot hwnds up front: register_float takes &mut self, so we can't
+        // hold a borrow of the registry's window iterator across it.
+        let float_hwnds: Vec<isize> = self
+            .registry
+            .windows()
+            .filter(|w| matches!(w.state, WindowState::Floating(FloatingState::Active { .. })))
+            .map(|w| w.hwnd.0 as isize)
+            .collect();
+
+        for hwnd in float_hwnds {
+            let wid = WindowId(hwnd);
+            let rect = self
+                .current_visible_rect(hwnd)
+                .unwrap_or_else(|| self.centered_float_rect(wid));
+            self.register_float(wid, rect);
+        }
+    }
+
+    /// Read a window's current on-screen position as a visible rect, or `None`
+    /// if it can't be queried (window destroyed mid-scan, GetWindowRect
+    /// failure). The visible rect is what [`FloatingSpace`](crate::workspace::FloatingSpace)
+    /// stores — `GetWindowRect`'s window rect is translated back through the
+    /// window's measured [`InvisibleBounds`](crate::common::InvisibleBounds).
+    fn current_visible_rect(&self, hwnd: isize) -> Option<Rect> {
+        let hwnd_handle = HWND(hwnd as *mut _);
+        let window_rect = registry_win32::get_window_rect(hwnd_handle).ok()?;
+        let window = self.registry.get_window(hwnd_handle)?;
+        Some(window.invisible_bounds.window_to_visible(window_rect))
     }
 }

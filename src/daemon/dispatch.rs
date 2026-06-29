@@ -7,7 +7,7 @@
 //! - Individual `dispatch_*` helper methods for each command category.
 //! - Helper functions for unimplemented commands.
 
-use crate::common::{Direction, Size, WindowId};
+use crate::common::{Direction, Rect, Size, WindowId};
 use crate::config::dirs::history_rules_path_in;
 use crate::config::types::WindowAction;
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
@@ -1020,14 +1020,13 @@ impl ScrollTilingManager {
 
     /// Transition a window from tiling to floating.
     ///
-    /// Removes the window from the active [`ScrollingSpace`], computes a
-    /// centered float rect (preferring the window's `last_natural_size`,
-    /// falling back to the configured or built-in default), adds it to the
-    /// active [`FloatingSpace`], and animates both the post-removal scrolling
+    /// Removes the window from the active [`ScrollingSpace`], places it into the
+    /// active [`FloatingSpace`] at a centered rect (via [`register_float`] /
+    /// [`centered_float_rect`]), and animates both the post-removal scrolling
     /// layout and the updated floating layout in a single batch.
     ///
-    /// Registry state is set to `Floating(Active { rect })` via direct field
-    /// write (the `state` field on [`Window`](crate::registry::types::Window)
+    /// Registry state is set to `Floating(Active { rect })` inside
+    /// [`register_float`] (the `state` field on [`Window`](crate::registry::types::Window)
     /// is `pub`).
     fn set_window_to_float(&mut self, focused: WindowId) -> SocketResponse {
         // a) Remove from scrolling. remove_window handles focus fallback
@@ -1044,7 +1043,35 @@ impl ScrollTilingManager {
             .update_tiling_slots_from_layout(&source_virtual);
         self.registry.update_tiled_rects(&source_actual);
 
-        // c) Compute the floating rect.
+        // c) Compute the centered float rect and place the window into the
+        //    floating space. register_float also mirrors the rect into the
+        //    registry state and arms float-location tracking.
+        let float_rect = self.centered_float_rect(focused);
+        let float_actual = self.register_float(focused, float_rect);
+
+        // d) Animate: single batch, both at y_offset 0 (same workspace).
+        let batches = [(source_actual, 0), (float_actual, 0)];
+        self.animate_workspaces(&batches);
+
+        // Re-sync the toggled window's border: the registry state just flipped
+        // Tiling→Floating, so refresh_border_for re-resolves color (a focused
+        // toggler stays blue under focus-priority) and re-seats the overlay to
+        // the float outset geometry — the tile-era overlay would otherwise sit
+        // at the stale tile rect until the next drag fires store_float_rect.
+        self.refresh_border_for(focused.0);
+
+        SocketResponse::Ok
+    }
+
+    /// Compute a centered floating rect for `focused` on the active monitor's
+    /// work area.
+    ///
+    /// Prefers the window's measured `last_natural_size`; falls back to the
+    /// user's explicit `[floating]` pixel size, then the built-in fraction+cap
+    /// fallback. The pure centering math lives in
+    /// [`FloatingSpace::centered_rect`]; this helper just resolves the
+    /// preferred size. See (`docs/src/dev-guide/floating-space.md`).
+    pub(super) fn centered_float_rect(&self, focused: WindowId) -> Rect {
         let work_area = self.active_scrolling().monitor().work_area;
         // Each dimension uses the user's explicit pixel value when set, else
         // the built-in fallback (fraction of work area, capped). The cap only
@@ -1066,36 +1093,35 @@ impl ScrollTilingManager {
             Some(size) => size,
             None => config_default,
         };
-        let float_rect = FloatingSpace::centered_rect(preferred, work_area);
+        FloatingSpace::centered_rect(preferred, work_area)
+    }
 
-        // d) Add to floating space.
-        self.active_workspace_mut()
-            .floating
-            .add(focused, float_rect);
-        let float_actual = self.active_workspace_mut().floating.to_actual_layout();
-
-        // e) Update registry state: Tiling → Floating(Active { rect }).
+    /// Place `focused` into the active workspace's [`FloatingSpace`] at `rect`.
+    ///
+    /// The shared primitive behind every "a window becomes a float" path:
+    /// - [`set_window_to_float`] (the `set-window` toggle), which first removes
+    ///   the window from the scrolling space and animates both layouts.
+    /// - [`on_window_created`](super::hooks::ScrollTilingManager::on_window_created)'s
+    ///   fresh-float branch, for a window classified as float at creation.
+    /// - the startup scan's adoption of pre-existing floats in
+    ///   [`new`](Self::new).
+    ///
+    /// Adds the entry to [`FloatingSpace`], mirrors `rect` into the registry's
+    /// [`FloatingState::Active`] so the two copies never drift, and registers
+    /// the window for float-location tracking via [`add_float_hwnd`]. Returns
+    /// the resulting floating actual layout (a snapshot of every float in this
+    /// workspace) so the caller can animate it.
+    ///
+    /// `add_float_hwnd` is called before the caller's `animate_workspaces` so
+    /// the animator's float-suppression can detect the window as a tracked
+    /// float and arm itself.
+    pub(super) fn register_float(&mut self, focused: WindowId, rect: Rect) -> ActualLayout {
+        self.active_workspace_mut().floating.add(focused, rect);
         if let Some(window) = self.registry.get_window_mut(HWND(focused.0 as *mut _)) {
-            window.state = WindowState::Floating(FloatingState::Active { rect: float_rect });
+            window.state = WindowState::Floating(FloatingState::Active { rect });
         }
-
-        // Track this window as an active-workspace float so the
-        // LOCATIONCHANGE callback forwards its future user drags. Done before
-        // the animate so the (Batch 2) float-suppression can detect it.
         add_float_hwnd(focused.0);
-
-        // f) Animate: single batch, both at y_offset 0 (same workspace).
-        let batches = [(source_actual, 0), (float_actual, 0)];
-        self.animate_workspaces(&batches);
-
-        // Re-sync the toggled window's border: the registry state just flipped
-        // Tiling→Floating, so refresh_border_for re-resolves color (a focused
-        // toggler stays blue under focus-priority) and re-seats the overlay to
-        // the float outset geometry — the tile-era overlay would otherwise sit
-        // at the stale tile rect until the next drag fires store_float_rect.
-        self.refresh_border_for(focused.0);
-
-        SocketResponse::Ok
+        self.active_workspace_mut().floating.to_actual_layout()
     }
 
     /// Transition a window from floating to tiling.
