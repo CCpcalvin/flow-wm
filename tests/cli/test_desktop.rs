@@ -486,6 +486,44 @@ pub fn send_ipc_ignore(pipe: &str, msg: &scrolling_tiling_manager::ipc::message:
     let _ = transport::send_message_to(pipe, msg);
 }
 
+/// Send an IPC command, retrying through transient named-pipe connection
+/// refusals, and return the daemon's response.
+///
+/// The daemon's pipe server accepts one client at a time. Between a client
+/// disconnect and the next background `ConnectNamedPipe` there is a brief
+/// window where new connections are refused (`ConnectionRefused`). A single
+/// `transport::send_message_to` that lands in that window fails, and
+/// fire-and-forget helpers like [`send_ipc_ignore`] drop the error — silently
+/// losing the command (fatal for back-to-back commands such as a `FocusLeft`
+/// issued right after a query). Retrying across the refusal window (~500 ms
+/// budget) reliably delivers the message and surfaces the `SocketResponse` so
+/// callers can assert `Ok` directly for no-op / success cases.
+pub fn send_ipc_retry(
+    pipe: &str,
+    msg: &scrolling_tiling_manager::ipc::message::SocketMessage,
+) -> Result<scrolling_tiling_manager::ipc::message::SocketResponse, String> {
+    use scrolling_tiling_manager::ipc::message::SocketResponse;
+    use scrolling_tiling_manager::ipc::transport;
+
+    const ATTEMPTS: u32 = 20;
+    const SLEEP: std::time::Duration = std::time::Duration::from_millis(25);
+
+    let mut last_err = String::new();
+    for _ in 0..ATTEMPTS {
+        match transport::send_message_to(pipe, msg) {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                last_err = format!("{e}");
+                std::thread::sleep(SLEEP);
+            }
+        }
+    }
+    Err(format!(
+        "IPC send failed after {ATTEMPTS} attempts ({} ms total): {last_err}",
+        ATTEMPTS * 25
+    ))
+}
+
 /// Send `stm query layout actual` and return the JSON response.
 ///
 /// Returns the actual (projected) layout: pixel-level rects for each window

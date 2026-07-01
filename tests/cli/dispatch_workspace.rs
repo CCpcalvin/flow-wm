@@ -49,13 +49,13 @@
 use std::time::Duration;
 
 use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
-use scrolling_tiling_manager::ipc::transport;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{
-    DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, start_test_daemon, unique_title,
+    DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, send_ipc_retry, start_test_daemon,
+    unique_title,
 };
 
 /// Delay after creating windows to let hooks fire and the daemon tile them.
@@ -70,40 +70,6 @@ const HOOK_SETTLE: Duration = Duration::from_millis(1500);
 /// trip completes; the padding mirrors `SWAP_SETTLE` in `dispatch_swap.rs`.
 const WORKSPACE_SETTLE: Duration = Duration::from_millis(500);
 
-// ── IPC helper ──────────────────────────────────────────────────────
-
-/// Send an IPC command, retrying through transient connection refusals.
-///
-/// The daemon's named-pipe server accepts one client at a time. Between a
-/// client disconnection and the next background `ConnectNamedPipe` there is a
-/// brief window where new connections are refused with `ConnectionRefused`.
-/// A single [`transport::send_message_to`] call that lands in that window
-/// fails — and the test harness's `send_ipc_ignore` helper silently drops
-/// that error, losing the message. Retrying through the window (≈500 ms
-/// budget) reliably delivers back-to-back commands.
-///
-/// Returns the final [`SocketResponse`] so callers can assert `Ok` directly
-/// for no-op / success cases.
-fn send_ipc_retry(pipe: &str, msg: &SocketMessage) -> Result<SocketResponse, String> {
-    const ATTEMPTS: u32 = 20;
-    const SLEEP: Duration = Duration::from_millis(25);
-
-    let mut last_err = String::new();
-    for _ in 0..ATTEMPTS {
-        match transport::send_message_to(pipe, msg) {
-            Ok(resp) => return Ok(resp),
-            Err(e) => {
-                last_err = format!("{e}");
-                std::thread::sleep(SLEEP);
-            }
-        }
-    }
-    Err(format!(
-        "IPC send failed after {ATTEMPTS} attempts ({} ms total): {last_err}",
-        ATTEMPTS * 25
-    ))
-}
-
 // ── Layout inspection helpers ───────────────────────────────────────
 
 /// Collect every window-id integer currently in the active workspace's
@@ -111,6 +77,11 @@ fn send_ipc_retry(pipe: &str, msg: &SocketMessage) -> Result<SocketResponse, Str
 ///
 /// Used to check whether a specific hwnd is present on whatever workspace is
 /// currently active.
+///
+/// Each row in the `columns[].rows` array is serialized as an *object*
+/// `{"window_id": <id>, "height_px": <px>}` (see `VirtualLayout` /
+/// `AppliedLayout` serialization), so the id lives under the `window_id` key —
+/// not as a bare integer.
 fn active_window_ids(json: &serde_json::Value) -> Vec<i64> {
     json["columns"]
         .as_array()
@@ -119,7 +90,9 @@ fn active_window_ids(json: &serde_json::Value) -> Vec<i64> {
                 .flat_map(|col| {
                     col["rows"]
                         .as_array()
-                        .map(|rows| rows.iter().filter_map(|r| r.as_i64()).collect::<Vec<_>>())
+                        .map(|rows| {
+                            rows.iter().filter_map(|r| r["window_id"].as_i64()).collect::<Vec<_>>()
+                        })
                         .unwrap_or_default()
                 })
                 .collect()
@@ -130,6 +103,34 @@ fn active_window_ids(json: &serde_json::Value) -> Vec<i64> {
 /// Return the `window_count` field of a `query_layout_virtual` payload.
 fn active_window_count(json: &serde_json::Value) -> i64 {
     json["window_count"].as_i64().unwrap_or(0)
+}
+
+/// Poll the active workspace's virtual layout until exactly `expected` windows
+/// appear inside columns, or time out.
+///
+/// After a window is created, the daemon's hook registers it in the window
+/// registry (bumping `window_count`) before the classification → tiling step
+/// assigns it to a column. A query taken in that gap therefore sees
+/// `window_count: N, columns: []`. A test that then indexes into the column
+/// ids (e.g. `ids[0]`) panics with `index out of bounds: len 0`. Polling until
+/// the windows actually appear in columns removes that race from pre-conditions
+/// without relying on a fixed `thread::sleep`.
+fn wait_until_windows_tiled(pipe: &str, expected: usize) -> Result<serde_json::Value, String> {
+    const ATTEMPTS: u32 = 40;
+    const SLEEP: Duration = Duration::from_millis(50);
+
+    let mut last = String::new();
+    for _ in 0..ATTEMPTS {
+        let json = query_layout_virtual(pipe)?;
+        if active_window_ids(&json).len() == expected {
+            return Ok(json);
+        }
+        last = format!("{json:?}");
+        std::thread::sleep(SLEEP);
+    }
+    Err(format!(
+        "timed out waiting for {expected} windows to be tiled (last layout: {last})"
+    ))
 }
 
 /// Cast a window handle to the same integer form used by the layout JSON
@@ -188,10 +189,13 @@ fn move_to_active_workspace_is_noop() {
 
     let title = unique_title("MoveToSelf");
     let _w = TestWindow::create(&title).expect("create window");
-    std::thread::sleep(HOOK_SETTLE);
 
-    // Snapshot the active workspace's layout before the command.
-    let before = query_layout_virtual(&pipe).expect("query layout before");
+    // Wait until the created window is tiled into a column, not merely
+    // registered. The create hook bumps `window_count` before the classifier
+    // assigns a column, so a fixed sleep can catch `window_count: 1, columns:
+    // []` in between and panic on `ids_before[0]` below. Polling closes that
+    // race (the daemon also needs the hook thread to run the classifier).
+    let before = wait_until_windows_tiled(&pipe, 1).expect("window tiled before move");
     assert_eq!(
         active_window_count(&before),
         1,

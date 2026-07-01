@@ -23,12 +23,11 @@
 use std::time::Duration;
 
 use scrolling_tiling_manager::ipc::message::SocketMessage;
-use scrolling_tiling_manager::ipc::transport;
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{
-    DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, query_windows, start_test_daemon,
-    unique_title,
+    DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, query_windows, send_ipc_retry,
+    start_test_daemon, unique_title,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -39,11 +38,24 @@ fn hwnd_id(w: &TestWindow) -> i64 {
 }
 
 /// Send a `FocusLeft` IPC command to move focus one column left.
+///
+/// Retries through the named-pipe refusal window (see `send_ipc_retry`) so the
+/// command is not silently dropped if it lands between a prior client
+/// disconnect and the daemon's next `ConnectNamedPipe` — losing it would leave
+/// focus on the wrong window and fail the test for a transport reason, not a
+/// product reason. The response is ignored: `FocusLeft` at the leftmost column
+/// legitimately no-ops, and the caller asserts the resulting focus via a
+/// follow-up query.
 fn focus_left(pipe: &str) {
-    let _ = transport::send_message_to(pipe, &SocketMessage::FocusLeft);
+    let _ = send_ipc_retry(pipe, &SocketMessage::FocusLeft);
 }
 
 /// Collect all window-ids currently in the virtual layout, in column order.
+///
+/// Each row in the `columns[].rows` array is serialized as an *object*
+/// `{"window_id": <id>, "height_px": <px>}` (see `VirtualLayout` /
+/// `AppliedLayout` serialization), so the id lives under the `window_id` key —
+/// not as a bare integer.
 fn layout_window_ids(json: &serde_json::Value) -> Vec<i64> {
     json["columns"]
         .as_array()
@@ -54,7 +66,7 @@ fn layout_window_ids(json: &serde_json::Value) -> Vec<i64> {
                 .as_array()
                 .expect("rows array")
                 .iter()
-                .filter_map(|r| r.as_i64())
+                .filter_map(|r| r["window_id"].as_i64())
         })
         .collect()
 }
