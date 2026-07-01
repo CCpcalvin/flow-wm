@@ -3,6 +3,8 @@ name = "scrolling-tiling-manager"
 version = "0.1.0"
 edition = "2024"
 description = "A scrolling, infinite-horizontal-canvas tiling window manager for Windows"
+license = "MIT"
+repository = "https://github.com/CCpcalvin/scrolling-tiling-manager"
 
 [[bin]]
 name = "stmd"

@@ -61,4 +61,4 @@ See the [Developer Guide](docs/src/dev-guide/README.md) for the full architectur
 
 ## License
 
-All rights reserved.
+Licensed under the [MIT License](LICENSE).
