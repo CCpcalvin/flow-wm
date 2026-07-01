@@ -1,0 +1,15 @@
+# Test-harness window rules for the integration-test daemon.
+#
+# Every window the tests create (class `StmTestClass`, exe `cli-*.exe`, title
+# `StmTest-*`) matches no rule in any layer of the classification pipeline
+# (user -> learned -> default). Without the override below the classifier
+# falls back to the compiled default (`default_action = "float"`), so no test
+# window would ever tile and every integration assertion expecting tiled
+# columns would see `columns: []`.
+#
+# Setting the fallback to "tile" makes the test daemon tile unknown windows,
+# which is what the integration tests assume. This file is embedded via
+# `include_str!` in `tests/cli/test_desktop.rs` and written into a per-test
+# config directory passed to `stmd --config <dir>`.
+
+default_action = "tile"

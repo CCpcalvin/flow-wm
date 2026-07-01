@@ -299,6 +299,37 @@ pub fn start_test_daemon_with_extra_args(
         .env("STM_PIPE_NAME", pipe)
         .creation_flags(DETACHED);
 
+    // Per-test filesystem key derived from the (unique) pipe name. Used for
+    // both the isolated config directory and the log file below so parallel
+    // tests never collide on disk.
+    let safe: String = pipe
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+
+    // Point the daemon at an isolated, per-test config directory seeded with a
+    // rules file that tiles unknown windows.
+    //
+    // The compiled default is `default_action = "float"` (see `src/config/
+    // types.rs` and `default-stm-rules.toml`). Every window the tests create
+    // (class `StmTestClass`, exe `cli-*.exe`, title `StmTest-*`) matches NO
+    // rule at any layer, so without this override the classifier falls back to
+    // `float` and no test window ever tiles — every integration assertion that
+    // expects tiled columns would see `columns: []`. A caller that explicitly
+    // passes its own `--config` in `extra_args` wins.
+    const TEST_RULES_TOML: &str = include_str!("fixtures/stm-rules.toml");
+    let config_overridden = extra_args.contains(&"--config");
+    if !config_overridden {
+        let config_dir = std::env::temp_dir().join(format!("stm-test-config-{safe}"));
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| format!("failed to create test config dir: {e}"))?;
+        let rules_path = config_dir.join("stm-rules.toml");
+        std::fs::write(&rules_path, TEST_RULES_TOML)
+            .map_err(|e| format!("failed to write test stm-rules.toml: {e}"))?;
+        eprintln!("[test] stmd config dir -> {}", config_dir.display());
+        cmd.arg("--config").arg(&config_dir);
+    }
+
     // Redirect the daemon log away from the user's real `~/.config/stm/logs/`
     // daily log (shared with any live daemon, so reading it back per-test is
     // racy). The pipe name is unique per test, so it keys a unique temp log;
@@ -306,10 +337,6 @@ pub fn start_test_daemon_with_extra_args(
     // passes its own `--log-file` in `extra_args` wins.
     let already_redirected = extra_args.contains(&"--log-file");
     if !already_redirected {
-        let safe: String = pipe
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
         let log_path = std::env::temp_dir().join(format!("stmd-test-{safe}.log"));
         eprintln!("[test] stmd log -> {}", log_path.display());
         cmd.arg("--log-file").arg(log_path);
