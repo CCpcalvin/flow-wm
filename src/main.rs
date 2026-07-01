@@ -15,7 +15,8 @@ use std::path::Path;
 use clap::Parser;
 
 use scrolling_tiling_manager::config::{
-    dirs, init_config_dir, load_app_config, load_default_rules, load_rules_config,
+    WindowRulesConfig, dirs, init_config_dir, load_app_config, load_default_rules,
+    load_rules_config,
 };
 use scrolling_tiling_manager::daemon::ScrollTilingManager;
 use scrolling_tiling_manager::logging;
@@ -101,8 +102,21 @@ fn run(args: Args) -> Result<(), String> {
     // CODE is the single source of truth: every field carries a serde default
     // (see `config::defaults`), so the user's `stm.toml` may be partial or even
     // empty. There is no shipped-defaults TOML merged at runtime.
-    let app_config = load_app_config(&dirs::user_app_config_path_in(&config_dir));
-    let user_rules = load_rules_config(&dirs::user_rules_path_in(&config_dir));
+    //
+    // `stm.toml` is authoritative: a parse/IO error means the user's stated
+    // preferences are unreadable, so refuse to start rather than silently
+    // running with defaults. The `stm` client surfaces the same error to the
+    // user's terminal via a pre-flight check before we get here; this is the
+    // daemon-side backstop for a config change in the race window.
+    let app_config = load_app_config(&dirs::user_app_config_path_in(&config_dir))
+        .map_err(|e| format!("stmd: {e}"))?;
+    // `stm-rules.toml` is advisory: a parse error falls back to default rules
+    // rather than aborting — the daemon stays usable (classifies windows as float).
+    let user_rules =
+        load_rules_config(&dirs::user_rules_path_in(&config_dir)).unwrap_or_else(|e| {
+            log::warn!("stmd: {e}; using default window rules");
+            WindowRulesConfig::default()
+        });
     let default_rules = load_default_rules();
 
     // 4. Resolve desktop name for hook thread (debug builds pass it through;

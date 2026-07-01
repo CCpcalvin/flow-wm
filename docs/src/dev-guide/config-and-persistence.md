@@ -88,13 +88,40 @@ Creates the config directory and writes default files if they do not already exi
 
 ### 2. Load -- `load_app_config` / `load_rules_config`
 
-Reads TOML from disk and deserializes into the respective config struct. All load functions are **resilient** -- they never panic or propagate errors:
+Reads TOML from disk and deserializes into the respective config struct. Load functions distinguish three failure modes and **propagate** parse/I/O errors rather than hiding them: a missing file is benign (fresh install), but a broken file is surfaced so the user learns their config is unreadable instead of silently running on defaults.
 
 | Condition | Behavior |
 |-----------|----------|
-| File not found | Returns `Default`, logs at `debug` |
-| Parse error | Returns `Default`, logs error with parse failure |
-| Success | Validates semantically, logs warnings but still returns loaded config |
+| File not found | `Ok(Default)` -- benign (fresh install), logged at `debug` |
+| Parse / I/O error | `Err(StmError::Config)` carrying `<path>: <reason>` -- caller decides policy |
+| Success | `Ok(parsed)`; for `stm.toml`, `validate()` logs warnings but still returns the config |
+
+A private generic core (`load_toml`) and a `ConfigLoadError { Missing, Io, Parse }` enum sit behind both loaders, so the file-backed read/parse path is shared rather than duplicated.
+
+#### Load-error policy (daemon vs. client)
+
+The two processes apply different policy because the detached daemon's stdout/stderr are discarded -- it cannot tell the user anything. So `stm start` runs a **pre-flight** check on the user's terminal *before* spawning `stmd`, and the daemon performs its own authoritative load as a backstop:
+
+| | `stm.toml` failure | `stm-rules.toml` failure |
+|---|---|---|
+| **`stm` client** (pre-flight, user terminal) | fatal: refuse to spawn | warning on stderr + continue |
+| **`stmd` daemon** (authoritative load) | fatal: `run()` Err -> `exit(1)` | non-fatal: warn + default rules |
+
+Both call the **same compiled** `load_app_config`/`load_rules_config` (one crate), so the pre-flight verdict matches the daemon's -- no desync. Rules failures are non-fatal everywhere because rules are advisory and the daemon is usable with defaults. The daemon's fatal load catches a config edit landing in the spawn race window (the pipe is never created, so `stm` reports a startup timeout rather than silently starting on defaults).
+
+```mermaid
+flowchart TD
+    START["stm start"] --> PRE["preflight_config_check<br/>on user terminal"]
+    PRE -->|"stm.toml Err"| REFUSE["refuse: print why + where"]
+    PRE -->|"stm-rules.toml Err"| WARN["warn on stderr, continue"]
+    PRE -->|"stm.toml OK"| SPAWN["spawn stmd"]
+    WARN --> SPAWN
+    SPAWN --> AUTH["stmd authoritative load<br/>(same compiled loaders)"]
+    AUTH -->|"stm.toml OK"| RUN["daemon runs"]
+    AUTH -->|"stm.toml Err in race window"| DIE["exit 1: pipe never created"]
+```
+
+The future `stm reload` will reuse these same loaders for per-file independent reload with rollback, replacing the current `reload_config` stub in daemon dispatch.
 
 After loading `stm.toml`, the daemon calls `StmConfig::validate()` to catch semantically invalid values (negative padding, `min_column_width_px` exceeding `column_width`). Validation failures produce warnings but do not prevent the daemon from running.
 
