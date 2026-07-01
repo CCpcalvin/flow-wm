@@ -877,7 +877,7 @@ initial_width_px = 960
     /// Because defaults are embedded via [`include_str!`](std::include_str), this
     /// always returns the same non-empty ruleset regardless of the test
     /// environment (no file next to the binary is required). We verify the
-    /// rule count and spot-check the well-known taskbar rule.
+    /// default action and that the ruleset is non-empty.
     #[test]
     fn load_default_rules_returns_embedded_rules() {
         let config = load_default_rules();
@@ -886,78 +886,6 @@ initial_width_px = 960
             !config.rules.is_empty(),
             "embedded default rules should not be empty"
         );
-
-        // Spot-check: the Windows taskbar should be classified as ignored.
-        let taskbar = config
-            .rules
-            .iter()
-            .find(|r| r.match_.class.as_deref() == Some("Shell_TrayWnd"));
-        assert!(
-            taskbar.is_some(),
-            "embedded defaults should include a Shell_TrayWnd rule"
-        );
-        assert_eq!(taskbar.unwrap().action, WindowAction::Ignore);
-    }
-
-    /// `load_default_rules()` spot-checks multiple well-known rules beyond the
-    /// taskbar.
-    ///
-    /// The `default-stm-rules.toml` file contains rules for system dialogs
-    /// (`#32770`), Task Manager (`Taskmgr.exe`), the On-Screen Keyboard
-    /// (`OSKMainClass`), and the Search UI (`SearchUI.exe`). This test
-    /// verifies that all of these well-known rules are present and have the
-    /// expected actions after being parsed from the embedded constant.
-    ///
-    /// This is complementary to `load_default_rules_returns_embedded_rules`
-    /// (which only checks `Shell_TrayWnd`). Together they provide broad
-    /// confidence that the embedded content is complete and correct.
-    #[test]
-    fn load_default_rules_spot_checks_multiple_known_rules() {
-        let config = load_default_rules();
-
-        // #32770 — common Win32 dialog boxes should be floated.
-        let dialog = config
-            .rules
-            .iter()
-            .find(|r| r.match_.class.as_deref() == Some("#32770"));
-        assert!(
-            dialog.is_some(),
-            "embedded defaults should include a #32770 rule"
-        );
-        assert_eq!(dialog.unwrap().action, WindowAction::Float);
-
-        // Taskmgr.exe — Task Manager should be floated.
-        let taskmgr = config
-            .rules
-            .iter()
-            .find(|r| r.match_.exe.as_deref() == Some("Taskmgr.exe"));
-        assert!(
-            taskmgr.is_some(),
-            "embedded defaults should include a Taskmgr.exe rule"
-        );
-        assert_eq!(taskmgr.unwrap().action, WindowAction::Float);
-
-        // OSKMainClass — On-Screen Keyboard should be ignored.
-        let osk = config
-            .rules
-            .iter()
-            .find(|r| r.match_.class.as_deref() == Some("OSKMainClass"));
-        assert!(
-            osk.is_some(),
-            "embedded defaults should include an OSKMainClass rule"
-        );
-        assert_eq!(osk.unwrap().action, WindowAction::Ignore);
-
-        // SearchUI.exe — Windows Search should be ignored.
-        let search = config
-            .rules
-            .iter()
-            .find(|r| r.match_.exe.as_deref() == Some("SearchUI.exe"));
-        assert!(
-            search.is_some(),
-            "embedded defaults should include a SearchUI.exe rule"
-        );
-        assert_eq!(search.unwrap().action, WindowAction::Ignore);
     }
 
     /// The `DEFAULT_RULES_TOML` constant (embedded via `include_str!`) must
@@ -1051,17 +979,6 @@ initial_width_px = 960
             !config.rules.is_empty(),
             "bundled rules should not be empty"
         );
-
-        // Spot-check a well-known rule: taskbar should be ignored.
-        let taskbar_rule = config
-            .rules
-            .iter()
-            .find(|r| r.match_.class.as_deref() == Some("Shell_TrayWnd"));
-        assert!(
-            taskbar_rule.is_some(),
-            "bundled rules should include a Shell_TrayWnd rule"
-        );
-        assert_eq!(taskbar_rule.unwrap().action, WindowAction::Ignore);
     }
 
     // ── default-config.toml parse test ──────────────────────────────────

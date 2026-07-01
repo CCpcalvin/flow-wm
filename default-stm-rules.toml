@@ -51,18 +51,53 @@ action = "ignore"
 # Common Win32 dialog boxes (Open/Save As, Properties, etc.)
 [[rules]]
 match = { class = "#32770" }
-action = "float"
+action = "ignore"
+
+# Predefined Win32 child controls inside a `#32770` dialog — its buttons
+# (`Button`) and text labels (`Static`).
+#
+# These leak stm's pre-filter: a child control is attached to its dialog via a
+# *parent* (WS_CHILD) link, not an *owner* (GW_OWNER) link, so the `has_owner`
+# gate returns false and the control passes every check. Without these rules
+# each control is classified as a separate floating window and gets a border
+# overlay drawn over it — the "dialog buttons disappear" bug.
+#
+# Class-only match: these are universal predefined control classes (no real
+# top-level window uses them) and the class is assigned at creation, so it is
+# race-free. A general WS_CHILD check in the pre-filter would subsume these;
+# they are the targeted stopgap for the controls dialogs actually use.
+[[rules]]
+match = { class = "Button" }
+action = "ignore"
+
+[[rules]]
+match = { class = "Static" }
+action = "ignore"
 
 # Run dialog
 [[rules]]
 match = { class = "ComboBox", exe = "Explorer.exe" }
-action = "float"
+action = "ignore"
 
 # ── Explorer ────────────────────────────────────────────────────────
 
 # Windows Explorer file open/save dialogs
 [[rules]]
 match = { exe = "explorer.exe", class = "CabinetWClass" }
+action = "ignore"
+
+# Explorer's internal content tab — the surface where files actually render
+# when navigating. A child of CabinetWClass that passes stm's pre-filters;
+# floating it draws the border overlay over the file list (blank-page bug).
+[[rules]]
+match = { exe = "explorer.exe", class = "ShellTabWindowClass" }
+action = "ignore"
+
+# WinUI non-client input sink — invisible helper for pointer/pen routing,
+# created by Explorer, Settings, Photos, and any WinUI 3 host. Never a real
+# app window. (Same rationale as the DesktopWindowContentBridge rule above.)
+[[rules]]
+match = { class = "InputNonClientPointerSource" }
 action = "ignore"
 
 # ── Task Manager ────────────────────────────────────────────────────
@@ -138,3 +173,13 @@ action = "ignore"
 [[rules]]
 match = { exe = "chrome.exe", title = "Picture in picture" }
 action = "float"
+
+# ── WindowsTerminal.exe ──────
+
+# For Windows Terminal on git commit / Create Git Worktree 
+[[rules]]
+action = "float"
+
+[rules.match]
+exe = "WindowsTerminal.exe"
+class = "CASCADIA_HOSTING_WINDOW_CLASS"

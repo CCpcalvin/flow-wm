@@ -279,7 +279,13 @@ impl WindowRegistry {
         );
 
         self.windows.insert(key, window);
-        log::info!("registered window: {:?} ({})", info.hwnd, info.exe);
+        log::info!(
+            "registered window: {:?} ({}) class={:?} title={:?}",
+            info.hwnd,
+            info.exe,
+            info.class,
+            info.title,
+        );
     }
 
     /// Removes a window from the registry.
