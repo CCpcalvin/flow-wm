@@ -341,20 +341,24 @@ mod tests {
 
     #[test]
     fn rect_is_empty() {
-        assert!(Rect {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 10
-        }
-        .is_empty());
-        assert!(!Rect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1
-        }
-        .is_empty());
+        assert!(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 10
+            }
+            .is_empty()
+        );
+        assert!(
+            !Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1
+            }
+            .is_empty()
+        );
     }
 
     // --- Additional common type tests ---
@@ -362,25 +366,29 @@ mod tests {
     #[test]
     fn rect_is_empty_negative_width() {
         // Negative: negative width → empty
-        assert!(Rect {
-            x: 0,
-            y: 0,
-            width: -5,
-            height: 100
-        }
-        .is_empty());
+        assert!(
+            Rect {
+                x: 0,
+                y: 0,
+                width: -5,
+                height: 100
+            }
+            .is_empty()
+        );
     }
 
     #[test]
     fn rect_is_empty_negative_height() {
         // Negative: negative height → empty
-        assert!(Rect {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: -1
-        }
-        .is_empty());
+        assert!(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: -1
+            }
+            .is_empty()
+        );
     }
 
     #[test]

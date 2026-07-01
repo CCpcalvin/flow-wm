@@ -270,8 +270,8 @@ impl ScrollTilingManager {
             // manual-reset connect event stays signaled until `start_accept`
             // resets it (after the session), so the 0-timeout poll is
             // non-consuming and cheap.
-            let ipc_connected = signaled == 1
-                || unsafe { WaitForSingleObject(connect_handle, 0) } == WAIT_OBJECT_0;
+            let ipc_connected =
+                signaled == 1 || unsafe { WaitForSingleObject(connect_handle, 0) } == WAIT_OBJECT_0;
 
             if ipc_connected {
                 // Inner loop: handle this client's messages.

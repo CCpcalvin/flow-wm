@@ -794,7 +794,10 @@ mod tests {
         // so we get Some(0ms) floored to Some(1). An exact-zero instant
         // would give None (checked_duration_since returns None when equal),
         // but that timing is not reproducible in a test.
-        assert!(result.is_some(), "deadline at now should yield Some(1), got {result:?}");
+        assert!(
+            result.is_some(),
+            "deadline at now should yield Some(1), got {result:?}"
+        );
         assert_eq!(result.unwrap(), 1);
     }
 
