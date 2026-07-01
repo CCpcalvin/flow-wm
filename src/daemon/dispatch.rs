@@ -7,18 +7,22 @@
 //! - Individual `dispatch_*` helper methods for each command category.
 //! - Helper functions for unimplemented commands.
 
+use std::time::Duration;
+
 use crate::common::{Direction, Rect, Size, WindowId};
-use crate::config::dirs::history_rules_path_in;
+use crate::config::dirs::{history_rules_path_in, user_app_config_path_in, user_rules_path_in};
 use crate::config::types::WindowAction;
+use crate::config::{load_app_config, load_rules_config};
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
 use crate::layout::projection;
-use crate::layout::types::ActualLayout;
+use crate::layout::types::{ActualLayout, AppliedLayout};
 use crate::registry::hooks::{add_float_hwnd, remove_float_hwnd, set_float_hwnds};
 use crate::registry::types::{FloatingState, TilingState, WindowState};
 use crate::registry::win32 as registry_win32;
 use crate::workspace::{FloatingSpace, WorkspaceId, workspace_y_offset};
 use windows::Win32::Foundation::HWND;
 
+use super::config_derive;
 use super::types::ScrollTilingManager;
 
 // Built-in fallback policy for a floating window's default size when the user
@@ -129,7 +133,7 @@ impl ScrollTilingManager {
             SocketMessage::QueryState => unimplemented_command("query_state"),
 
             // --- Config mutation ---
-            SocketMessage::ReloadConfig => unimplemented_command("reload_config"),
+            SocketMessage::ReloadConfig => self.dispatch_reload_config(),
             SocketMessage::CheckConfig => unimplemented_command("check_config"),
             SocketMessage::SetConfigValue { .. } => unimplemented_command("set_config_value"),
             SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
@@ -1170,6 +1174,102 @@ impl ScrollTilingManager {
         // geometry is animator-owned, so only color/z-order are re-asserted
         // here (refresh_border_for leaves tile overlay geometry untouched).
         self.refresh_border_for(focused.0);
+
+        SocketResponse::Ok
+    }
+
+    /// Reload `stm.toml` (and `stm-rules.toml`) from disk and apply the
+    /// live-reloadable fields to the running daemon.
+    ///
+    /// Layout state is preserved: window order, columns, focus, and the scroll
+    /// viewport are untouched. Only geometry constants, borders, and animation
+    /// timing are re-derived and re-applied. See
+    /// (`docs/src/dev-guide/config-and-persistence.md`) for the full reload
+    /// policy and the live-vs-structural field distinction.
+    ///
+    /// Uses **validate-before-apply**: the new config is loaded and validated
+    /// before any state is touched, so a parse/validation error leaves the
+    /// daemon running on its previous config with nothing to roll back.
+    /// `stm-rules.toml` is reloaded non-fatally — a rules failure warns and
+    /// keeps the current rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketResponse::Error`] only when `stm.toml` cannot be loaded
+    /// or fails validation. The window-rule file never fails the command.
+    fn dispatch_reload_config(&mut self) -> SocketResponse {
+        // Load + validate BEFORE touching any state (validate-before-apply:
+        // nothing to roll back if this fails).
+        let new_config = match load_app_config(&user_app_config_path_in(&self.config_dir)) {
+            Ok(config) => config,
+            Err(error) => {
+                return SocketResponse::Error {
+                    message: format!("{error}"),
+                };
+            }
+        };
+        // Explicit re-validation is intentional: `load_app_config` only logs a
+        // warning on validation failure (it still returns Ok), so re-validating
+        // here is what turns a bad config into a hard error. Do not
+        // "de-duplicate" this without making the loader itself propagate
+        // validation failures.
+        if let Err(reason) = new_config.validate() {
+            return SocketResponse::Error { message: reason };
+        }
+
+        // Re-derive layout geometry once (same params for every workspace).
+        // MonitorInfo is Copy, so this releases the &self borrow cheaply.
+        let monitor_info = *self.active_scrolling().monitor();
+        let layout_config = config_derive::derive_layout_config(&new_config, &monitor_info);
+        // When `column_width` is None it is auto-derived from this (active)
+        // monitor — consistent with startup, which derives once from the primary
+        // monitor. Per-display widths for multi-monitor setups are future work.
+        let columns_per_screen = new_config.columns_per_screen;
+
+        // Publish the new config first: animate_layout and the border refresh
+        // below read `self.config.borders` live.
+        self.config = new_config;
+
+        // Reconfigure every workspace's geometry, preserving each space's
+        // virtual_layout (window columns/order/focus/viewport). Only the active
+        // workspace is on-screen; parked ones re-project silently and animate
+        // on their next switch.
+        for monitor in &mut self.monitors {
+            for workspace in monitor.workspaces_mut() {
+                workspace.scrolling.reconfigure(
+                    layout_config.column_width,
+                    layout_config.min_column_width_px,
+                    layout_config.min_window_height_px,
+                    layout_config.padding,
+                    columns_per_screen,
+                );
+            }
+        }
+
+        // Animate the active workspace into its new geometry (windows slide to
+        // the new gaps) and sync registry slots/rects.
+        let applied = AppliedLayout {
+            actual_layout: self.active_scrolling().actual_layout().clone(),
+            virtual_layout: self.active_scrolling().virtual_layout().clone(),
+        };
+        self.animate_layout(&applied);
+
+        // Re-assert border colors/thickness for the new border config.
+        self.refresh_all_border_styles();
+
+        // Apply the new animation timing.
+        self.animator
+            .update_config(config_derive::derive_animator_config(
+                &self.config,
+                Duration::ZERO,
+            ));
+
+        // Reload window rules (non-fatal): a broken rules file warns and keeps
+        // the current rules so the rest of the reload still takes effect.
+        match load_rules_config(&user_rules_path_in(&self.config_dir)) {
+            Ok(rules) => self.registry.set_user_rules(rules),
+            Err(error) => log::warn!("stmd: {error}; keeping current window rules"),
+        }
 
         SocketResponse::Ok
     }

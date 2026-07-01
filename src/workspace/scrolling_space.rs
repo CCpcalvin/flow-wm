@@ -90,13 +90,55 @@ pub struct ScrollingSpace {
     monocle_saved_width: Option<(usize, i32)>,
 }
 
+/// Derive the cached [`MutationConfig`] — including the slot-ladder bounds
+/// `max_n` and `abs_max_width` — from the monitor geometry and layout params.
+///
+/// Shared by [`ScrollingSpace::new`] and [`ScrollingSpace::reconfigure`] so the
+/// ladder derivation has a single source. See
+/// (`docs/src/dev-guide/config-and-persistence.md`).
+fn build_mutation_config(
+    monitor: &MonitorInfo,
+    column_width: u32,
+    min_column_width_px: u32,
+    min_window_height_px: u32,
+    padding: Padding,
+    columns_per_screen: u32,
+) -> MutationConfig {
+    let gap = padding.window_gap;
+    let cw = column_width as i32;
+    let monitor_w = monitor.work_area.width;
+    let monitor_h = monitor.work_area.height;
+    // abs_max_width = monitor_width − 2*gap (monocle width / ladder top).
+    let abs_max_width = monitor_w - 2 * gap;
+    // column_shift = column_width + window_gap — one slot step.
+    let shift = cw + gap;
+    // max_n: full slot steps between base width and abs_max_width.
+    let max_n: u32 = if shift > 0 && abs_max_width > cw {
+        ((abs_max_width - cw) / shift) as u32
+    } else {
+        0
+    };
+
+    MutationConfig {
+        monitor_width: monitor_w,
+        monitor_height: monitor_h,
+        min_window_height_px,
+        column_width,
+        min_column_width_px,
+        max_n,
+        abs_max_width,
+        padding,
+        columns_per_screen,
+    }
+}
+
 impl ScrollingSpace {
     /// Create a new scrolling space for the given monitor.
     ///
     /// `column_width` is the base column width in pixels (the `n = 0` rung of
     /// the expand/shrink slot ladder). `min_column_width_px` is the lower
     /// bound for free-form drag-resize. The slot-ladder derived values
-    /// (`max_n`, `abs_max_width`) are computed here from `column_width`, the
+    /// (`max_n`, `abs_max_width`) are derived (see `build_mutation_config`) from `column_width`, the
     /// monitor width, and `window_gap`, then stored in the space's
     /// [`MutationConfig`] — every mutation reuses the same ladder.
     ///
@@ -117,33 +159,15 @@ impl ScrollingSpace {
         padding: Padding,
         columns_per_screen: u32,
     ) -> Self {
-        let gap = padding.window_gap;
-        let cw = column_width as i32;
-        let monitor_w = monitor.work_area.width;
-        let monitor_h = monitor.work_area.height;
-        // abs_max_width = monitor_width − 2*gap (monocle width / ladder top).
-        let abs_max_width = monitor_w - 2 * gap;
-        // column_shift = column_width + window_gap — one slot step.
-        let shift = cw + gap;
-        // max_n: full slot steps between base width and abs_max_width.
-        let max_n: u32 = if shift > 0 && abs_max_width > cw {
-            ((abs_max_width - cw) / shift) as u32
-        } else {
-            0
-        };
-
         let virtual_layout = VirtualLayout::new();
-        let config = MutationConfig {
-            monitor_width: monitor_w,
-            monitor_height: monitor_h,
-            min_window_height_px,
+        let config = build_mutation_config(
+            &monitor,
             column_width,
             min_column_width_px,
-            max_n,
-            abs_max_width,
+            min_window_height_px,
             padding,
             columns_per_screen,
-        };
+        );
         let actual = projection::project(&virtual_layout, &monitor, &config.padding);
 
         Self {
@@ -154,6 +178,38 @@ impl ScrollingSpace {
             config,
             monocle_saved_width: None,
         }
+    }
+
+    /// Re-derive this space's cached geometry from new layout params without
+    /// disturbing window placement.
+    ///
+    /// Recomputes [`MutationConfig`] (including the `max_n`/`abs_max_width`
+    /// ladder bounds) and re-projects the pixel layout from the **existing**
+    /// [`VirtualLayout`] — columns, window order, focus, viewport offset, and
+    /// monocle state are all preserved. Used by config hot-reload; see
+    /// (`docs/src/dev-guide/config-and-persistence.md`).
+    ///
+    /// Returns the freshly projected [`ActualLayout`] so the caller can animate
+    /// windows into their new positions (e.g. after a `window_gap` change).
+    pub fn reconfigure(
+        &mut self,
+        column_width: u32,
+        min_column_width_px: u32,
+        min_window_height_px: u32,
+        padding: Padding,
+        columns_per_screen: u32,
+    ) -> ActualLayout {
+        self.config = build_mutation_config(
+            &self.monitor,
+            column_width,
+            min_column_width_px,
+            min_window_height_px,
+            padding,
+            columns_per_screen,
+        );
+        self.actual =
+            projection::project(&self.virtual_layout, &self.monitor, &self.config.padding);
+        self.actual.clone()
     }
 
     /// Get a reference to the current virtual layout.
@@ -750,6 +806,169 @@ mod tests {
         assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
         assert_eq!(engine.virtual_layout().columns.len(), 3);
         assert_eq!(engine.virtual_layout().window_count(), 3);
+    }
+
+    #[test]
+    fn reconfigure_preserves_window_order_focus_and_count() {
+        let mut engine = engine_with_three_columns();
+        // Snapshot the column -> window mapping and focus before reconfiguring.
+        let order_before: Vec<WindowId> = engine
+            .virtual_layout()
+            .columns
+            .iter()
+            .map(|c| c.rows[0].window_id)
+            .collect();
+        let focused_before = engine.last_focused_window();
+
+        // Reconfigure with materially different geometry params.
+        let new_padding = Padding {
+            window_gap: 40,
+            up: 0,
+            down: 0,
+        };
+        engine.reconfigure(800, 300, 90, new_padding, 2);
+
+        // Virtual layout (columns + window order) is untouched.
+        assert_eq!(engine.virtual_layout().columns.len(), order_before.len());
+        let order_after: Vec<WindowId> = engine
+            .virtual_layout()
+            .columns
+            .iter()
+            .map(|c| c.rows[0].window_id)
+            .collect();
+        assert_eq!(
+            order_after, order_before,
+            "reconfigure must preserve column order"
+        );
+        // The focus cursor is untouched.
+        assert_eq!(engine.last_focused_window(), focused_before);
+    }
+
+    #[test]
+    fn reconfigure_updates_gap_and_reprojects_actual() {
+        let mut engine = engine_with_three_columns();
+        let first_before = engine
+            .actual_layout()
+            .find(WindowId(1))
+            .expect("window 1 present")
+            .rect;
+
+        // A larger window_gap shifts the leftmost on-screen window to the right.
+        let new_padding = Padding {
+            window_gap: 40,
+            up: 0,
+            down: 0,
+        };
+        let returned = engine.reconfigure(960, 320, 100, new_padding, 4);
+
+        // Cached padding reflects the new gap.
+        assert_eq!(engine.padding().window_gap, 40);
+        // The returned and cached ActualLayouts agree and still hold all windows.
+        assert_eq!(returned.entries.len(), 3);
+        assert_eq!(engine.actual_layout().entries.len(), 3);
+        // The first window shifted right due to the larger left gap.
+        let first_after = engine
+            .actual_layout()
+            .find(WindowId(1))
+            .expect("window 1 present")
+            .rect;
+        assert!(
+            first_after.x > first_before.x,
+            "larger window_gap should shift the leftmost window right: {} -> {}",
+            first_before.x,
+            first_after.x
+        );
+    }
+
+    /// Contract: `reconfigure` MUST recompute the derived ladder bounds
+    /// (`max_n`, `abs_max_width`) from the new `window_gap`, not keep stale
+    /// values from `new`. Both bounds are documented in `build_mutation_config`.
+    #[test]
+    fn reconfigure_recomputes_derived_max_n_and_abs_max_width_from_new_gap() {
+        // Arrange: monitor 1920 wide, base column 400, gap 10.
+        //   abs_max_width = 1920 - 2*10 = 1900
+        //   shift         = 400 + 10   = 410
+        //   max_n         = (1900 - 400) / 410 = 3
+        let mut engine = ScrollingSpace::new(
+            test_monitor(),
+            400,
+            100,
+            100,
+            Padding {
+                window_gap: 10,
+                up: 0,
+                down: 0,
+            },
+            4,
+        );
+        assert_eq!(engine.config.abs_max_width, 1900);
+        assert_eq!(engine.config.max_n, 3);
+
+        // Act: widen the gap to 100 — fewer slots fit, so the ladder must shrink.
+        //   abs_max_width = 1920 - 2*100 = 1720
+        //   shift         = 400 + 100    = 500
+        //   max_n         = (1720 - 400) / 500 = 2
+        engine.reconfigure(
+            400,
+            100,
+            100,
+            Padding {
+                window_gap: 100,
+                up: 0,
+                down: 0,
+            },
+            4,
+        );
+
+        // Assert: both derived bounds reflect the NEW gap, not the original.
+        assert_eq!(
+            engine.config.abs_max_width, 1720,
+            "abs_max_width must recompute from new gap"
+        );
+        assert_eq!(engine.config.max_n, 2, "max_n must recompute from new gap");
+        assert_eq!(engine.padding().window_gap, 100);
+    }
+
+    /// Edge case for `build_mutation_config`: when the base column is wider than
+    /// `abs_max_width`, the ladder is degenerate and `max_n` clamps to 0. Tested
+    /// via `new` (which delegates to the shared `build_mutation_config`).
+    #[test]
+    fn build_mutation_config_clamps_max_n_to_zero_when_column_wider_than_monitor() {
+        // Arrange: monitor 1920 wide, base column 2000 (wider than the monitor
+        // even before subtracting gaps). gap = 4.
+        //   abs_max_width = 1920 - 2*4 = 1912
+        //   cw            = 2000
+        //   abs_max_width > cw is false → max_n = 0.
+        let engine = ScrollingSpace::new(test_monitor(), 2000, 100, 100, test_padding(), 4);
+        assert_eq!(engine.config.abs_max_width, 1912);
+        assert_eq!(
+            engine.config.max_n, 0,
+            "max_n must be 0 when column is wider than abs_max_width"
+        );
+    }
+
+    /// Edge case for `build_mutation_config`: when `column_shift` is 0 (both
+    /// `column_width` and `window_gap` are 0), the degenerate-shift guard forces
+    /// `max_n = 0` to avoid a divide-by-zero in the slot-ladder derivation.
+    #[test]
+    fn build_mutation_config_clamps_max_n_to_zero_when_shift_is_zero() {
+        // Arrange: column_width 0 and gap 0 → column_shift = 0.
+        let gapless = Padding {
+            window_gap: 0,
+            up: 0,
+            down: 0,
+        };
+        let engine = ScrollingSpace::new(test_monitor(), 0, 0, 100, gapless, 4);
+
+        // Assert: degenerate shift is guarded; abs_max_width is still well-defined.
+        assert_eq!(
+            engine.config.max_n, 0,
+            "max_n must be 0 when column_shift is 0 (avoid divide-by-zero)"
+        );
+        assert_eq!(
+            engine.config.abs_max_width, 1920,
+            "abs_max_width = monitor_width - 2*gap = 1920"
+        );
     }
 
     #[test]
