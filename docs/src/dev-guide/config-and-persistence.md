@@ -121,7 +121,7 @@ flowchart TD
     AUTH -->|"stm.toml Err in race window"| DIE["exit 1: pipe never created"]
 ```
 
-The future `stm reload` will reuse these same loaders for per-file independent reload with rollback, replacing the current `reload_config` stub in daemon dispatch.
+`stm config reload` reuses these same loaders to hot-reload a running daemon (see §5 *Hot-reload* below).
 
 After loading `stm.toml`, the daemon calls `StmConfig::validate()` to catch semantically invalid values (negative padding, `min_column_width_px` exceeding `column_width`). Validation failures produce warnings but do not prevent the daemon from running.
 
@@ -138,6 +138,53 @@ flowchart TD
     INIT["init_config_dir<br/>Write starter files & schemas"] --> LOAD["load_app_config<br/>load_rules_config"]
     LOAD --> VALID["check_config<br/>(CLI validation pass)"]
     LOAD --> USE["Daemon subsystems<br/>Layout engine, animation, registry"]
+```
+
+### 5. Hot-reload -- `stm config reload`
+
+`stm config reload` sends a `ReloadConfig` IPC message to the running daemon, which reloads `stm.toml` (and `stm-rules.toml`) from disk and applies the **live-reloadable** fields to the running daemon **without disturbing runtime window/workspace state**.
+
+#### Validate-before-apply
+
+The handler loads + validates the new config *before* touching any state. A broken file or a validation failure (e.g. `columns_per_screen = 0`) returns a `SocketResponse::Error` immediately -- the running daemon keeps its current config untouched, so there is nothing to roll back. The error message surfaces on the user's terminal via `stm`'s `send_command`.
+
+#### Live-reloadable vs. structural fields
+
+Not every field can change at runtime. Reload applies **live** fields in place; **structural** fields require a daemon restart.
+
+| Field | Reload effect |
+|-------|---------------|
+| `borders.*` (color/thickness/overlap) | immediate recolor/resize of all overlays (`refresh_all_border_styles`) |
+| `padding.window_gap` | re-projects every workspace's pixel layout from its existing virtual layout -- windows animate to new gaps |
+| `columns_per_screen` | updates the cached threshold (no window movement; affects future auto-center) |
+| `column_width` (base), `min_column_width_px`, `min_window_height_px` | update cached bounds; existing per-column widths preserved |
+| `animation.*` | `WindowAnimator::update_config` for the new duration/easing/enabled |
+| **Workspace count (10), monitor geometry** | **structural** -- not reloadable |
+
+#### What is preserved
+
+Reload touches *only* the geometry constants + borders + the animation config. The user's arranged layout is untouched: per-`ScrollingSpace` virtual layout (columns, rows, window order), focus, scroll viewport, monocle state; plus the daemon's registry (window slots/states), learned history rules, and float positions. Concretely, `ScrollingSpace::reconfigure` rebuilds the cached `MutationConfig` and re-projects `actual` from the **same** `virtual_layout` -- windows keep their column/row assignment and slide to their new pixel positions.
+
+#### Rules reload is non-fatal
+
+`stm-rules.toml` (classification) is reloaded in the same operation via `registry.set_user_rules`. It affects only **new** windows, so it never disrupts existing layout. Consistent with startup policy, a rules failure is **non-fatal**: the daemon warns and keeps the current rules; `stm.toml` (if valid) still reloads. This is the per-file-independent policy chosen at design time.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as stm (client)
+    participant D as stmd (daemon)
+    U->>C: stm config reload
+    C->>D: ReloadConfig (IPC)
+    D->>D: load_app_config + validate (no state touched)
+    alt load/validate Err
+        D-->>C: SocketResponse::Error{message}
+        C-->>U: print error (nothing applied)
+    else Ok
+        D->>D: store config; reconfigure all workspaces; animate active; refresh borders; reload rules (non-fatal)
+        D-->>C: SocketResponse::Ok
+        C-->>U: "configuration reloaded"
+    end
 ```
 
 ## Application Config Fields

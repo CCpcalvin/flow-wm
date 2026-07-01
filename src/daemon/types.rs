@@ -121,13 +121,13 @@ pub struct ScrollTilingManager {
 
     /// Application configuration loaded from `stm.toml`.
     ///
-    /// Stored for future config hot-reload support. Not read at runtime today
-    /// — the layout engine owns all derived width/bounds state internally.
-    #[allow(dead_code)] // Stored for future config reload functionality.
+    /// The live source for border colors/thickness (read by the border overlay
+    /// and animation code) and the target of hot-reload. The layout engine owns
+    /// its own derived width/bounds state internally (see [`crate::workspace`]).
     pub(super) config: StmConfig,
 
-    /// Path to the configuration directory (for future reload support).
-    #[allow(dead_code)] // Stored for future config reload functionality.
+    /// Path to the configuration directory — used to locate `stm.toml` and
+    /// `stm-rules.toml` on hot-reload.
     pub(super) config_dir: PathBuf,
 
     /// Receiver for hook events from the background WinEvent hook thread.

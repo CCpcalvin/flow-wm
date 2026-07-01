@@ -510,6 +510,19 @@ impl ClassificationPipeline {
     pub fn set_learned_rules(&mut self, rules: Vec<WindowRule>) {
         self.learned_rules = compile_rules(rules);
     }
+
+    /// Replace the user-rules layer (and fallback action) from `stm-rules.toml`.
+    ///
+    /// Used by hot-reload so classification picks up edited rules without
+    /// restarting the daemon. Recompiles all regex patterns; invalid patterns
+    /// are logged and treated as non-matching, identical to
+    /// [`new`](Self::new). The fallback `default_action` is also refreshed
+    /// from `user_rules.default_action`. See
+    /// (`docs/src/dev-guide/config-and-persistence.md`).
+    pub fn set_user_rules(&mut self, user_rules: WindowRulesConfig) {
+        self.default_action = user_rules.default_action;
+        self.user_rules = compile_rules(user_rules.rules);
+    }
 }
 
 // ── classify_with_state_pipeline ──────────────────────────────────────
@@ -2109,5 +2122,81 @@ mod tests {
         );
         assert!(check_equivalence(&mr, &c));
         assert!(matches_rule(&c, &mr), "guard: all fields should match");
+    }
+
+    // --- set_user_rules (hot-reload) tests ---
+
+    /// Positive: `set_user_rules` MUST refresh the fallback `default_action`.
+    /// After reload, an unmatched candidate classifies via the NEW
+    /// `default_action`, proving the field was replaced (not just the rule list).
+    #[test]
+    fn set_user_rules_replaces_default_action() {
+        // Arrange: pipeline starts with default_action = Tile, no rules.
+        let mut pipeline = pipeline_from(vec![], WindowAction::Tile);
+        let unknown = candidate("unknown.exe", "", "", "");
+        // Guard: initial fallback is Tile.
+        assert_eq!(pipeline.classify(&unknown), WindowAction::Tile);
+
+        // Act: hot-reload user rules with a different default_action and no rules.
+        pipeline.set_user_rules(WindowRulesConfig {
+            default_action: WindowAction::Float,
+            rules: vec![],
+        });
+
+        // Assert: fallback now reflects the reloaded default_action.
+        assert_eq!(
+            pipeline.classify(&unknown),
+            WindowAction::Float,
+            "set_user_rules must refresh default_action"
+        );
+    }
+
+    /// Positive + negative: `set_user_rules` REPLACES (not appends to) the
+    /// user-rule list. After reload, a candidate matching a NEW rule classifies
+    /// via it, and a candidate that matched only an OLD rule no longer matches
+    /// (it falls through to `default_action`).
+    #[test]
+    fn set_user_rules_replaces_the_user_rule_list() {
+        // Arrange: pipeline starts with one rule: "old.exe" → Ignore.
+        let mut pipeline = pipeline_from(
+            vec![rule(
+                MatchRule {
+                    exe: Some("old.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Ignore,
+            )],
+            WindowAction::Tile,
+        );
+        // Guard: the old rule is active before reload.
+        assert_eq!(
+            pipeline.classify(&candidate("old.exe", "", "", "")),
+            WindowAction::Ignore
+        );
+
+        // Act: hot-reload user rules with a DIFFERENT rule: "new.exe" → Float.
+        pipeline.set_user_rules(WindowRulesConfig {
+            default_action: WindowAction::Tile,
+            rules: vec![rule(
+                MatchRule {
+                    exe: Some("new.exe".into()),
+                    ..Default::default()
+                },
+                WindowAction::Float,
+            )],
+        });
+
+        // Assert (positive): the new rule classifies "new.exe" as Float.
+        assert_eq!(
+            pipeline.classify(&candidate("new.exe", "", "", "")),
+            WindowAction::Float,
+            "set_user_rules must install the reloaded rule list"
+        );
+        // Assert (negative): the old rule is GONE — "old.exe" falls through.
+        assert_eq!(
+            pipeline.classify(&candidate("old.exe", "", "", "")),
+            WindowAction::Tile,
+            "set_user_rules must drop rules absent from the reload"
+        );
     }
 }

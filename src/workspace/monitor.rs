@@ -100,6 +100,15 @@ impl Monitor {
         &self.workspaces
     }
 
+    /// Mutable access to every workspace on this monitor.
+    ///
+    /// Used by config hot-reload to reconfigure each workspace's layout in
+    /// place without rebuilding the monitor; see
+    /// (`docs/src/dev-guide/config-and-persistence.md`).
+    pub fn workspaces_mut(&mut self) -> &mut [Workspace] {
+        &mut self.workspaces
+    }
+
     /// The index of the currently visible workspace.
     #[must_use]
     pub fn active_workspace_index(&self) -> usize {

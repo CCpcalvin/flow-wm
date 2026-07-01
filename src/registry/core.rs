@@ -356,6 +356,14 @@ impl WindowRegistry {
         self.pipeline.set_learned_rules(rules);
     }
 
+    /// Replace the classification pipeline's user-rules layer.
+    ///
+    /// Used by hot-reload so edited `stm-rules.toml` rules take effect without
+    /// a restart. See (`docs/src/dev-guide/config-and-persistence.md`).
+    pub fn set_user_rules(&mut self, user_rules: WindowRulesConfig) {
+        self.pipeline.set_user_rules(user_rules);
+    }
+
     /// Transitions a window to minimized state.
     ///
     /// Called when `EVENT_SYSTEM_MINIMIZESTART` is received. The transition
@@ -3032,5 +3040,69 @@ mod tests {
         for key in [2, 4, 5, 6] {
             assert!(!map.contains_key(&key), "non-active hwnd {key} leaked");
         }
+    }
+
+    // --- set_user_rules (hot-reload) tests ---
+
+    /// Positive: `WindowRegistry::set_user_rules` MUST delegate to the
+    /// classification pipeline so a hot-reloaded `default_action` and rule list
+    /// change subsequent classifications. Verified by observing the pipeline
+    /// directly (no Win32 / no windows inserted) — the daemon's
+    /// `dispatch_reload_config` calls this method for the non-fatal rules reload.
+    #[test]
+    fn set_user_rules_delegates_to_the_classification_pipeline() {
+        use crate::config::types::MatchRule;
+        use classification::WindowCandidate;
+
+        // Arrange: registry starts with default_action = Tile and a rule that
+        // pins "pinned.exe" to Ignore.
+        let user = WindowRulesConfig {
+            default_action: WindowAction::Tile,
+            rules: vec![WindowRule {
+                match_: MatchRule {
+                    exe: Some("pinned.exe".into()),
+                    ..Default::default()
+                },
+                action: WindowAction::Ignore,
+                initial_width_px: None,
+                override_persist: false,
+            }],
+        };
+        let default = WindowRulesConfig::default();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        let pinned = WindowCandidate {
+            exe: "pinned.exe".into(),
+            title: String::new(),
+            class: String::new(),
+            process_path: String::new(),
+        };
+        let other = WindowCandidate {
+            exe: "other.exe".into(),
+            title: String::new(),
+            class: String::new(),
+            process_path: String::new(),
+        };
+        // Guard: original rules are in effect.
+        assert_eq!(reg.pipeline.classify(&pinned), WindowAction::Ignore);
+        assert_eq!(reg.pipeline.classify(&other), WindowAction::Tile);
+
+        // Act: hot-reload — drop "pinned.exe", switch default to Float.
+        reg.set_user_rules(WindowRulesConfig {
+            default_action: WindowAction::Float,
+            rules: vec![],
+        });
+
+        // Assert: delegation took effect — old rule gone, default refreshed.
+        assert_eq!(
+            reg.pipeline.classify(&pinned),
+            WindowAction::Float,
+            "registry.set_user_rules must drop old rules via delegation"
+        );
+        assert_eq!(
+            reg.pipeline.classify(&other),
+            WindowAction::Float,
+            "registry.set_user_rules must refresh default_action via delegation"
+        );
     }
 }
