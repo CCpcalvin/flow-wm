@@ -36,11 +36,15 @@
 //! binary via `include_str!`. [`WindowRulesConfig::default`] (empty rules)
 //! remains only as the parse-failure fallback.
 //!
-//! # Resilient Loading Design
+//! # Error-Propagating Load Design
 //!
-//! All load functions are resilient — they never panic or propagate errors to the
-//! caller. Instead, they return defaults and log the issue. This ensures the daemon
-//! can always start regardless of config file state (missing, malformed, I/O error).
+//! Load functions distinguish three failure modes (see [`ConfigLoadError`]):
+//! a missing file is benign (fresh install) and yields `T::default()`; a parse
+//! or I/O error is propagated as `Err` so callers decide policy. The daemon
+//! (`stmd`) treats an `stm.toml` parse error as fatal, while the `stm` client
+//! runs a pre-flight check to surface the error on the user's terminal before
+//! spawning the daemon. Rules-file failures are non-fatal everywhere (warn +
+//! default rules).
 //!
 //! # Schema Headers
 //!
@@ -48,10 +52,15 @@
 //! header for IDE autocomplete support (taplo LSP). The schema files are written
 //! into a `schemas/` subdirectory.
 
+use std::fmt;
+use std::io;
 use std::path::Path;
+
+use serde::de::DeserializeOwned;
 
 use super::schema;
 use super::types::{StmConfig, WindowRulesConfig};
+use crate::common::{StmError, StmResult};
 
 /// The hand-written, fully-commented example `stm.toml` copied into a user's
 /// config directory by [`init_config_dir`].
@@ -88,26 +97,70 @@ const STM_RULES_SCHEMA_HEADER: &str = "#:schema ./schemas/stm-rules.schema.json\
 
 // ── Load functions ────────────────────────────────────────────────────
 
+/// Internal cause of a config load failure, distinguishing the benign
+/// missing-file case from genuine errors.
+///
+/// The public boundary collapses `Io` + `Parse` into [`StmError::Config`];
+/// `Missing` is handled inside each loader as `Ok(T::default())` and never
+/// reaches public callers.
+enum ConfigLoadError {
+    /// File not found — treated as a fresh install, not a failure.
+    Missing,
+    /// Filesystem error other than `NotFound` (permissions, locked, etc.).
+    Io(io::Error),
+    /// TOML parse or schema-mismatch error.
+    Parse(toml::de::Error),
+}
+
+impl fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => write!(f, "file not found"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Parse(e) => write!(f, "parse error: {e}"),
+        }
+    }
+}
+
+/// Read and parse a TOML file into `T`, classifying the failure mode.
+///
+/// The shared core behind [`load_app_config`] and [`load_rules_config`].
+/// `NotFound` maps to [`ConfigLoadError::Missing`] (benign); every other read
+/// failure is [`ConfigLoadError::Io`]; a TOML deserialization failure is
+/// [`ConfigLoadError::Parse`]. Callers decide policy (default vs. propagate).
+fn load_toml<T: DeserializeOwned>(path: &Path) -> Result<T, ConfigLoadError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(ConfigLoadError::Missing);
+        }
+        Err(e) => return Err(ConfigLoadError::Io(e)),
+    };
+    toml::from_str(&contents).map_err(ConfigLoadError::Parse)
+}
+
 /// Load application config from a TOML file.
 ///
-/// Reads [`StmConfig`] from the given TOML file. This function is resilient:
+/// Reads [`StmConfig`] from the given TOML file.
 ///
-/// - **File not found** → returns `StmConfig::default()`, logs at `debug` level.
-/// - **Parse error** → returns `StmConfig::default()`, logs an error with the parse failure.
+/// - **File not found** → returns `Ok(StmConfig::default())` (benign: fresh install).
+/// - **Parse error or I/O error** → returns `Err(StmError::Config)` carrying the
+///   path and underlying cause, so callers can surface the failure to the user.
 /// - **Success** → calls [`StmConfig::validate()`] and logs warnings if validation
 ///   fails, but still returns the loaded config. Logs at `info` level on success.
 ///
-/// This function never panics — it is designed for daemon startup where a bad
-/// config file should not prevent the daemon from running.
+/// This function never panics and imposes no error policy -- callers decide how
+/// to handle `Err` (`docs/src/dev-guide/config-and-persistence.md`).
 ///
 /// # Arguments
 ///
 /// * `path` - Path to the `stm.toml` file.
 ///
-/// # Returns
+/// # Errors
 ///
-/// A [`StmConfig`]. On success, the parsed file contents (validated with warnings).
-/// On any error (file not found, parse error, I/O error), returns the default config.
+/// [`StmError::Config`] if the file exists but cannot be read or parsed, with a
+/// message of the form `failed to load config <path>: <reason>`. A missing file
+/// is not an error — it yields the default config.
 ///
 /// # Example
 ///
@@ -115,68 +168,65 @@ const STM_RULES_SCHEMA_HEADER: &str = "#:schema ./schemas/stm-rules.schema.json\
 /// use scrolling_tiling_manager::config::load_app_config;
 /// use std::path::Path;
 ///
-/// let config = load_app_config(Path::new("stm.toml"));
+/// let config = load_app_config(Path::new("stm.toml")).unwrap_or_default();
 /// println!("columns_per_screen = {}", config.columns_per_screen);
 /// ```
-#[must_use]
-pub fn load_app_config(path: &Path) -> StmConfig {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match toml::from_str::<StmConfig>(&contents) {
-            Ok(config) => {
-                // Validate post-deserialization — log warnings but don't fail.
-                if let Err(warning) = config.validate() {
-                    log::warn!("config validation warning for {:?}: {warning}", path);
-                }
-                log::info!("loaded app config from {:?}", path);
-                config
+pub fn load_app_config(path: &Path) -> StmResult<StmConfig> {
+    match load_toml::<StmConfig>(path) {
+        Ok(config) => {
+            // Validate post-deserialization — log warnings but don't fail.
+            if let Err(warning) = config.validate() {
+                log::warn!("config validation warning for {:?}: {warning}", path);
             }
-            Err(e) => {
-                log::error!("failed to parse app config {:?}: {e}; using defaults", path);
-                StmConfig::default()
-            }
-        },
-        Err(e) => {
-            log::debug!("app config not found at {:?}: {e}; using defaults", path);
-            StmConfig::default()
+            log::info!("loaded app config from {:?}", path);
+            Ok(config)
         }
+        Err(ConfigLoadError::Missing) => {
+            log::debug!("app config not found at {:?}; using defaults", path);
+            Ok(StmConfig::default())
+        }
+        Err(e) => Err(StmError::Config(format!(
+            "failed to load config {}: {e}",
+            path.display()
+        ))),
     }
 }
 
 /// Load window rules config from a TOML file.
 ///
-/// If the file doesn't exist, returns the default (empty rules, `default_action: float`).
-/// If the file exists but is malformed, logs an error and returns the default.
-/// This function never panics — it is designed for daemon startup where a bad
-/// rules file should not prevent the daemon from running.
+/// Reads [`WindowRulesConfig`] from the given TOML file.
+///
+/// - **File not found** → returns `Ok(WindowRulesConfig::default())` (benign).
+/// - **Parse error or I/O error** → returns `Err(StmError::Config)` carrying the
+///   path and underlying cause.
+/// - **Success** → returns the parsed config. Logs at `info` level on success.
+///
+/// This function never panics and imposes no error policy -- callers decide how
+/// to handle `Err` (`docs/src/dev-guide/config-and-persistence.md`).
 ///
 /// # Arguments
 ///
 /// * `path` - Path to the `stm-rules.toml` file.
 ///
-/// # Returns
+/// # Errors
 ///
-/// A [`WindowRulesConfig`]. On success, the parsed file contents. On any error
-/// (file not found, parse error, I/O error), returns the default config.
-#[must_use]
-pub fn load_rules_config(path: &Path) -> WindowRulesConfig {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match toml::from_str::<WindowRulesConfig>(&contents) {
-            Ok(config) => {
-                log::info!("loaded window rules from {:?}", path);
-                config
-            }
-            Err(e) => {
-                log::error!(
-                    "failed to parse rules config {:?}: {e}; using defaults",
-                    path
-                );
-                WindowRulesConfig::default()
-            }
-        },
-        Err(e) => {
-            log::debug!("rules config not found at {:?}: {e}; using defaults", path);
-            WindowRulesConfig::default()
+/// [`StmError::Config`] if the file exists but cannot be read or parsed, with a
+/// message of the form `failed to load config <path>: <reason>`. A missing file
+/// is not an error — it yields the default config.
+pub fn load_rules_config(path: &Path) -> StmResult<WindowRulesConfig> {
+    match load_toml::<WindowRulesConfig>(path) {
+        Ok(config) => {
+            log::info!("loaded window rules from {:?}", path);
+            Ok(config)
         }
+        Err(ConfigLoadError::Missing) => {
+            log::debug!("rules config not found at {:?}; using defaults", path);
+            Ok(WindowRulesConfig::default())
+        }
+        Err(e) => Err(StmError::Config(format!(
+            "failed to load config {}: {e}",
+            path.display()
+        ))),
     }
 }
 
@@ -506,7 +556,7 @@ strategy = "original_slot"
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(toml_content.as_bytes()).unwrap();
 
-        let config = load_app_config(f.path());
+        let config = load_app_config(f.path()).unwrap();
         assert_eq!(config.columns_per_screen, 3);
         assert_eq!(config.column_width, Some(1200));
         assert_eq!(config.min_column_width_px, 400);
@@ -520,7 +570,7 @@ strategy = "original_slot"
     #[test]
     fn load_app_config_missing_file_returns_default() {
         let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm.toml");
-        let config = load_app_config(&path);
+        let config = load_app_config(&path).unwrap();
         assert_eq!(config, StmConfig::default());
         assert_eq!(config.min_column_width_px, 640);
         assert_eq!(config.padding.window_gap, 16);
@@ -528,14 +578,22 @@ strategy = "original_slot"
         assert_eq!(config.padding.down, 0);
     }
 
-    /// Negative: malformed TOML returns default config (not panic).
+    /// Negative: malformed TOML propagates an error naming the failure.
     #[test]
-    fn load_app_config_malformed_toml_returns_default() {
+    fn load_app_config_malformed_toml_returns_error() {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
 
-        let config = load_app_config(f.path());
-        assert_eq!(config.column_width, None);
+        let result = load_app_config(f.path());
+        assert!(
+            result.is_err(),
+            "malformed stm.toml should propagate an error"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
     }
 
     /// Negative: empty TOML file returns default config (all serde defaults fill in).
@@ -544,7 +602,7 @@ strategy = "original_slot"
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"").unwrap();
 
-        let config = load_app_config(f.path());
+        let config = load_app_config(f.path()).unwrap();
         assert_eq!(config, StmConfig::default());
         assert_eq!(config.padding.window_gap, 16);
     }
@@ -559,7 +617,7 @@ strategy = "original_slot"
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"columns_per_screen = 2\n").unwrap();
 
-        let config = load_app_config(f.path());
+        let config = load_app_config(f.path()).unwrap();
         assert_eq!(
             config.columns_per_screen, 2,
             "user-specified field must be preserved"
@@ -568,6 +626,78 @@ strategy = "original_slot"
         assert_eq!(config.min_column_width_px, 640);
         assert_eq!(config.padding.window_gap, 16);
         assert_eq!(config.animation.duration_ms, 240);
+    }
+
+    /// Negative: a path that exists but is a directory (not a file) triggers a
+    /// non-`NotFound` I/O error, exercising the `ConfigLoadError::Io` branch.
+    ///
+    /// `read_to_string` on a directory returns an I/O error whose kind is NOT
+    /// `NotFound` (Windows: `PermissionDenied`), so a directory path is the
+    /// most portable way to hit the Io arm without permission-denied tricks.
+    /// This error must **propagate** (not silently fall back to default, which
+    /// is reserved for `Missing`) and must name the offending path.
+    #[test]
+    fn load_app_config_directory_path_propagates_io_error() {
+        // Arrange: a real directory kept alive by TempDir for the test's duration.
+        let tmp = TempDir::new().unwrap();
+        let dir_path = tmp.path();
+
+        // Act
+        let result = load_app_config(dir_path);
+
+        // Assert: must be an error — NOT the benign Missing -> default path.
+        assert!(
+            result.is_err(),
+            "reading a directory should propagate an I/O error, not return default"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
+        // The offending path must appear so the user knows WHERE the failure is.
+        assert!(
+            err.contains(&dir_path.display().to_string()),
+            "error should name the offending path: {err}"
+        );
+        // It must be the I/O branch, not the parse branch.
+        assert!(
+            !err.contains("parse error"),
+            "directory read should surface as I/O, not parse: {err}"
+        );
+    }
+
+    /// Negative: the error message names the offending file path (Parse branch).
+    ///
+    /// `load_app_config_malformed_toml_returns_error` proves malformed TOML is an
+    /// error; this test pins the message-format contract that the failing file's
+    /// path appears verbatim in the error — the user needs to know WHICH file is
+    /// broken when multiple config files exist.
+    #[test]
+    fn load_app_config_parse_error_message_includes_path() {
+        // Arrange: a malformed TOML file with a known path.
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
+        let path_str = f.path().display().to_string();
+
+        // Act
+        let result = load_app_config(f.path());
+
+        // Assert: error contains both the failure tag, the file path, and the
+        // parse-cause marker (proves it routed through the Parse branch).
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
+        assert!(
+            err.contains(&path_str),
+            "error should name the offending file path ({path_str}): {err}"
+        );
+        assert!(
+            err.contains("parse error"),
+            "malformed TOML should surface as a parse error: {err}"
+        );
     }
 
     // ── init_config_dir tests ──────────────────────────────────────────
@@ -799,7 +929,7 @@ initial_width_px = 960
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(toml_content.as_bytes()).unwrap();
 
-        let config = load_rules_config(f.path());
+        let config = load_rules_config(f.path()).unwrap();
         assert_eq!(config.default_action, WindowAction::Float);
         assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].action, WindowAction::Ignore);
@@ -810,31 +940,48 @@ initial_width_px = 960
     #[test]
     fn load_rules_config_missing_file_returns_default() {
         let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm-rules.toml");
-        let config = load_rules_config(&path);
+        let config = load_rules_config(&path).unwrap();
         assert_eq!(config.default_action, WindowAction::Float);
         assert!(config.rules.is_empty());
     }
 
-    /// Negative: malformed TOML returns default config (not panic).
+    /// Negative: malformed TOML propagates an error naming the failure.
     #[test]
-    fn load_rules_config_malformed_toml_returns_default() {
+    fn load_rules_config_malformed_toml_returns_error() {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
 
-        let config = load_rules_config(f.path());
-        assert_eq!(config.default_action, WindowAction::Float);
-        assert!(config.rules.is_empty());
+        let result = load_rules_config(f.path());
+        assert!(
+            result.is_err(),
+            "malformed stm-rules.toml should propagate an error"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
     }
 
-    /// Negative: empty TOML file returns default config.
+    /// Negative: empty TOML propagates an error. Unlike `StmConfig`, the rules
+    /// type carries no container `#[serde(default)]`, so an empty file is a
+    /// genuine parse error (`default_action` is required). Init handles this
+    /// non-fatally: warn + fall back to default rules.
     #[test]
-    fn load_rules_config_empty_toml_returns_default() {
+    fn load_rules_config_empty_toml_returns_error() {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"").unwrap();
 
-        let config = load_rules_config(f.path());
-        assert_eq!(config.default_action, WindowAction::Float);
-        assert!(config.rules.is_empty());
+        let result = load_rules_config(f.path());
+        assert!(
+            result.is_err(),
+            "empty stm-rules.toml should propagate an error (default_action is required)"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
     }
 
     /// Positive: valid TOML with regex fields round-trips through file I/O.
@@ -861,12 +1008,80 @@ initial_width_px = 960
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(toml_str.as_bytes()).unwrap();
 
-        let loaded = load_rules_config(f.path());
+        let loaded = load_rules_config(f.path()).unwrap();
         assert_eq!(loaded.default_action, WindowAction::Ignore);
         assert_eq!(loaded.rules.len(), 1);
         assert_eq!(
             loaded.rules[0].match_.exe_regex,
             Some("chrome\\.exe".into())
+        );
+    }
+
+    /// Negative: a path that exists but is a directory triggers a non-`NotFound`
+    /// I/O error, exercising the `ConfigLoadError::Io` branch for the rules loader.
+    ///
+    /// Mirrors `load_app_config_directory_path_propagates_io_error` to keep the
+    /// two loaders' error coverage symmetric. The error must propagate (not the
+    /// benign Missing -> default path) and must name the offending path.
+    #[test]
+    fn load_rules_config_directory_path_propagates_io_error() {
+        // Arrange: a real directory kept alive by TempDir for the test's duration.
+        let tmp = TempDir::new().unwrap();
+        let dir_path = tmp.path();
+
+        // Act
+        let result = load_rules_config(dir_path);
+
+        // Assert: must be an error — NOT the benign Missing -> default path.
+        assert!(
+            result.is_err(),
+            "reading a directory should propagate an I/O error, not return default"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
+        assert!(
+            err.contains(&dir_path.display().to_string()),
+            "error should name the offending path: {err}"
+        );
+        assert!(
+            !err.contains("parse error"),
+            "directory read should surface as I/O, not parse: {err}"
+        );
+    }
+
+    /// Negative: the error message names the offending file path (Parse branch)
+    /// for the rules loader.
+    ///
+    /// Mirrors `load_app_config_parse_error_message_includes_path`: proves the
+    /// path-in-message contract holds symmetrically for the rules loader too,
+    /// so a broken `stm-rules.toml` is unambiguously identified in the error.
+    #[test]
+    fn load_rules_config_parse_error_message_includes_path() {
+        // Arrange: a malformed TOML file with a known path.
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"this is = not = valid = toml = [[[[").unwrap();
+        let path_str = f.path().display().to_string();
+
+        // Act
+        let result = load_rules_config(f.path());
+
+        // Assert: error contains the failure tag, the file path, and the
+        // parse-cause marker (proves Parse-branch routing).
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to load config"),
+            "error should describe the failure: {err}"
+        );
+        assert!(
+            err.contains(&path_str),
+            "error should name the offending file path ({path_str}): {err}"
+        );
+        assert!(
+            err.contains("parse error"),
+            "malformed TOML should surface as a parse error: {err}"
         );
     }
 
@@ -1006,10 +1221,12 @@ initial_width_px = 960
     /// `WindowRulesConfig::default()` is a valid fallback (non-panicking,
     /// empty rules, `default_action: float`).
     ///
-    /// The identical `match Ok/Err` pattern in `load_default_rules` is
-    /// validated structurally by `load_rules_config_malformed_toml_returns_default`
-    /// and `load_app_config_malformed_toml_returns_default`, which exercise
-    /// the same resilient-loading pattern through file-backed functions.
+    /// Note: `load_default_rules` keeps its own defensive fallback (embedded
+    /// content can't realistically fail, so an empty default + log is the right
+    /// behavior). The file-backed loaders (`load_rules_config`,
+    /// `load_app_config`) instead *propagate* parse errors — see
+    /// `load_rules_config_malformed_toml_returns_error` and
+    /// `load_app_config_malformed_toml_returns_error`.
     #[test]
     fn load_default_rules_resilient_fallback_on_bad_input() {
         // Arrange: malformed TOML that would trigger the Err branch.
@@ -1045,7 +1262,7 @@ initial_width_px = 960
             return;
         }
 
-        let config = load_rules_config(&path);
+        let config = load_rules_config(&path).unwrap();
         assert_eq!(config.default_action, WindowAction::Float);
         assert!(
             !config.rules.is_empty(),
@@ -1083,7 +1300,7 @@ initial_width_px = 960
             return;
         }
 
-        let config = load_app_config(&path);
+        let config = load_app_config(&path).unwrap();
 
         // Verify the file parsed and is valid (passes semantic validation).
         assert!(

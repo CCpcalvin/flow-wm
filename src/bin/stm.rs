@@ -27,6 +27,7 @@
 //! Only `stm config reload` sends an IPC message to the running daemon.
 
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -342,6 +343,7 @@ fn main() {
 ///
 /// Returns an error string if:
 /// - The daemon is already running.
+/// - The user's `stm.toml` cannot be parsed (pre-flight config check fails).
 /// - The daemon binary cannot be found.
 /// - The daemon fails to spawn.
 /// - The daemon does not become ready within [`DAEMON_START_TIMEOUT`].
@@ -361,10 +363,43 @@ fn cmd_start(
         return Err("daemon is already running".into());
     }
 
+    // Pre-flight config check: surface `stm.toml`/`stm-rules.toml` errors on the
+    // user's terminal before spawning, because the detached daemon's
+    // stdout/stderr are discarded. Reuses the daemon's own loaders (same crate),
+    // so the verdict matches — no desync between client and daemon.
+    let config_dir = config::dirs::resolve_config_dir(config_override.as_deref().map(Path::new));
+    preflight_config_check(&config_dir)?;
+
     spawn_daemon(log_file_override.as_deref())?;
     wait_for_daemon()?;
 
     println!("stm: daemon started");
+    Ok(())
+}
+
+/// Run a pre-flight config check on the user's terminal before spawning the daemon.
+///
+/// The detached daemon's stdout/stderr are discarded, so its config-load errors
+/// are invisible; this surfaces them on the user's terminal before spawn. The
+/// load-error policy and the race-window rationale live in
+/// `docs/src/dev-guide/config-and-persistence.md`.
+///
+/// # Errors
+///
+/// `Err(String)` only if `stm.toml` cannot be loaded (identifying file and
+/// cause). A `stm-rules.toml` failure is warned on stderr and does *not* error.
+fn preflight_config_check(config_dir: &Path) -> Result<(), String> {
+    let app_path = config::dirs::user_app_config_path_in(config_dir);
+    if let Err(e) = config::load_app_config(&app_path) {
+        // Fatal: surface why+where and refuse to spawn.
+        return Err(format!("stm: cannot start: {e}"));
+    }
+
+    let rules_path = config::dirs::user_rules_path_in(config_dir);
+    if let Err(e) = config::load_rules_config(&rules_path) {
+        // Non-fatal: warn on stderr but allow startup with default rules.
+        eprintln!("stm: warning: {e}; using default window rules");
+    }
     Ok(())
 }
 
