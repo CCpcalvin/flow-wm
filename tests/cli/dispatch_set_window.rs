@@ -22,7 +22,7 @@ use predicates::prelude::*;
 use super::common::{stm, unique_pipe_name};
 use super::test_desktop::{
     DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, send_ipc_ignore, start_test_daemon,
-    unique_title,
+    unique_title, wait_until_windows_tiled,
 };
 
 /// Delay after creating windows to let hooks fire and the daemon tile them.
@@ -75,7 +75,10 @@ fn set_window_float_then_tile_roundtrips_layout() {
     let title_b = unique_title("SetWin-B");
     let _wa = TestWindow::create(&title_a).expect("create window A");
     let _wb = TestWindow::create(&title_b).expect("create window B");
-    std::thread::sleep(HOOK_SETTLE);
+    // Wait for both windows to be tiled before reading the baseline layout.
+    // Under parallel load a fixed sleep can query before the create → register
+    // → classify → tile pipeline finishes, seeing `columns: []`.
+    wait_until_windows_tiled(&pipe, 2).expect("2 windows tiled at baseline");
 
     // Drive focus to the leftmost window so the float target is deterministic.
     use scrolling_tiling_manager::ipc::message::SocketMessage;

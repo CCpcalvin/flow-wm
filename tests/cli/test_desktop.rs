@@ -502,7 +502,6 @@ pub fn send_ipc_retry(
     pipe: &str,
     msg: &scrolling_tiling_manager::ipc::message::SocketMessage,
 ) -> Result<scrolling_tiling_manager::ipc::message::SocketResponse, String> {
-    use scrolling_tiling_manager::ipc::message::SocketResponse;
     use scrolling_tiling_manager::ipc::transport;
 
     const ATTEMPTS: u32 = 20;
@@ -521,6 +520,59 @@ pub fn send_ipc_retry(
     Err(format!(
         "IPC send failed after {ATTEMPTS} attempts ({} ms total): {last_err}",
         ATTEMPTS * 25
+    ))
+}
+
+/// Collect every window-id integer currently in the active workspace's
+/// virtual layout, in (column, row) order.
+///
+/// Each row in the `columns[].rows` array is serialized as an *object*
+/// `{"window_id": <id>, "height_px": <px>}` (see `VirtualLayout` /
+/// `AppliedLayout` serialization), so the id lives under the `window_id` key —
+/// not as a bare integer.
+pub fn active_window_ids(json: &serde_json::Value) -> Vec<i64> {
+    json["columns"]
+        .as_array()
+        .map(|cols| {
+            cols.iter()
+                .flat_map(|col| {
+                    col["rows"]
+                        .as_array()
+                        .map(|rows| {
+                            rows.iter()
+                                .filter_map(|r| r["window_id"].as_i64())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Poll the active workspace's virtual layout until exactly `expected` windows
+/// appear inside columns, or time out.
+///
+/// After a window is created, the daemon's hook registers it in the window
+/// registry (bumping `window_count`) before the classification → tiling step
+/// assigns it to a column. A query taken in that gap therefore sees
+/// `window_count: N, columns: []`. Polling until the windows actually appear in
+/// columns removes that race from pre-conditions without a fixed sleep.
+pub fn wait_until_windows_tiled(pipe: &str, expected: usize) -> Result<serde_json::Value, String> {
+    const ATTEMPTS: u32 = 40;
+    const SLEEP: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let mut last = String::new();
+    for _ in 0..ATTEMPTS {
+        let json = query_layout_virtual(pipe)?;
+        if active_window_ids(&json).len() == expected {
+            return Ok(json);
+        }
+        last = format!("{json:?}");
+        std::thread::sleep(SLEEP);
+    }
+    Err(format!(
+        "timed out waiting for {expected} windows to be tiled (last layout: {last})"
     ))
 }
 
