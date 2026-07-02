@@ -110,7 +110,7 @@ impl Workspace {
     /// # use scrolling_tiling_manager::layout::types::MonitorInfo;
     /// # use scrolling_tiling_manager::common::Rect;
     /// # let monitor = MonitorInfo { work_area: Rect { x: 0, y: 0, width: 1920, height: 1080 } };
-    /// # let scrolling = ScrollingSpace::new(monitor, 960, 4,
+    /// # let scrolling = ScrollingSpace::new(monitor, 960, 320, 100,
     /// #     scrolling_tiling_manager::layout::types::Padding { window_gap: 4, up: 0, down: 0 }, 4);
     /// let ws = Workspace::new(WorkspaceId(1), scrolling);
     /// assert_eq!(ws.id, WorkspaceId(1));

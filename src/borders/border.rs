@@ -1883,21 +1883,21 @@ mod tests {
         // White at α=128: each channel = (255*128+127)/255 = 128.
         assert_eq!(pack_premultiplied(0x00FF_FFFF, 128), 0x8080_8080);
         // #AABBCC at α=128: R=(170*128+127)/255=85, G=(187*128+127)/255=94, B=(204*128+127)/255=102.
-        assert_eq!(pack_premultiplied(0x00AA_BB_CC, 0x80), 0x8055_5E66);
+        assert_eq!(pack_premultiplied(0x00AA_BBCC, 0x80), 0x8055_5E66);
     }
 
     /// `pack_premultiplied` is identity at α=255 (premultiplying by 1.0).
     #[test]
     fn pack_premultiplied_identity_at_full_alpha() {
         assert_eq!(pack_premultiplied(0x00FF_FFFF, 0xFF), 0xFFFF_FFFF);
-        assert_eq!(pack_premultiplied(0x00AA_BB_CC, 0xFF), 0xFFAA_BBCC);
+        assert_eq!(pack_premultiplied(0x00AA_BBCC, 0xFF), 0xFFAA_BBCC);
     }
 
     /// `pack_premultiplied` at α=0 produces all-zero (fully transparent).
     #[test]
     fn pack_premultiplied_zero_alpha_is_zero() {
         assert_eq!(pack_premultiplied(0x00FF_FFFF, 0), 0);
-        assert_eq!(pack_premultiplied(0x00AA_BB_CC, 0), 0);
+        assert_eq!(pack_premultiplied(0x00AA_BBCC, 0), 0);
     }
 
     /// `circle_segment_antiderivative` is zero at the centre, negative at
@@ -2062,7 +2062,7 @@ mod tests {
         let original = pack_bgra(color(0x11, 0x22, 0x33), 0x80);
         let recolored = recolor_pixel(original, color(0xAA, 0xBB, 0xCC));
         // Premultiplied output: RGB scaled by alpha/255, alpha byte preserved.
-        assert_eq!(recolored, pack_premultiplied(0x00AA_BB_CC, 0x80));
+        assert_eq!(recolored, pack_premultiplied(0x00AA_BBCC, 0x80));
         assert_eq!(recolored >> 24, 0x80, "alpha byte must be preserved");
     }
 

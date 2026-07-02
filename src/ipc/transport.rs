@@ -752,7 +752,7 @@ mod tests {
         assert!(result.is_some());
         // Allow ±1 ms tolerance for clock drift during the call.
         let ms = result.unwrap();
-        assert!(ms >= 499 && ms <= 501, "expected ~500 ms, got {ms}");
+        assert!((499..=501).contains(&ms), "expected ~500 ms, got {ms}");
     }
 
     #[test]
