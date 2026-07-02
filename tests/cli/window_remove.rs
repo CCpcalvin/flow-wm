@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use scrolling_tiling_manager::ipc::message::SocketMessage;
+use flow_wm::ipc::message::SocketMessage;
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{

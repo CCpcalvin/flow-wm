@@ -1,6 +1,6 @@
 # Threading Model
 
-The `stmd` daemon uses exactly two threads and zero runtime locks. The hook thread
+The `flowd` daemon uses exactly two threads and zero runtime locks. The hook thread
 runs Win32 event hooks in the background; the IPC thread owns all application state
 and processes both hook events and IPC commands. There is no `Arc<Mutex<T>>` anywhere
 in the daemon — the borrow checker enforces exclusive access at compile time, which
@@ -17,7 +17,7 @@ sequenceDiagram
     participant Subsystems as Registry / ScrollingSpace / Animator
 
     Note over Hook: SetWinEventHook x6<br/>GetMessageW loop
-    Note over IPC: owns ScrollTilingManager<br/>(all fields)
+    Note over IPC: owns FlowWM<br/>(all fields)
 
     OS->>Hook: WinEvent callback
     Hook->>Chan: sender.send(HookEvent)
@@ -29,7 +29,7 @@ sequenceDiagram
 
     Note over IPC: ... later ...
 
-    participant CLI as stm CLI
+    participant CLI as flow CLI
     CLI->>IPC: ConnectNamedPipe (background thread)
     Note over IPC: connected_event signaled
     IPC->>IPC: read_message() (blocking)
@@ -47,14 +47,14 @@ sequenceDiagram
 - On each callback: sends a typed `HookEvent` through the `mpsc::Sender` and
   signals a Win32 manual-reset event (`SetEvent`) to wake the IPC thread.
 - **Never touches any daemon state.** It does not hold references to
-  `ScrollTilingManager`, the registry, or the layout. Its entire output is the
+  `FlowWM`, the registry, or the layout. Its entire output is the
   `HookEvent` enum and a signal.
 - Cleaned up by dropping the `HookThreadHandle`, which posts `WM_QUIT` to the
   hook thread's message loop. All hooks are unregistered before the thread exits.
 
 ### IPC Thread (main)
 
-- Owns `ScrollTilingManager` and all subsystems directly — no `Arc`, no `Mutex`.
+- Owns `FlowWM` and all subsystems directly — no `Arc`, no `Mutex`.
 - Runs the main event loop via `WaitForMultipleObjects`, waiting on two handles:
   1. **hook_signal** (index 0, highest priority) — wakes when any `HookEvent` is sent.
   2. **connected_event** (index 1) — wakes when a CLI client connects.
@@ -65,7 +65,7 @@ sequenceDiagram
 
 ## Why No `Arc<Mutex>`
 
-The previous architecture (before `ScrollTilingManager` was introduced) used
+The previous architecture (before `FlowWM` was introduced) used
 `Arc<Mutex<WindowRegistry>>` because the IPC loop and hook events were consumed by
 different parts of the code with no single coordination point. This had several
 problems:
@@ -78,7 +78,7 @@ problems:
 3. **Deadlock risk.** Nested locking (lock A, then B in one code path; B then A
    in another) is easy to introduce and hard to detect.
 
-With `ScrollTilingManager` owning everything on one thread, all subsystem methods
+With `FlowWM` owning everything on one thread, all subsystem methods
 take `&mut self`:
 
 - The borrow checker rejects any code that would access a subsystem while another

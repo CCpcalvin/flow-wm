@@ -2,7 +2,7 @@
 
 # Technical Domain
 
-**Purpose**: Tech stack, architecture, and coding patterns for ScrollingTilingManager (STM).
+**Purpose**: Tech stack, architecture, and coding patterns for FlowWM (flow).
 **Last Updated**: 2026-06-05
 
 ## Quick Reference
@@ -24,9 +24,9 @@
 
 | Binary | Role |
 |--------|------|
-| `stmd` | Daemon — owns all state, manages windows |
-| `stm` | CLI client — sends commands via IPC |
-| `stm-watchdog` | Crash-recovery — restores windows if daemon dies |
+| `flowd` | Daemon — owns all state, manages windows |
+| `flow` | CLI client — sends commands via IPC |
+| `flow-watchdog` | Crash-recovery — restores windows if daemon dies |
 
 ## Architecture: Mutation Pipeline
 
@@ -56,8 +56,8 @@ Key rules: mutations return new `VirtualLayout` (never mutate in place). `Scroll
 ```
 src/
 ├── main.rs, lib.rs       # Daemon entry, library root
-├── bin/                  # stm CLI, stm-watchdog
-├── common/               # Cross-cutting types (Rect, WindowId, StmError)
+├── bin/                  # flow CLI, flow-watchdog
+├── common/               # Cross-cutting types (Rect, WindowId, FlowError)
 ├── config/               # YAML config loading & validation
 ├── layout/               # Pure layout primitives (mutations, projection, diff)
 ├── workspace/            # Monitor → Workspace → ScrollingSpace + FloatingSpace
@@ -85,9 +85,9 @@ Convention: each module has `mod.rs` + `types.rs`. `common/` is vocabulary only.
 - `#![warn(missing_docs)]` — every public item must have doc comments
 - Module docs (`//!`) explain architecture; item docs (`///`) include examples
 - `#[must_use]` on all pure functions and constructors
-- Single error enum: `StmError` + `StmResult<T>` alias project-wide
+- Single error enum: `FlowError` + `FlowResult<T>` alias project-wide
 - Serde defaults: `#[serde(default = "fn_name")]` for all config fields
-- Config validation: `StmConfig::validate()` for semantic checks beyond serde
+- Config validation: `FlowConfig::validate()` for semantic checks beyond serde
 - Tests in same file via `#[cfg(test)] mod tests`, annotated `// Positive:` / `// Negative:`
 - **After each session, AI must synchronize docstrings to reflect any code changes**
 
@@ -95,7 +95,7 @@ Convention: each module has `mod.rs` + `types.rs`. `common/` is vocabulary only.
 
 - Safe Rust by default — `unsafe` only at Win32 FFI boundary
 - Any `unsafe` wrapped in safe abstraction with safety comments
-- No `.unwrap()` in daemon code — use `StmResult<T>` / `Option<T>` propagation
+- No `.unwrap()` in daemon code — use `FlowResult<T>` / `Option<T>` propagation
 - Graceful degradation — malformed config falls back to defaults, logs error
 - Watchdog recovery — no orphaned hidden windows after crash
 

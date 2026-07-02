@@ -17,11 +17,11 @@
 //! # What lives here vs. what doesn't
 //!
 //! A workspace never touches Win32 or the registry directly. The daemon
-//! ([`ScrollTilingManager`](crate::daemon::ScrollTilingManager)) is the only thing
+//! ([`FlowWM`](crate::daemon::FlowWM)) is the only thing
 //! that shuttles windows between the
 //! [`WindowRegistry`](crate::registry::WindowRegistry) and the active workspace's
 //! [`ScrollingSpace`]. IPC plumbing and window-event hooks remain direct fields of
-//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager), not of the workspace.
+//! [`FlowWM`](crate::daemon::FlowWM), not of the workspace.
 //!
 //! See the developer guide's *Workspace Hierarchy* chapter
 //! (`docs/src/dev-guide/workspace.md`) for the hierarchy diagram and the roadmap
@@ -44,7 +44,7 @@ pub use y_offset::workspace_y_offset;
 /// Workspaces are numbered with a plain `u32`, mirroring how niri and most
 /// Wayland compositors expose workspace ids over IPC. The id is **stable**:
 /// it does not change when workspaces are reordered or swapped, so clients
-/// can key on it safely. The [`ScrollTilingManager`](crate::daemon::ScrollTilingManager)
+/// can key on it safely. The [`FlowWM`](crate::daemon::FlowWM)
 /// assigns ids at creation time and never reuses them within a session.
 ///
 /// # Serialisation
@@ -55,7 +55,7 @@ pub use y_offset::workspace_y_offset;
 /// `switch-workspace` / `swap-workspace` / `move-to-workspace` commands.
 ///
 /// ```
-/// # use scrolling_tiling_manager::workspace::WorkspaceId;
+/// # use flow_wm::workspace::WorkspaceId;
 /// let id = WorkspaceId(7);
 /// assert_eq!(id.0, 7);
 /// ```
@@ -86,7 +86,7 @@ pub struct WorkspaceId(pub u32);
 /// keeps the tiling math pure and leaves room for floating-window logic to
 /// grow independently. The daemon always consults the **active** workspace of
 /// the **active** monitor — see
-/// [`ScrollTilingManager::active_workspace`](crate::daemon::ScrollTilingManager).
+/// [`FlowWM::active_workspace`](crate::daemon::FlowWM).
 pub struct Workspace {
     /// Stable identifier for this workspace. Never reused within a session.
     pub id: WorkspaceId,
@@ -106,12 +106,12 @@ impl Workspace {
     /// # Example
     ///
     /// ```no_run
-    /// # use scrolling_tiling_manager::workspace::{Workspace, WorkspaceId, ScrollingSpace};
-    /// # use scrolling_tiling_manager::layout::types::MonitorInfo;
-    /// # use scrolling_tiling_manager::common::Rect;
+    /// # use flow_wm::workspace::{Workspace, WorkspaceId, ScrollingSpace};
+    /// # use flow_wm::layout::types::MonitorInfo;
+    /// # use flow_wm::common::Rect;
     /// # let monitor = MonitorInfo { work_area: Rect { x: 0, y: 0, width: 1920, height: 1080 } };
     /// # let scrolling = ScrollingSpace::new(monitor, 960, 320, 100,
-    /// #     scrolling_tiling_manager::layout::types::Padding { window_gap: 4, up: 0, down: 0 }, 4);
+    /// #     flow_wm::layout::types::Padding { window_gap: 4, up: 0, down: 0 }, 4);
     /// let ws = Workspace::new(WorkspaceId(1), scrolling);
     /// assert_eq!(ws.id, WorkspaceId(1));
     /// ```

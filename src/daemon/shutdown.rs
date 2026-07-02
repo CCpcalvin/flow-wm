@@ -12,16 +12,16 @@
 
 use windows::Win32::Foundation::HWND;
 
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 use crate::common::{InvisibleBounds, Rect};
 use crate::registry::win32;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Rescue windows stranded off-screen back into the active monitor's
     /// `work_area`. Called once during graceful shutdown, after the event
     /// loop exits and before the daemon process tears down.
     ///
-    /// For each window STM controls ([`restorable_windows`][crate::registry::WindowRegistry::restorable_windows]):
+    /// For each window flow controls ([`restorable_windows`][crate::registry::WindowRegistry::restorable_windows]):
     ///
     /// 1. Ask Win32 for the window's current rect (`GetWindowRect`) — ground
     ///    truth from the OS, not workspace bookkeeping.
@@ -32,7 +32,7 @@ impl ScrollTilingManager {
     ///    `work_area` if the anchor is itself off-screen.
     ///
     /// `Ignored`, `Minimized`, and `Hidden` windows never reach this loop — the
-    /// registry accessor filters them out, since STM does not actively place
+    /// registry accessor filters them out, since flow does not actively place
     /// them.
     ///
     /// Failures (window vanished mid-loop, `SetWindowPos` rejected) are logged
@@ -52,7 +52,7 @@ impl ScrollTilingManager {
             if content_overlaps_work_area(current, invisible_bounds, work_area) {
                 continue;
             }
-            // Stranded — bring it back to its pre-STM anchor, clamped on-screen.
+            // Stranded — bring it back to its pre-flow anchor, clamped on-screen.
             let target = anchor.clamped_into(work_area);
             if win32::set_window_rect(hwnd_val, target.x, target.y, target.width, target.height) {
                 rescued += 1;

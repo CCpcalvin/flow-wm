@@ -6,9 +6,9 @@
 
 use crate::ipc::message::SocketResponse;
 
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Return all tracked windows as JSON.
     ///
     /// The viewport offset from the virtual layout is included so clients
@@ -92,26 +92,26 @@ mod tests {
 
     /// Verify that query methods exist and have the correct return type.
     ///
-    /// Since ScrollTilingManager construction requires admin rights (for named pipe)
+    /// Since FlowWM construction requires admin rights (for named pipe)
     /// and a real Windows desktop, we can't do full unit tests here.
     /// The query methods are tested indirectly via integration tests in tests/cli/.
     #[test]
     fn query_methods_exist_and_have_correct_return_type() {
         // This test verifies that the methods exist and return SocketResponse.
-        // We can't call them directly without a ScrollTilingManager instance.
+        // We can't call them directly without a FlowWM instance.
         // The actual behavior is tested via integration tests.
 
         // query_windows_all returns SocketResponse
-        let _type_check: fn(&ScrollTilingManager) -> SocketResponse =
-            ScrollTilingManager::query_windows_all;
+        let _type_check: fn(&FlowWM) -> SocketResponse =
+            FlowWM::query_windows_all;
 
         // query_layout_virtual returns SocketResponse
-        let _type_check: fn(&ScrollTilingManager) -> SocketResponse =
-            ScrollTilingManager::query_layout_virtual;
+        let _type_check: fn(&FlowWM) -> SocketResponse =
+            FlowWM::query_layout_virtual;
 
         // query_layout_actual returns SocketResponse
-        let _type_check: fn(&ScrollTilingManager) -> SocketResponse =
-            ScrollTilingManager::query_layout_actual;
+        let _type_check: fn(&FlowWM) -> SocketResponse =
+            FlowWM::query_layout_actual;
     }
 
     /// Positive: verify that SocketResponse::Data is constructible with JSON.

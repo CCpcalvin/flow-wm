@@ -1,7 +1,7 @@
 ---
 name: rust-implementation
 description: >
-  Teaches CoderAgent how to write Rust code for this ScrollingTilingManager
+  Teaches CoderAgent how to write Rust code for this FlowWM
   binary targeting Windows — modules, commands, window management, Win32 API
   calls, message loops, and workspace tiling logic. Load at the start of every
   Rust implementation phase.
@@ -11,7 +11,7 @@ description: >
 version: 2
 ---
 
-# Rust Implementation Guide — ScrollingTilingManager (Windows Binary)
+# Rust Implementation Guide — FlowWM (Windows Binary)
 
 ## Tech Stack
 
@@ -50,11 +50,11 @@ This project is **Windows-only**. A `build.rs` gate prevents compilation on othe
 
 ```
 src/
-├── main.rs              # stmd daemon entry: parse args, init runtime, run event loop
+├── main.rs              # flowd daemon entry: parse args, init runtime, run event loop
 ├── lib.rs               # Library crate — re-exports all pub modules
 │
 ├── common/              # Shared types and error definitions
-│   ├── error.rs         # StmError enum, StmResult<T> alias
+│   ├── error.rs         # FlowError enum, FlowResult<T> alias
 │   └── types.rs         # WindowId (platform-independent HWND bridge)
 │
 ├── layout/              # Pure tiling primitives — NO windows crate imports
@@ -83,7 +83,7 @@ src/
 │   ├── schema.rs        # JSON Schema generation via schemars
 │   └── dirs.rs          # XDG-style config/log directory resolution
 │
-├── ipc/                 # Named-pipe IPC for stm CLI ↔ stmd daemon
+├── ipc/                 # Named-pipe IPC for flow CLI ↔ flowd daemon
 │   ├── message.rs       # Request/Response enums
 │   ├── transport.rs     # Named-pipe read/write framing
 │   └── dispatch.rs      # Message → ScrollingSpace mutation dispatch
@@ -148,22 +148,22 @@ Rules:
 
 ```toml
 [package]
-name = "scrolling-tiling-manager"
+name = "flow-wm"
 version = "0.1.0"
 edition = "2024"
 description = "A scrolling, infinite-horizontal-canvas tiling window manager for Windows"
 
 [[bin]]
-name = "stmd"
+name = "flowd"
 path = "src/main.rs"
 
 [[bin]]
-name = "stm"
-path = "src/bin/stm.rs"
+name = "flow"
+path = "src/bin/flow.rs"
 
 [[bin]]
-name = "stm-watchdog"
-path = "src/bin/stm-watchdog.rs"
+name = "flow-watchdog"
+path = "src/bin/flow-watchdog.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -256,22 +256,22 @@ Rules:
 use std::fmt;
 
 #[derive(Debug)]
-pub enum StmError {
+pub enum FlowError {
     Config(String),
     Layout(String),
     Io(std::io::Error),
     Registry(String),
 }
 
-impl fmt::Display for StmError { /* ... */ }
-impl std::error::Error for StmError {}
+impl fmt::Display for FlowError { /* ... */ }
+impl std::error::Error for FlowError {}
 
-pub type StmResult<T> = Result<T, StmError>;
+pub type FlowResult<T> = Result<T, FlowError>;
 ```
 
 Rules:
 - NEVER use `.unwrap()` or `.expect()` outside of tests — use `?` or explicit match.
-- Map Win32 errors to `StmError::Registry(String)` at the registry boundary.
+- Map Win32 errors to `FlowError::Registry(String)` at the registry boundary.
 - Map I/O errors using the `From<std::io::Error>` impl — they convert automatically with `?`.
 - `panic!` is reserved for logic invariants that cannot be recovered from.
 

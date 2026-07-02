@@ -1,6 +1,6 @@
 //! Window registry — authoritative source of truth for all tracked windows.
 //!
-//! The bridge between the Windows OS window system and stm's internal layout
+//! The bridge between the Windows OS window system and flow's internal layout
 //! model. It hooks into Win32's WinEvent system to detect window creation,
 //! destruction, focus changes, minimize, restore, maximize, and fullscreen
 //! transitions. Each window is classified as
@@ -10,7 +10,7 @@
 //!
 //! # Threading model
 //!
-//! The registry is **not** wrapped in `Arc<Mutex>`. All subsystems in stm take
+//! The registry is **not** wrapped in `Arc<Mutex>`. All subsystems in flow take
 //! `&mut self` and the borrow checker enforces exclusive access at compile time.
 //! The background hook thread never touches the registry directly: it only sends
 //! typed [`HookEvent`]s through an `mpsc` channel (non-blocking). The main IPC

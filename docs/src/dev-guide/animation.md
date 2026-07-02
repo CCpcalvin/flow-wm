@@ -23,7 +23,7 @@ The animation layer exposes a small set of types through
 - **`AnimatorConfig`** — duration, easing curves, interrupt policy, frame pacing.
 
 The `AnimRect` type uses `{w, h}` for its size fields. This is intentionally
-different from STM's `common::Rect` which uses `{width, height}`. The two types
+different from flow's `common::Rect` which uses `{width, height}`. The two types
 coexist in different modules and are converted at integration boundaries. The
 daemon bridge handles this conversion transparently.
 
@@ -192,7 +192,7 @@ responsibilities:
    translate. Without this, windows would appear with gaps larger than
    configured.
 
-3. **Type conversion**: maps STM's `WindowId(isize)` to `WindowRef(isize)`,
+3. **Type conversion**: maps flow's `WindowId(isize)` to `WindowRef(isize)`,
    and the visible rect's `{width, height}` to `IVec2::new(width, height)`.
 
 4. **Submit all windows**: every entry in `actual_layout` becomes a target,
@@ -202,7 +202,7 @@ responsibilities:
 
 A standalone `animate_layout_raw()` function performs the same conversion but
 takes `&mut WindowAnimator` directly. This is used during daemon construction
-when `ScrollTilingManager` doesn't exist yet but the animator needs to snap
+when `FlowWM` doesn't exist yet but the animator needs to snap
 windows to their initial positions (with `Duration::ZERO` for an instant snap).
 
 ## Mid-Flight Retargeting

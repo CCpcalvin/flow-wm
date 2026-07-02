@@ -1,7 +1,7 @@
 //! Physical monitor owning a vertical stack of workspaces.
 //!
 //! A [`Monitor`] is the top of the workspace hierarchy under
-//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager). It binds two
+//! [`FlowWM`](crate::daemon::FlowWM). It binds two
 //! pieces of screen geometry to the [`Workspace`]s available on that display:
 //! the full physical [`Rect`](crate::common::Rect) (for parking workspaces
 //! off-screen) and the taskbar-excluded work area (for in-workspace tiling).

@@ -1,14 +1,14 @@
-//! Configuration type definitions for ScrollingTilingManager.
+//! Configuration type definitions for FlowWM.
 //!
 //! # CODE is the single source of truth
 //!
 //! Every config struct carries a `#[serde(default)]` container attribute, so
-//! any field missing from the user's `stm.toml` is filled from the struct's
+//! any field missing from the user's `flow.toml` is filled from the struct's
 //! [`Default`] implementation. These `Default` impls — defined inline below —
 //! are the **canonical default values**. There is no shipped-defaults TOML
 //! merged at runtime.
 //!
-//! As a result, a user's `stm.toml` may be **partial, empty, or even
+//! As a result, a user's `flow.toml` may be **partial, empty, or even
 //! nested-partial** (e.g. a `[padding]` block with only `window_gap` set).
 //! Serde creates a `Default` instance first, then overrides only the fields
 //! present in the TOML. This is simpler and more robust than the previous
@@ -19,7 +19,7 @@
 //!
 //! [`default-config.toml`](../../../../default-config.toml) in the project root
 //! is a hand-written, fully-commented **example** file. It is copied verbatim
-//! into a user's config directory by `stm config init` (see
+//! into a user's config directory by `flow config init` (see
 //! [`lifecycle::init_config_dir`](crate::config::lifecycle::init_config_dir)).
 //! It is **not** read at runtime. It must stay in sync with the compiled
 //! defaults; the `default_config_toml_matches_compiled_defaults` test enforces
@@ -29,12 +29,12 @@
 //!
 //! Configuration is split across two TOML files:
 //!
-//! - **`stm.toml`** ([`StmConfig`]) — Application settings (padding,
-//!   animation, etc.). Loaded from `%USERPROFILE%\.config\stm\stm.toml`
+//! - **`flow.toml`** ([`FlowConfig`]) — Application settings (padding,
+//!   animation, etc.). Loaded from `%USERPROFILE%\.config\flow\flow.toml`
 //!   (see [`config::dirs`](crate::config::dirs) for the full resolution chain).
 //!
-//! - **`stm-rules.toml`** ([`WindowRulesConfig`]) — Window classification rules
-//!   and default action. Loaded from `%USERPROFILE%\.config\stm\stm-rules.toml`.
+//! - **`flow-rules.toml`** ([`WindowRulesConfig`]) — Window classification rules
+//!   and default action. Loaded from `%USERPROFILE%\.config\flow\flow-rules.toml`.
 //!
 //! This separation allows users to edit rules frequently (adding ignore patterns
 //! for new apps) without risk of corrupting their app settings, and vice-versa.
@@ -46,13 +46,13 @@ use super::color::Color;
 
 /// Top-level application configuration structure.
 ///
-/// Loaded from `%USERPROFILE%\.config\stm\stm.toml` (see [`config::dirs`](crate::config::dirs)
-/// for the full resolution chain including `--config` flag and `STM_CONFIG_DIR` env var
+/// Loaded from `%USERPROFILE%\.config\flow\flow.toml` (see [`config::dirs`](crate::config::dirs)
+/// for the full resolution chain including `--config` flag and `FLOW_CONFIG_DIR` env var
 /// overrides). The struct carries `#[serde(default)]`, so the file may be partial or even empty —
 /// serde fills missing fields from the [`Default`] impl.
 ///
 /// The canonical default values live in the `Default` impl below. The `default-config.toml` file is
-/// a hand-written **example** copied to users by `stm config init` — it is not read at runtime.
+/// a hand-written **example** copied to users by `flow config init` — it is not read at runtime.
 ///
 /// This struct contains **application settings only** — padding,
 /// animation, etc. Window classification rules live in a separate file
@@ -60,11 +60,11 @@ use super::color::Color;
 ///
 /// # Column Sizing
 ///
-/// The primary column sizing mode is [`columns_per_screen`](StmConfig::columns_per_screen):
+/// The primary column sizing mode is [`columns_per_screen`](FlowConfig::columns_per_screen):
 /// the user specifies how many columns fit on one monitor, and the daemon computes
 /// the actual pixel width at runtime from the monitor resolution and [`window_gap`](Padding::window_gap).
 ///
-/// Power users can override this by setting [`column_width`](StmConfig::column_width)
+/// Power users can override this by setting [`column_width`](FlowConfig::column_width)
 /// to a fixed pixel value. When `column_width` is `Some`, it takes priority over
 /// `columns_per_screen` — the auto-computation is skipped entirely.
 ///
@@ -88,20 +88,20 @@ use super::color::Color;
 /// See `docs/spec/04-config-and-persistence.md` for the full schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
-pub struct StmConfig {
+pub struct FlowConfig {
     /// Number of columns that fit side-by-side on one monitor screen.
     ///
     /// The daemon computes the actual pixel width at startup:
     /// `base_content_width = (monitor_width - (N+1) * window_gap) / N`
     /// where `N = columns_per_screen`.
     ///
-    /// If [`column_width`](StmConfig::column_width) is also set, that value
+    /// If [`column_width`](FlowConfig::column_width) is also set, that value
     /// takes priority and this field is ignored.
     pub columns_per_screen: u32,
 
     /// Fixed column width in pixels — power-user override.
     ///
-    /// When `Some`, this overrides the auto-computation from [`columns_per_screen`](StmConfig::columns_per_screen).
+    /// When `Some`, this overrides the auto-computation from [`columns_per_screen`](FlowConfig::columns_per_screen).
     /// When `None`, the daemon computes the width from the monitor resolution, `columns_per_screen`,
     /// and `window_gap`.
     ///
@@ -145,7 +145,7 @@ fn default_window_action() -> WindowAction {
     WindowAction::Float
 }
 
-impl Default for StmConfig {
+impl Default for FlowConfig {
     fn default() -> Self {
         Self {
             columns_per_screen: 4,
@@ -242,7 +242,7 @@ impl Padding {
     }
 }
 
-impl StmConfig {
+impl FlowConfig {
     /// Validate config values that serde cannot enforce.
     ///
     /// Call this after deserializing a config file to catch
@@ -400,12 +400,12 @@ pub enum WindowAction {
     Ignore,
 }
 
-/// Window classification configuration, loaded from `stm-rules.toml`.
+/// Window classification configuration, loaded from `flow-rules.toml`.
 ///
 /// This is the user-facing window rules file. Rules are evaluated top-to-bottom,
 /// first match wins. If no rule matches, `default_action` is used.
 ///
-/// Loaded from `%USERPROFILE%\.config\stm\stm-rules.toml` (see [`config::dirs`](crate::config::dirs)
+/// Loaded from `%USERPROFILE%\.config\flow\flow-rules.toml` (see [`config::dirs`](crate::config::dirs)
 /// for overrides). If the file doesn't exist,
 /// defaults to an empty rule list with `default_action: float`.
 ///
@@ -716,9 +716,9 @@ mod tests {
 
     #[test]
     fn default_config_roundtrips_toml() {
-        let config = StmConfig::default();
+        let config = FlowConfig::default();
         let toml_str = toml::to_string(&config).expect("serialize");
-        let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize");
+        let parsed: FlowConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.columns_per_screen, 4);
         assert_eq!(parsed.column_width, None);
         assert_eq!(parsed.min_column_width_px, 640);
@@ -752,7 +752,7 @@ easing = "ease-out-expo"
 [minimize_restore]
 strategy = "original_slot"
 "#;
-        let config: StmConfig = toml::from_str(toml_str).expect("parse");
+        let config: FlowConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.columns_per_screen, 3);
         assert_eq!(config.column_width, Some(1200));
         assert_eq!(config.padding.window_gap, 8);
@@ -763,21 +763,21 @@ strategy = "original_slot"
 
     /// Positive: empty TOML deserializes to compiled defaults.
     ///
-    /// Because `StmConfig` carries `#[serde(default)]` at the container level,
+    /// Because `FlowConfig` carries `#[serde(default)]` at the container level,
     /// an empty file
-    /// (or a file with no recognized keys) yields a fully-defaulted [`StmConfig`].
+    /// (or a file with no recognized keys) yields a fully-defaulted [`FlowConfig`].
     /// This is the core of the "code is the source of truth" model: there is no
     /// separate shipped-defaults file to merge.
     #[test]
     fn config_from_empty_toml_uses_defaults() {
-        let config: StmConfig = toml::from_str("").expect("empty TOML should use defaults");
-        assert_eq!(config, StmConfig::default());
+        let config: FlowConfig = toml::from_str("").expect("empty TOML should use defaults");
+        assert_eq!(config, FlowConfig::default());
     }
 
     /// Positive: partial TOML (a single field) fills the rest from defaults.
     #[test]
     fn config_from_partial_toml_uses_defaults() {
-        let config: StmConfig =
+        let config: FlowConfig =
             toml::from_str("columns_per_screen = 3\n").expect("partial TOML should parse");
         assert_eq!(config.columns_per_screen, 3);
         // Everything else comes from defaults.
@@ -793,7 +793,7 @@ strategy = "original_slot"
     #[test]
     fn config_from_nested_partial_toml_uses_defaults() {
         let toml_str = "[padding]\nwindow_gap = 20\n";
-        let config: StmConfig = toml::from_str(toml_str).expect("nested-partial should parse");
+        let config: FlowConfig = toml::from_str(toml_str).expect("nested-partial should parse");
         assert_eq!(config.padding.window_gap, 20);
         assert_eq!(config.padding.up, 0);
         assert_eq!(config.padding.down, 0);
@@ -808,7 +808,7 @@ strategy = "original_slot"
     #[test]
     fn config_from_nested_partial_animation_uses_defaults() {
         let toml_str = "[animation]\nduration_ms = 500\n";
-        let config: StmConfig =
+        let config: FlowConfig =
             toml::from_str(toml_str).expect("nested-partial animation should parse");
         assert_eq!(config.animation.duration_ms, 500);
         // Missing fields should be their compiled defaults.
@@ -824,7 +824,7 @@ strategy = "original_slot"
     }
 
     /// Sync guard: the hand-written `default-config.toml` example must parse to
-    /// exactly the compiled [`StmConfig::default()`].
+    /// exactly the compiled [`FlowConfig::default()`].
     ///
     /// This enforces the AGENTS.md rule that `default-config.toml` stays in sync
     /// with the compiled `Default` impl. If you change a
@@ -832,11 +832,11 @@ strategy = "original_slot"
     #[test]
     fn default_config_toml_matches_compiled_defaults() {
         let example: &str = include_str!("../../default-config.toml");
-        let parsed: StmConfig =
-            toml::from_str(example).expect("default-config.toml must parse as StmConfig");
+        let parsed: FlowConfig =
+            toml::from_str(example).expect("default-config.toml must parse as FlowConfig");
         assert_eq!(
             parsed,
-            StmConfig::default(),
+            FlowConfig::default(),
             "default-config.toml drifted from compiled defaults; \
              update one to match the other"
         );
@@ -846,8 +846,8 @@ strategy = "original_slot"
 
     #[test]
     fn config_roundtrip_preserves_all_fields() {
-        // Positive: every field survives TOML → StmConfig → TOML
-        let config = StmConfig {
+        // Positive: every field survives TOML → FlowConfig → TOML
+        let config = FlowConfig {
             columns_per_screen: 3,
             column_width: Some(1200),
             min_column_width_px: 400,
@@ -880,7 +880,7 @@ strategy = "original_slot"
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
-        let parsed: StmConfig = toml::from_str(&toml_str).expect("deserialize all fields");
+        let parsed: FlowConfig = toml::from_str(&toml_str).expect("deserialize all fields");
 
         assert_eq!(parsed.columns_per_screen, 3);
         assert_eq!(parsed.column_width, Some(1200));
@@ -908,12 +908,12 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_negative_window_padding() {
-        let config = StmConfig {
+        let config = FlowConfig {
             padding: Padding {
                 window_gap: -1,
                 ..Padding::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(
@@ -926,12 +926,12 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_negative_up_padding() {
-        let config = StmConfig {
+        let config = FlowConfig {
             padding: Padding {
                 up: -5,
                 ..Padding::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(config.validate().unwrap_err().contains("padding.up"));
@@ -939,12 +939,12 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_negative_down_padding() {
-        let config = StmConfig {
+        let config = FlowConfig {
             padding: Padding {
                 down: -10,
                 ..Padding::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(config.validate().unwrap_err().contains("padding.down"));
@@ -952,31 +952,31 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_accepts_zero_padding() {
-        let config = StmConfig {
+        let config = FlowConfig {
             padding: Padding {
                 window_gap: 0,
                 up: 0,
                 down: 0,
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn config_validate_accepts_default_config() {
-        assert!(StmConfig::default().validate().is_ok());
+        assert!(FlowConfig::default().validate().is_ok());
     }
 
     #[test]
     fn config_validate_rejects_overlap_exceeding_thickness() {
-        let config = StmConfig {
+        let config = FlowConfig {
             borders: BorderConfig {
                 thickness: 3,
                 overlap: 4,
                 ..BorderConfig::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(config.validate().unwrap_err().contains("borders.overlap"));
@@ -985,13 +985,13 @@ strategy = "original_slot"
     #[test]
     fn config_validate_accepts_overlap_equal_to_thickness() {
         // overlap == thickness is the boundary: content fills the whole slot.
-        let config = StmConfig {
+        let config = FlowConfig {
             borders: BorderConfig {
                 thickness: 3,
                 overlap: 3,
                 ..BorderConfig::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_ok());
     }
@@ -1015,13 +1015,13 @@ strategy = "original_slot"
     /// never overlapping the content.
     #[test]
     fn config_validate_accepts_overlap_zero() {
-        let config = StmConfig {
+        let config = FlowConfig {
             borders: BorderConfig {
                 thickness: 3,
                 overlap: 0,
                 ..BorderConfig::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_ok());
     }
@@ -1047,9 +1047,9 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_zero_min_column_width() {
-        let config = StmConfig {
+        let config = FlowConfig {
             min_column_width_px: 0,
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(
@@ -1065,9 +1065,9 @@ strategy = "original_slot"
         // Negative: min_window_height_px == 0 is invalid (would allow zero-
         // height windows). The validation must reject it with a descriptive
         // error message naming the field.
-        let config = StmConfig {
+        let config = FlowConfig {
             min_window_height_px: 0,
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(
@@ -1081,10 +1081,10 @@ strategy = "original_slot"
 
     #[test]
     fn config_validate_rejects_min_exceeding_column_width() {
-        let config = StmConfig {
+        let config = FlowConfig {
             min_column_width_px: 1000,
             column_width: Some(960),
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(
@@ -1098,19 +1098,19 @@ strategy = "original_slot"
     #[test]
     fn config_validate_accepts_min_equal_to_column_width() {
         // When column_width is explicitly set, min must be <= it (equality is ok).
-        let config = StmConfig {
+        let config = FlowConfig {
             min_column_width_px: 960,
             column_width: Some(960),
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn config_validate_rejects_zero_columns_per_screen() {
-        let config = StmConfig {
+        let config = FlowConfig {
             columns_per_screen: 0,
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_err());
         assert!(
@@ -1124,10 +1124,10 @@ strategy = "original_slot"
     #[test]
     fn config_validate_accepts_column_width_none() {
         // When column_width is None (auto-compute mode), min check is deferred.
-        let config = StmConfig {
+        let config = FlowConfig {
             column_width: None,
             min_column_width_px: 9999,
-            ..StmConfig::default()
+            ..FlowConfig::default()
         };
         assert!(config.validate().is_ok());
     }
@@ -1389,13 +1389,13 @@ default_action = "foobar"
 default_width = 1200
 default_height = 800
 "#;
-        let parsed: StmConfig = toml::from_str(toml_str).expect("parse");
+        let parsed: FlowConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(parsed.floating.default_width, Some(1200));
         assert_eq!(parsed.floating.default_height, Some(800));
 
         // Re-serialize and parse once more to confirm a full round-trip.
         let reserialized = toml::to_string(&parsed).expect("serialize");
-        let reparsed: StmConfig = toml::from_str(&reserialized).expect("deserialize");
+        let reparsed: FlowConfig = toml::from_str(&reserialized).expect("deserialize");
         assert_eq!(reparsed.floating.default_width, Some(1200));
         assert_eq!(reparsed.floating.default_height, Some(800));
     }
@@ -1406,11 +1406,11 @@ default_height = 800
     #[test]
     fn floating_config_omitted_keys_parse_to_none() {
         let toml_str = "[floating]\n";
-        let parsed: StmConfig = toml::from_str(toml_str).expect("parse");
+        let parsed: FlowConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(parsed.floating.default_width, None);
         assert_eq!(parsed.floating.default_height, None);
         // The rest of the config still comes from compiled defaults.
-        assert_eq!(parsed, StmConfig::default());
+        assert_eq!(parsed, FlowConfig::default());
     }
 
     /// Positive: a partial `[floating]` block (only one key) fills the other
@@ -1419,7 +1419,7 @@ default_height = 800
     #[test]
     fn floating_config_partial_width_only_preserves_height_none() {
         let toml_str = "[floating]\ndefault_width = 1000\n";
-        let parsed: StmConfig = toml::from_str(toml_str).expect("parse");
+        let parsed: FlowConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(parsed.floating.default_width, Some(1000));
         assert_eq!(parsed.floating.default_height, None);
     }

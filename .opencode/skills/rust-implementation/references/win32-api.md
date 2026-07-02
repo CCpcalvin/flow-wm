@@ -1,4 +1,4 @@
-# Win32 API Reference — ScrollingTilingManager
+# Win32 API Reference — FlowWM
 
 ## Window Enumeration
 
@@ -49,5 +49,5 @@ Shell hook codes relevant to tiling:
 
 - **`MoveWindow` on maximised windows**: Call `ShowWindow(hwnd, SW_RESTORE)` before `MoveWindow`; otherwise the move is silently ignored.
 - **UWP / Store apps**: Their HWNDs are hosted inside a `ApplicationFrameWindow`; targeting the frame HWND moves the chrome but not the content. Use `FindWindowExW` to locate the inner `Windows.UI.Core.CoreWindow` child if needed.
-- **Elevated windows**: A non-elevated `stm.exe` cannot `MoveWindow` an elevated (admin) window. The call returns `FALSE` with `ERROR_ACCESS_DENIED` — log and skip; never crash.
+- **Elevated windows**: A non-elevated `flow.exe` cannot `MoveWindow` an elevated (admin) window. The call returns `FALSE` with `ERROR_ACCESS_DENIED` — log and skip; never crash.
 - **Virtual desktops**: `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop` (COM) is required to filter windows not on the active desktop. Without this check, tiling will include invisible windows.

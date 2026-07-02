@@ -6,7 +6,7 @@
 //!
 //! # Test strategy
 //!
-//! 1. Create an isolated test desktop and start `stmd` on it.
+//! 1. Create an isolated test desktop and start `flowd` on it.
 //! 2. Create dummy windows via [`TestWindow`] (fires `EVENT_OBJECT_CREATE`).
 //! 3. Control focus via [`set_foreground_window`] (fires `EVENT_OBJECT_FOCUS`).
 //! 4. Query the daemon via IPC and inspect each window's `col` index in its
@@ -28,8 +28,8 @@ use super::common::unique_pipe_name;
 use super::test_desktop::{
     DaemonGuard, TestDesktop, TestWindow, query_windows, start_test_daemon, unique_title,
 };
-use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
-use scrolling_tiling_manager::ipc::transport;
+use flow_wm::ipc::message::{SocketMessage, SocketResponse};
+use flow_wm::ipc::transport;
 
 /// Wait helper — keeps test code concise.
 fn wait(ms: u64) {

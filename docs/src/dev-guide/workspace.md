@@ -8,12 +8,12 @@ the active monitor's active workspace.
 
 ## The Hierarchy
 
-The tree has four levels, rooted on the daemon struct `ScrollTilingManager`:
+The tree has four levels, rooted on the daemon struct `FlowWM`:
 
 ```mermaid
 graph TB
-    STM["ScrollTilingManager<br/>(daemon orchestrator)"]
-    STM --> monitors["monitors: Vec&lt;Monitor&gt;<br/>active_monitor: usize"]
+    flow["FlowWM<br/>(daemon orchestrator)"]
+    flow --> monitors["monitors: Vec&lt;Monitor&gt;<br/>active_monitor: usize"]
     monitors --> M["Monitor<br/>(work_area Rect)"]
     M --> ws["workspaces: Vec&lt;Workspace&gt;<br/>active_workspace: usize"]
     ws --> W["Workspace<br/>id: WorkspaceId"]
@@ -21,7 +21,7 @@ graph TB
     W --> FS["FloatingSpace<br/>(on-screen pixel rects)"]
 ```
 
-`ScrollTilingManager` is defined in [`src/daemon/mod.rs`](../../src/daemon/mod.rs). It
+`FlowWM` is defined in [`src/daemon/mod.rs`](../../src/daemon/mod.rs). It
 holds `monitors: Vec<Monitor>` and `active_monitor: usize`, giving O(1) access
 to the active monitor through [`active_scrolling()`] and [`active_scrolling_mut()`].
 
@@ -33,14 +33,14 @@ to the active monitor through [`active_scrolling()`] and [`active_scrolling_mut(
 ## Accessing the Active Scrolling Space
 
 Every IPC command and hook-event handler ultimately calls one of two accessors
-on `ScrollTilingManager`:
+on `FlowWM`:
 
 - `active_scrolling()` — immutable borrow of the active workspace's `ScrollingSpace`.
 - `active_scrolling_mut()` — mutable borrow, used for mutations like
   `add_window`, `swap_column`, or `scroll`.
 
 These accessors chain through two indirection layers:
-`ScrollTilingManager` -> active `Monitor` -> active `Workspace` -> `ScrollingSpace`.
+`FlowWM` -> active `Monitor` -> active `Workspace` -> `ScrollingSpace`.
 The daemon never exposes raw monitor or workspace indices to callers; the accessors
 hide the traversal. See [`Monitor::active_scrolling`](../../src/workspace/monitor.rs)
 for the implementation.
@@ -98,15 +98,15 @@ whole stack vertically.
 
 Three IPC commands implement this surface:
 
-- `stm dispatch switch-workspace <id>` — switch the active workspace.
+- `flow dispatch switch-workspace <id>` — switch the active workspace.
   **Implemented.** Animates a vertical-packing switch: the source and
   destination workspaces slide between their parked y-offsets in a single
   coordinated animation batch.
-- `stm dispatch move-to-workspace <id>` — move the focused window to another
+- `flow dispatch move-to-workspace <id>` — move the focused window to another
   workspace. **Implemented.** Mutates both the source and destination
   layouts, then switches the camera to the destination so the moved window
   is brought into view.
-- `stm dispatch swap-workspace <id>` — swap the active workspace with another.
+- `flow dispatch swap-workspace <id>` — swap the active workspace with another.
   **Stub.** Its protocol shape is locked in, but its animation model (two
   workspaces exchanging positions in the packed stack) is not yet decided,
   so it currently returns `unimplemented_command`.
@@ -142,7 +142,7 @@ The workspace module is deliberately thin. It owns the container types (`Monitor
 - **Tile/float/ignore classification** — the registry decides what state a
   window is in; the workspace only receives `WindowId`s that the daemon has
   already classified as tiling-eligible.
-- **IPC plumbing and hooks** — these are direct fields on `ScrollTilingManager`.
+- **IPC plumbing and hooks** — these are direct fields on `FlowWM`.
   The hook thread sends `HookEvent`s over an `mpsc` channel; the daemon's IPC
   thread processes them and routes mutations to the workspace. See
   [event pipelines](./event-pipelines.md) for the full flow.

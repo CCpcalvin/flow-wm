@@ -1,4 +1,4 @@
-//! IPC message and response types for the stm protocol.
+//! IPC message and response types for the flow protocol.
 //!
 //! The protocol uses newline-delimited JSON. The CLI sends a [`SocketMessage`],
 //! the daemon replies with a [`SocketResponse`].
@@ -34,24 +34,24 @@ pub enum WindowMode {
 }
 
 /// Default named pipe path used by the daemon and CLI on Windows.
-pub const PIPE_NAME: &str = r"\\.\pipe\stm";
+pub const PIPE_NAME: &str = r"\\.\pipe\flow";
 
 /// Environment variable name for overriding the pipe path.
-const PIPE_ENV: &str = "STM_PIPE_NAME";
+const PIPE_ENV: &str = "FLOW_PIPE_NAME";
 
 /// Return the named pipe path for IPC.
 ///
-/// Reads from the `STM_PIPE_NAME` environment variable, falling back to
+/// Reads from the `FLOW_PIPE_NAME` environment variable, falling back to
 /// [`PIPE_NAME`] if not set. This allows integration tests to use isolated
 /// pipe names without interfering with a production daemon.
 ///
-/// Both `stmd` and `stm` read the same variable, so spawning the daemon
-/// via `stm start` inherits the variable automatically.
+/// Both `flowd` and `flow` read the same variable, so spawning the daemon
+/// via `flow start` inherits the variable automatically.
 pub fn pipe_name() -> String {
     std::env::var(PIPE_ENV).unwrap_or_else(|_| PIPE_NAME.to_owned())
 }
 
-/// A command sent from `stm` CLI to the `stmd` daemon.
+/// A command sent from `flow` CLI to the `flowd` daemon.
 ///
 /// Serialised with an externally tagged `"type"` field and snake_case variant
 /// names. See the developer guide (`docs/src/dev-guide/ipc-and-watchdog.md`)
@@ -200,7 +200,7 @@ pub enum SocketMessage {
     // bare integer, matching `WorkspaceId`'s `#[serde(transparent)]` impl.
     /// Switch the active monitor's focus to the given workspace.
     ///
-    /// Mirrors `stm dispatch switch-workspace <id>`. The previously active
+    /// Mirrors `flow dispatch switch-workspace <id>`. The previously active
     /// workspace is conceptually frozen in its packed position (above or
     /// below the target, the vertical analogue of horizontal column packing
     /// inside a `ScrollingSpace`) and the target slides into the viewport.
@@ -211,7 +211,7 @@ pub enum SocketMessage {
     /// Swap the active workspace with the target workspace in the monitor's
     /// workspace list.
     ///
-    /// Mirrors `stm dispatch swap-workspace <id>`. The two workspaces exchange
+    /// Mirrors `flow dispatch swap-workspace <id>`. The two workspaces exchange
     /// positions in the packed vertical stack; focus follows the originally
     /// active workspace to its new slot. This is the operation most other
     /// tiling managers omit but that is essential for rearranging a long
@@ -222,7 +222,7 @@ pub enum SocketMessage {
     },
     /// Move the focused window to the target workspace.
     ///
-    /// Mirrors `stm dispatch move-to-workspace <id>`. The focused window is
+    /// Mirrors `flow dispatch move-to-workspace <id>`. The focused window is
     /// detached from the active workspace's `ScrollingSpace` (with local
     /// focus succession — no OS foreground focus push) and re-inserted into
     /// the target workspace's `ScrollingSpace` after its currently focused
@@ -268,7 +268,7 @@ pub enum SocketMessage {
     ForgetAllApps,
 }
 
-/// A response sent from the `stmd` daemon back to the `stm` CLI.
+/// A response sent from the `flowd` daemon back to the `flow` CLI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SocketResponse {

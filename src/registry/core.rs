@@ -10,9 +10,9 @@
 //! # Threading model
 //!
 //! The registry is owned directly by
-//! [`ScrollTilingManager`](crate::daemon::ScrollTilingManager) — **no
+//! [`FlowWM`](crate::daemon::FlowWM) — **no
 //! `Arc<Mutex<>>`** wrapping. The IPC thread owns it; the background hook thread
-//! never accesses any STM field — it only sends typed [`HookEvent`]s through a
+//! never accesses any flow field — it only sends typed [`HookEvent`]s through a
 //! non-blocking `mpsc` channel. The IPC thread drains that channel and dispatches
 //! to handler methods. All HWND dereferencing happens on the IPC thread. Because
 //! handlers take `&mut self`, the borrow checker enforces exclusive access at
@@ -81,7 +81,7 @@ use super::win32;
 ///
 /// # Threading
 ///
-/// Owned directly by [`ScrollTilingManager`](crate::daemon::ScrollTilingManager)
+/// Owned directly by [`FlowWM`](crate::daemon::FlowWM)
 /// — no `Arc<Mutex<>>` wrapping. The orchestrator drains hook events from the
 /// mpsc channel on the IPC thread and calls registry methods via `&mut self`.
 ///
@@ -114,9 +114,9 @@ impl WindowRegistry {
     ///
     /// # Arguments
     ///
-    /// * `user_rules` - User-defined window rules from `stm-rules.toml`.
+    /// * `user_rules` - User-defined window rules from `flow-rules.toml`.
     /// * `default_rules` - Bundled default rules (embedded at compile time from
-    ///   `default-stm-rules.toml`).
+    ///   `default-flow-rules.toml`).
     #[must_use]
     pub fn new(user_rules: &WindowRulesConfig, default_rules: &WindowRulesConfig) -> Self {
         Self {
@@ -319,7 +319,7 @@ impl WindowRegistry {
     /// # Design Decision: Ignore Untracked Windows
     ///
     /// The Windows OS fires `EVENT_SYSTEM_FOREGROUND` for any window that
-    /// gains focus, including windows stm doesn't manage (like the taskbar
+    /// gains focus, including windows flow doesn't manage (like the taskbar
     /// or system dialogs). By checking `contains_key`, we avoid recording
     /// focus for windows that aren't in our registry.
     pub fn set_focused(&mut self, hwnd_val: isize) {
@@ -358,7 +358,7 @@ impl WindowRegistry {
 
     /// Replace the classification pipeline's user-rules layer.
     ///
-    /// Used by hot-reload so edited `stm-rules.toml` rules take effect without
+    /// Used by hot-reload so edited `flow-rules.toml` rules take effect without
     /// a restart. See (`docs/src/dev-guide/config-and-persistence.md`).
     pub fn set_user_rules(&mut self, user_rules: WindowRulesConfig) {
         self.pipeline.set_user_rules(user_rules);
@@ -418,7 +418,7 @@ impl WindowRegistry {
     ///   the saved `last_virtual_slot`. If no slot was saved (edge case),
     ///   defaults to `(0, 0)`.
     /// - **Floating::Minimized** → restores to `Floating::Active { rect }` using
-    ///   the `pre_manage_rect` (the window's position before stm managed it).
+    ///   the `pre_manage_rect` (the window's position before flow managed it).
     /// - **Not minimized** → no-op (returns early).
     ///
     /// # Design: Why Default to (0, 0)?
@@ -588,7 +588,7 @@ impl WindowRegistry {
     ///     `window_rect` minus the stored invisible borders, or null if `window_rect`
     ///     is unavailable
     ///   - `invisible_bounds`: per-edge invisible border sizes (left, top, right, bottom)
-    ///   - `pre_manage_rect`: position before stm touched the window
+    ///   - `pre_manage_rect`: position before flow touched the window
     /// - `viewport_offset`: camera position on the virtual canvas
     /// - `focused`: the focused HWND value (or null)
     /// - `count`: number of tracked windows
@@ -737,7 +737,7 @@ impl WindowRegistry {
     /// Returns tiling window IDs with their `pre_manage_rect.width` sorted by x.
     ///
     /// Like [`tiling_window_ids_sorted_by_x`](Self::tiling_window_ids_sorted_by_x)
-    /// but also returns each window's pre-STM width for init-time width
+    /// but also returns each window's pre-flow width for init-time width
     /// preservation. Widths are clamped to `u32` (negative widths become 0,
     /// callers should substitute `column_width`).
     #[must_use]
@@ -758,10 +758,10 @@ impl WindowRegistry {
     }
 
     /// Returns `(hwnd_key, pre_manage_rect, invisible_bounds)` for every window
-    /// STM is actively positioning — those in a `Tiling(Active)` or
+    /// flow is actively positioning — those in a `Tiling(Active)` or
     /// `Floating(Active)` state.
     ///
-    /// `Minimized`/`Hidden` windows are excluded: STM does not actively place
+    /// `Minimized`/`Hidden` windows are excluded: flow does not actively place
     /// them, so their position is the OS's/user's concern and the rescue pass
     /// leaves them alone. `Ignored` windows are excluded for the same reason.
     /// The rescue pass uses `pre_manage_rect` as the on-screen anchor and
@@ -889,7 +889,7 @@ impl WindowRegistry {
     ///
     /// Used by the daemon's late-title recovery path
     /// ([`HookEvent::NameChange`](super::HookEvent::NameChange)) to decide
-    /// whether a title change concerns a window stm already manages. Acting
+    /// whether a title change concerns a window flow already manages. Acting
     /// only on *untracked* windows avoids re-classifying (and potentially
     /// re-tiling) tracked windows on every title change, which would churn
     /// the layout.
@@ -921,7 +921,7 @@ impl WindowRegistry {
     /// path is a single `HashMap` lookup plus a state match:
     ///
     /// - **Untracked** → [`Untracked`](super::types::ReclassifyResult::Untracked)
-    ///   (the window is not managed by stm; let `CREATE`/`NAMECHANGE` handle it).
+    ///   (the window is not managed by flow; let `CREATE`/`NAMECHANGE` handle it).
     /// - **Not OS-ignored** → [`NotApplicable`](super::types::ReclassifyResult::NotApplicable)
     ///   (the window is already tiling/floating, or ignored by an explicit
     ///   rule). OS-state recovery does not touch rule-classified windows.
@@ -2778,7 +2778,7 @@ mod tests {
 
     #[test]
     fn restorable_windows_includes_only_active_tiling() {
-        // Only Active tiling windows are positioned by STM, so only they are
+        // Only Active tiling windows are positioned by flow, so only they are
         // rescue candidates. Minimized/Hidden windows are not actively placed
         // and must be left alone on shutdown.
         let (user, default) = default_rules();
@@ -2806,7 +2806,7 @@ mod tests {
 
     #[test]
     fn restorable_windows_includes_only_active_floating() {
-        // Only Active floating windows are positioned by STM.
+        // Only Active floating windows are positioned by flow.
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
         insert_test_window_with_rect(
@@ -2844,7 +2844,7 @@ mod tests {
 
     #[test]
     fn restorable_windows_excludes_all_ignored_variants() {
-        // Negative: every Ignored* variant is excluded — STM never moved them.
+        // Negative: every Ignored* variant is excluded — flow never moved them.
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
         insert_test_window(
@@ -2881,7 +2881,7 @@ mod tests {
     #[test]
     fn restorable_windows_returns_pre_manage_rect_as_anchor() {
         // Positive: the returned Rect is the window's pre_manage_rect (the
-        // pre-STM anchor), not some other rect field. We insert at a known x
+        // pre-flow anchor), not some other rect field. We insert at a known x
         // and check it round-trips.
         let (user, default) = default_rules();
         let mut reg = WindowRegistry::new(&user, &default);
@@ -2907,7 +2907,7 @@ mod tests {
     fn restorable_windows_returns_pre_manage_rect_not_tiled_rect() {
         // Positive: when both `pre_manage_rect` and `tiled_rect` are set (the
         // realistic mid-session case), the rescue anchor MUST be
-        // `pre_manage_rect` — the position the window held *before* STM moved
+        // `pre_manage_rect` — the position the window held *before* flow moved
         // it. Returning `tiled_rect` instead would defeat the rescue: it would
         // put the window back at the off-screen tiled position we are trying
         // to rescue it from. The plain `insert_test_window_with_rect` helper
@@ -2923,7 +2923,7 @@ mod tests {
             height: 600,
         };
         // A wildly different "current tiled" rect — parked off-screen, where
-        // STM put it (e.g. a non-active workspace).
+        // flow put it (e.g. a non-active workspace).
         let tiled = crate::common::Rect {
             x: 5000,
             y: 5000,

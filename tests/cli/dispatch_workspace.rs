@@ -1,4 +1,4 @@
-//! Integration tests for `stm dispatch switch-workspace` and `stm dispatch
+//! Integration tests for `flow dispatch switch-workspace` and `flow dispatch
 //! move-to-workspace`.
 //!
 //! These tests cover two related bug fixes in cross-workspace window moves:
@@ -27,7 +27,7 @@
 //! The daemon's named-pipe server services one client at a time on a
 //! background accept thread. Between a client disconnect and the next
 //! `ConnectNamedPipe` there is a brief window where new connections are
-//! refused. A single [`send_message_to`](scrolling_tiling_manager::ipc::transport::send_message_to)
+//! refused. A single [`send_message_to`](flow_wm::ipc::transport::send_message_to)
 //! that lands in that window returns `ConnectionRefused`, and the test
 //! harness's [`send_ipc_ignore`] helper silently drops that error — which
 //! loses the message. That is fatal for commands issued back-to-back with a
@@ -38,7 +38,7 @@
 //!
 //! # Desktop isolation
 //!
-//! Each test creates a [`TestDesktop`] and spawns `stmd` on it via
+//! Each test creates a [`TestDesktop`] and spawns `flowd` on it via
 //! [`start_test_daemon`], so the user's real desktop is never touched. Unique
 //! pipe names provide parallel isolation between tests.
 
@@ -48,7 +48,7 @@
 
 use std::time::Duration;
 
-use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
+use flow_wm::ipc::message::{SocketMessage, SocketResponse};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
@@ -357,7 +357,7 @@ fn move_to_unknown_workspace_returns_error() {
 
     // Act: workspace 99 does not exist (the daemon creates 1..=10). The CLI
     // must report a failure.
-    super::common::stm(&pipe)
+    super::common::flow(&pipe)
         .args(["dispatch", "move-to-workspace", "99"])
         .assert()
         .failure();
@@ -455,7 +455,7 @@ fn switch_to_self_is_noop() {
 // partition loop running against real workspace state. The animator's
 // `MockBackend` is `pub(crate)` so it cannot be driven from `tests/`; the
 // CLI harness exercises the dispatcher + animator end-to-end against a real
-// `stmd` process. The physical window rect is then read back via Win32
+// `flowd` process. The physical window rect is then read back via Win32
 // `GetWindowRect` (the IPC layout queries report *logical* rects for the
 // active workspace only and cannot see a parked workspace's frozen rect).
 

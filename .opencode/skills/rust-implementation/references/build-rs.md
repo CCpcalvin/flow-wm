@@ -6,7 +6,7 @@ appear in `build.rs`), the build script uses `panic!` instead, which halts the
 build immediately with a clear error message.
 
 ```rust
-//! Build script for scrolling-tiling-manager.
+//! Build script for flow-wm.
 //!
 //! This project targets Windows exclusively. The build script panics if the
 //! target OS is not Windows, preventing accidental compilation on other
@@ -15,7 +15,7 @@ build immediately with a clear error message.
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         panic!(
-            "scrolling-tiling-manager only supports Windows targets. \
+            "flow-wm only supports Windows targets. \
              Build with --target x86_64-pc-windows-msvc"
         );
     }
@@ -38,7 +38,7 @@ and use the `embed-resource` or `winres` crate:
 fn main() {
     // Platform gate
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        panic!("scrolling-tiling-manager only supports Windows targets");
+        panic!("flow-wm only supports Windows targets");
     }
 
     // Embed manifest (when ready)

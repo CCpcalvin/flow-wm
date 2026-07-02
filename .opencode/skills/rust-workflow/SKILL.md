@@ -2,7 +2,7 @@
 name: rust-workflow
 description: >
   Orchestration reference for multi-phase Rust feature work on the
-  ScrollingTilingManager Windows binary (layout, registry/Win32, config, IPC,
+  FlowWM Windows binary (layout, registry/Win32, config, IPC,
   animation). Holds phase planning, parallel rules, module dependency layers,
   re-spawn policy, and the feature-done checklist.
 
@@ -16,7 +16,7 @@ description: >
 version: 2
 ---
 
-# Rust Feature Workflow — ScrollingTilingManager (Windows Binary)
+# Rust Feature Workflow — FlowWM (Windows Binary)
 
 > **When to load this skill** is decided by the "Rust workflow gate" in `AGENTS.md`,
 > not by this file. If you are reading this, a non-trivial Rust task is in progress.
@@ -39,7 +39,7 @@ Each CoderAgent is assigned to **one module layer** — `layout/`, `registry/`, 
 Module layers and their dependencies:
 
 ```
-common/    → (no stm imports — foundation layer)
+common/    → (no flow imports — foundation layer)
 layout/    → common/ only
 config/    → common/ only
 registry/  → common/ + layout/types (for Rect conversion)
@@ -138,7 +138,7 @@ TestEngineer (coverage analysis + cargo test) ───────────�
 - [ ] TestEngineer: `cargo test` (full suite) 0 failures
 - [ ] TestEngineer: missing tests written for identified gaps
 - [ ] CodeReviewer: approved
-- [ ] `cargo build --release` produces `stmd.exe`, `stm.exe`, `stm-watchdog.exe`
+- [ ] `cargo build --release` produces `flowd.exe`, `flow.exe`, `flow-watchdog.exe`
 - [ ] No `.unwrap()` / `.expect()` in production code paths
 - [ ] All public items have `///` doc comments
 - [ ] `build.rs` Windows-only guard present

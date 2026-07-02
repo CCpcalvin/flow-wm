@@ -6,7 +6,7 @@ rationale for the choice.
 
 ## Single Cargo Package (Not a Workspace)
 
-`stm` is a single Cargo package with three binaries (`stmd`, `stm`, `stm-watchdog`)
+`flow` is a single Cargo package with three binaries (`flowd`, `flow`, `flow-watchdog`)
 sharing one library crate (`src/lib.rs`). Rust supports this layout natively — one
 package can contain a library crate, a default binary, and additional binaries.
 
@@ -17,7 +17,7 @@ everything in one package avoids Cargo configuration overhead and makes refactor
 across module boundaries trivial.
 
 Extraction to a separate crate will happen only when a concrete reason appears:
-the code is reusable outside `stm`, compile times become a real bottleneck, or
+the code is reusable outside `flow`, compile times become a real bottleneck, or
 the API has stabilized and deserves a stronger boundary. Likely future
 extraction candidates are `src/animation` (if the animation system becomes
 reusable elsewhere) and `src/ipc` (if external tools need a standalone client
@@ -44,7 +44,7 @@ was never a real requirement (the target is Windows desktop, not cross-platform)
 
 ## No `Arc<Mutex>` (Single-Thread Ownership)
 
-The daemon uses single-thread ownership: `ScrollTilingManager` lives entirely on
+The daemon uses single-thread ownership: `FlowWM` lives entirely on
 the IPC thread, and all subsystem methods take `&mut self`. There is no
 `Arc<Mutex<T>>` anywhere in the daemon.
 
@@ -69,7 +69,7 @@ the clear choice. Lua remains a future option if users need conditional logic
 (e.g. per-monitor layouts), but TOML covers all current use cases.
 
 The config system uses a two-layer merge model: compiled-in `Default` impls
-provide the base, and the user's `stm.toml` overlays on top. Serde's
+provide the base, and the user's `flow.toml` overlays on top. Serde's
 `#[serde(default)]` at the container level means a user's config can be partial,
 empty, or nested-partial — serde fills the gaps from the `Default` impl.
 
@@ -77,11 +77,11 @@ empty, or nested-partial — serde fills the gaps from the `Default` impl.
 
 Default values for every config field live in the `Default` impls of each config
 struct in [`src/config/types.rs`](../../src/config/types.rs). Each struct carries
-`#[serde(default)]` at the container level, so a user's `stm.toml` may be partial
+`#[serde(default)]` at the container level, so a user's `flow.toml` may be partial
 or empty.
 
 `default-config.toml` in the repo root is a hand-written **example** file, copied
-to users by `stm config init`. It is **not** read at runtime — the compiled
+to users by `flow config init`. It is **not** read at runtime — the compiled
 defaults are authoritative. When a developer adds or changes a config field,
 they must update both the `Default` impl and `default-config.toml`. A test
 (`default_config_toml_matches_compiled_defaults`) enforces they stay in sync.
@@ -117,7 +117,7 @@ API.
 
 `DeferWindowPos` batches multiple position changes and triggers a single repaint
 at the end — useful for UI frameworks that own all the windows they move. In
-`stm`'s case, not all windows are deferrable (some apps reject deferred
+`flow`'s case, not all windows are deferrable (some apps reject deferred
 positioning), and each application owns its own rendering pipeline. `SetWindowPos`
 applies the position change immediately, which is what the animation system
 expects when tweening individual window rects frame by frame.
@@ -138,7 +138,7 @@ raw integer value is just a kernel handle — it is safe to share across threads
 
 ## Keybindings Removed, Delegated to External Tools
 
-Keybindings were removed from `stm`. The daemon accepts IPC commands over a named
+Keybindings were removed from `flow`. The daemon accepts IPC commands over a named
 pipe, and users are expected to configure external tools (AutoHotkey, PowerToys,
 etc.) to send those commands.
 
@@ -149,7 +149,7 @@ configurable hotkey bindings. This was removed because:
   user may already have.
 - A dedicated keybinding tool gives users more flexibility (per-application
   rules, macros, chords) than any tiling manager's built-in binding system.
-- It keeps `stm` focused on what it does well: window management and layout.
+- It keeps `flow` focused on what it does well: window management and layout.
 
 The IPC protocol surface (focus, swap, scroll, resize, etc.) is fully defined and
-stable — any external tool that can write JSON to a named pipe can drive `stm`.
+stable — any external tool that can write JSON to a named pipe can drive `flow`.

@@ -1,6 +1,6 @@
 //! Common types shared across all modules.
 //!
-//! This module defines the foundational types used throughout stm — geometry
+//! This module defines the foundational types used throughout flow — geometry
 //! primitives, direction enums, and the platform-independent [`WindowId`] handle.
 //! These types have **zero platform dependencies** and are testable on any OS.
 //!
@@ -14,5 +14,5 @@
 pub mod error;
 pub mod types;
 
-pub use error::{StmError, StmResult};
+pub use error::{FlowError, FlowResult};
 pub use types::{Direction, InvisibleBounds, Point, Rect, Size, WindowId};

@@ -1,6 +1,6 @@
-//! ScrollTilingManager — the single top-level orchestrator for the `stmd` daemon.
+//! FlowWM — the single top-level orchestrator for the `flowd` daemon.
 //!
-//! [`ScrollTilingManager`] owns all subsystems and routes events between them.
+//! [`FlowWM`] owns all subsystems and routes events between them.
 //! See individual module files for detailed documentation.
 
 use std::path::PathBuf;
@@ -8,14 +8,14 @@ use std::sync::mpsc::Receiver;
 
 use crate::animation::WindowAnimator;
 use crate::config::history::HistoryStore;
-use crate::config::types::StmConfig;
+use crate::config::types::FlowConfig;
 use crate::ipc::transport::PipeServer;
 use crate::registry::WindowRegistry;
 use crate::registry::hooks::{HookSignal, HookThreadHandle};
 use crate::workspace::{FloatingSpace, Monitor, ScrollingSpace, Workspace};
 
 /// Intermediate struct holding layout engine parameters derived from
-/// [`StmConfig`]. Used during construction to keep the parameter list
+/// [`FlowConfig`]. Used during construction to keep the parameter list
 /// readable and avoid recomputing values.
 ///
 /// This type is private to the daemon module — only construction logic
@@ -23,7 +23,7 @@ use crate::workspace::{FloatingSpace, Monitor, ScrollingSpace, Workspace};
 pub(super) struct LayoutConfig {
     /// Default column width in pixels.
     ///
-    /// When `StmConfig::column_width` is `Some`, this is that value directly.
+    /// When `FlowConfig::column_width` is `Some`, this is that value directly.
     /// When `None`, this is computed from `columns_per_screen`, the monitor width,
     /// and `window_gap`:
     /// `base_content_width = (monitor_width - (N+1) * window_gap) / N`
@@ -34,14 +34,14 @@ pub(super) struct LayoutConfig {
 
     /// Minimum per-row window height in pixels. Caps how many windows a
     /// column can hold. Sourced directly from
-    /// [`StmConfig::min_window_height_px`].
+    /// [`FlowConfig::min_window_height_px`].
     pub(super) min_window_height_px: u32,
 
     /// Padding converted from config types to layout types.
     pub(super) padding: crate::layout::types::Padding,
 }
 
-/// The single orchestrator for the ScrollingTilingManager daemon.
+/// The single orchestrator for the FlowWM daemon.
 ///
 /// Owns all subsystems and routes events between them. Lives entirely on
 /// the IPC thread — no interior mutability (`Arc<Mutex<>>`) is needed.
@@ -50,7 +50,7 @@ pub(super) struct LayoutConfig {
 ///
 /// ```text
 /// ┌──────────────────────────────────────────────────────────────────────┐
-/// │                      ScrollTilingManager                             │
+/// │                      FlowWM                             │
 /// │                                                                      │
 /// │  Owns:                                                               │
 /// │  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
@@ -73,14 +73,14 @@ pub(super) struct LayoutConfig {
 ///
 /// ```text
 /// Hook Thread (background):          IPC Thread (main):
-///   SetWinEventHook ×3                owns ScrollTilingManager (all fields)
+///   SetWinEventHook ×3                owns FlowWM (all fields)
 ///   GetMessageW loop                  ├─ process_hook_events()
 ///       ↓ callback                    ├─ dispatch IPC command
 ///   sender.send(HookEvent)            ├─ process_hook_events()
 ///                                     └─ ... (repeat)
 /// ```
 ///
-/// The hook thread never touches any STM field. It only sends [`HookEvent`]
+/// The hook thread never touches any flow field. It only sends [`HookEvent`]
 /// through the `mpsc` channel. The IPC thread reads the channel and calls
 /// methods on `registry`, the active workspace's scrolling space, and the
 /// `animator` directly — **no mutex, no locking, no deadlocks**.
@@ -88,11 +88,11 @@ pub(super) struct LayoutConfig {
 /// Since all subsystem methods take `&mut self`, the borrow checker enforces
 /// exclusive access at compile time. This is strictly safer than `Mutex`
 /// (which only enforces at runtime and can deadlock).
-pub struct ScrollTilingManager {
+pub struct FlowWM {
     /// Window registry — authoritative source of truth for all tracked windows.
     pub(super) registry: WindowRegistry,
 
-    /// Per-app learned window modes, persisted to `history-stm-rules.toml`.
+    /// Per-app learned window modes, persisted to `history-flow-rules.toml`.
     ///
     /// Records the user's explicit `set-window float|tile` decisions so the
     /// next window of the same app is classified automatically. See
@@ -116,18 +116,18 @@ pub struct ScrollTilingManager {
     /// Window animator — background-threaded rect animation for smooth moves.
     pub(super) animator: WindowAnimator,
 
-    /// IPC named pipe server — accepts commands from the `stm` CLI.
+    /// IPC named pipe server — accepts commands from the `flow` CLI.
     pub(super) server: PipeServer,
 
-    /// Application configuration loaded from `stm.toml`.
+    /// Application configuration loaded from `flow.toml`.
     ///
     /// The live source for border colors/thickness (read by the border overlay
     /// and animation code) and the target of hot-reload. The layout engine owns
     /// its own derived width/bounds state internally (see [`crate::workspace`]).
-    pub(super) config: StmConfig,
+    pub(super) config: FlowConfig,
 
-    /// Path to the configuration directory — used to locate `stm.toml` and
-    /// `stm-rules.toml` on hot-reload.
+    /// Path to the configuration directory — used to locate `flow.toml` and
+    /// `flow-rules.toml` on hot-reload.
     pub(super) config_dir: PathBuf,
 
     /// Receiver for hook events from the background WinEvent hook thread.
@@ -174,17 +174,17 @@ pub struct ScrollTilingManager {
     /// pending windows are retried even if no new hook events arrive.
     pub(super) pending_creations: Vec<(isize, u8)>,
 
-    /// Deadline at which float-location tracking resumes after stm suppresses
+    /// Deadline at which float-location tracking resumes after flow suppresses
     /// it for a float animation.
     ///
     /// `None` when no suppression is active — `FLOAT_TRACKING_ACTIVE` stays on
     /// and `EVENT_OBJECT_LOCATIONCHANGE` from floats is captured live. Set by
-    /// [`arm_float_tracking_suppression`](super::ScrollTilingManager::arm_float_tracking_suppression)
+    /// [`arm_float_tracking_suppression`](super::FlowWM::arm_float_tracking_suppression)
     /// and cleared by the resume poll in the main loop.
     pub(super) float_resume_deadline: Option<std::time::Instant>,
 }
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// The index of the monitor that currently owns keyboard focus.
     #[must_use]
     #[allow(dead_code)] // API surface for the upcoming multi-monitor / workspace commands.

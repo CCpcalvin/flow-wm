@@ -5,22 +5,22 @@
 //! The daemon already uses the `log` facade everywhere (100+ call sites), and
 //! `env_logger::init()` is called at startup. **The problem is that
 //! `env_logger` writes only to stderr by default**, and the daemon is spawned
-//! by `stm start` with `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` — a fully
+//! by `flow start` with `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` — a fully
 //! detached process whose stderr goes nowhere. So every log line the code
 //! already emits silently vanishes, which is why debugging feels blind.
 //!
 //! This module replaces bare `env_logger::init()` with a configured logger
 //! that writes to **two** targets simultaneously:
 //!
-//! 1. **A date-stamped file** — `<config_dir>/logs/stmd-YYYY-MM-DD.log`,
+//! 1. **A date-stamped file** — `<config_dir>/logs/flowd-YYYY-MM-DD.log`,
 //!    opened in append mode. One file per day; multiple daemon restarts on
 //!    the same day accumulate into one file. All historical logs are
 //!    preserved (no automatic rotation or deletion).
-//! 2. **stderr** — so that running `stmd` directly from a console (rather
-//!    than via `stm start`) still shows logs inline.
+//! 2. **stderr** — so that running `flowd` directly from a console (rather
+//!    than via `flow start`) still shows logs inline.
 //!
 //! The date-stamped file (target 1) can be overridden by passing
-//! `stmd --log-file PATH`, which redirects all logging to that exact path
+//! `flowd --log-file PATH`, which redirects all logging to that exact path
 //! (truncated on each start) for a clean, isolated single-run debug log.
 //! See [`init`].
 //!
@@ -38,7 +38,7 @@
 //! - **Debug builds**: default level is `debug`.
 //! - **Release builds**: default level is `info`.
 //! - **Override**: set the `RUST_LOG` environment variable (e.g.
-//!   `RUST_LOG=trace`, `RUST_LOG=scrolling_tiling_manager=debug`) before
+//!   `RUST_LOG=trace`, `RUST_LOG=flow_wm=debug`) before
 //!   starting the daemon. This takes precedence over the build-profile
 //!   default.
 //!
@@ -74,13 +74,13 @@ use env_logger::{Builder, Target};
 ///
 /// # Log file selection
 ///
-/// - **`log_file_override = Some(path)`** (from `stmd --log-file PATH`):
+/// - **`log_file_override = Some(path)`** (from `flowd --log-file PATH`):
 ///   redirect ALL logging to that exact path, opened fresh
 ///   (create-or-truncate). This yields a clean, isolated file for a single
 ///   debugging run, separate from the shared daily log. Stderr is still
-///   echoed so a console-launched `stmd --log-file` stays visible.
+///   echoed so a console-launched `flowd --log-file` stays visible.
 /// - **`log_file_override = None`** (default): the date-stamped daily log
-///   (`<config_dir>/logs/stmd-YYYY-MM-DD.log`) opened in append mode, so
+///   (`<config_dir>/logs/flowd-YYYY-MM-DD.log`) opened in append mode, so
 ///   restarts on the same day accumulate into one file.
 ///
 /// # Level resolution
@@ -125,14 +125,14 @@ pub fn init(log_file_override: Option<&Path>) {
             let mut builder = Builder::from_env(env);
             builder.target(Target::Pipe(Box::new(TeeWriter::new(file))));
             builder.init();
-            log::info!("stmd: logging to {}", log_path.display());
+            log::info!("flowd: logging to {}", log_path.display());
         }
         Err(e) => {
             // Fallback: stderr-only. Initialize the logger BEFORE emitting the
             // warning so the warning is actually captured by the logger.
             Builder::from_env(env).init();
             log::warn!(
-                "stmd: could not open log file {}: {e}; falling back to stderr-only",
+                "flowd: could not open log file {}: {e}; falling back to stderr-only",
                 log_path.display()
             );
         }
@@ -169,7 +169,7 @@ fn today_local_date() -> String {
 /// - `append = false` — opened with `.write(true).create(true).truncate(true)`.
 ///   If the file exists it is **truncated to zero length**; if not, it is
 ///   created. This yields a fresh, isolated file for a single debugging run
-///   via `stmd --log-file PATH`.
+///   via `flowd --log-file PATH`.
 ///
 /// The parent directory tree is created if missing via
 /// [`std::fs::create_dir_all`].
@@ -309,7 +309,7 @@ mod tests {
     fn open_log_file_creates_parent_dirs() {
         let temp = tempfile::tempdir().expect("tempdir creation failed");
         let nested = temp.path().join("a").join("b").join("logs");
-        let file_path = nested.join("stmd-test.log");
+        let file_path = nested.join("flowd-test.log");
 
         // The returned handle is intentionally unused: the test only verifies
         // that `open_log_file` creates the file and its parent directories.
@@ -356,7 +356,7 @@ mod tests {
     /// file to a clean slate.
     ///
     /// This is the `--log-file` override behaviour: each launch of
-    /// `stmd --log-file PATH` must start from an empty file so the captured
+    /// `flowd --log-file PATH` must start from an empty file so the captured
     /// log contains only that single run's output.
     #[test]
     fn open_log_file_truncates_when_override() {

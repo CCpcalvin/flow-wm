@@ -1,6 +1,6 @@
 # Window Registry
 
-The window registry is the bridge between the Windows OS and stm's internal
+The window registry is the bridge between the Windows OS and flow's internal
 layout model. It hooks into Win32's `SetWinEventHook` system, classifies every
 window as `Tiling`, `Floating`, or `Ignored`, and maintains per-window state
 throughout the entire window lifecycle. All classification logic is pure Rust
@@ -19,7 +19,7 @@ single struct that owns:
   fallback action, used to classify every new window.
 - A `focused` field tracking the currently focused window.
 
-The registry is owned directly by `ScrollTilingManager` on the IPC thread. The
+The registry is owned directly by `FlowWM` on the IPC thread. The
 hook thread never touches it — it only sends typed `HookEvent`s through an
 `mpsc` channel. See [threading model](./threading-model.md) for the full
 threading picture.
@@ -113,7 +113,7 @@ stateDiagram-v2
 ```
 
 User-driven tile ↔ float transitions **are** implemented via
-`stm dispatch set-window float|tile|cycle` — see [Floating Space](./floating-space.md)
+`flow dispatch set-window float|tile|cycle` — see [Floating Space](./floating-space.md)
 for the full transition table and animation. Two directions remain unimplemented:
 
 - **Tiling → `Ignored(Maximized)`** — a tiled window the user then maximizes is
@@ -200,8 +200,8 @@ flowchart TB
     FS -- No --> PIPE["ClassificationPipeline"]
 
     subgraph PIPE["Multi-layer rule pipeline"]
-        UR["User rules<br/>(from stm-rules.toml)<br/>first match wins"]
-        LR["Learned rules<br/>(history-stm-rules.toml)<br/>first match wins"]
+        UR["User rules<br/>(from flow-rules.toml)<br/>first match wins"]
+        LR["Learned rules<br/>(history-flow-rules.toml)<br/>first match wins"]
         DR["Default rules<br/>(embedded at compile time)<br/>first match wins"]
         FALL["Default action<br/>(fallback)"]
         UR -- no match --> LR
@@ -248,7 +248,7 @@ allocations.
 ### Notable Default Rules
 
 The embedded default rules (from
-[`default-stm-rules.toml`](../../default-stm-rules.toml)) catch several
+[`default-flow-rules.toml`](../../default-flow-rules.toml)) catch several
 well-known Windows edge cases:
 
 **Chromium Legacy Window filtering.** Every Chromium-based application (Chrome,
@@ -313,7 +313,7 @@ excluded from the range.
 
 Two hooks exist specifically to recover windows that `EVENT_OBJECT_CREATE`
 misses. `CREATE` fires very early in the Win32 lifecycle — before a window is
-visible, titled, or has finalized its styles. The recovery hooks give stm a
+visible, titled, or has finalized its styles. The recovery hooks give flow a
 second chance:
 
 - **NAMECHANGE recovery**: apps like Windows Terminal set their title
@@ -330,9 +330,9 @@ second chance:
 
 ## Recovery Snapshot (Planned)
 
-The `stm-watchdog` binary ([`src/bin/stm-watchdog.rs`](../../src/bin/stm-watchdog.rs))
+The `flow-watchdog` binary ([`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs))
 is designed to restore windows if the daemon crashes. The watchdog would read a
-`stm-recovery.json` file written by the daemon on every state mutation and call
+`flow-recovery.json` file written by the daemon on every state mutation and call
 `SetWindowPos` for each entry to put windows back at their pre-manage positions.
 This feature is currently a stub — the watchdog exists but the atomic
 write-to-temp-then-rename persistence logic is not yet implemented. The `Window`
@@ -342,7 +342,7 @@ struct already carries `pre_manage_rect` for this purpose.
 
 - [Event pipelines](./event-pipelines.md) — how the daemon routes hook events
   to registry handlers and coordinates with the layout engine.
-- [Config and persistence](./config-and-persistence.md) — the `stm-rules.toml`
+- [Config and persistence](./config-and-persistence.md) — the `flow-rules.toml`
   format for user-defined classification rules.
 - [Animation](./animation.md) — how the `InvisibleBounds` on each `Window` are
   used to translate visible rects to window rects for `SetWindowPos`.

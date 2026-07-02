@@ -23,7 +23,7 @@
 
 **Expected output:**
 - Valid TOML round-trip test using `tempfile`
-- Malformed TOML test asserting `StmError::Config(_)` variant
+- Malformed TOML test asserting `FlowError::Config(_)` variant
 - `tempfile` in `[dev-dependencies]` only
 
 **Pass/fail checks:**

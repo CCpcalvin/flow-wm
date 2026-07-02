@@ -1,17 +1,17 @@
 //! Config directory resolution with a priority chain.
 //!
-//! The STM daemon and CLI need a consistent location for user configuration
-//! files (`stm.toml` for app settings, `stm-rules.toml` for window rules, and
+//! The flow daemon and CLI need a consistent location for user configuration
+//! files (`flow.toml` for app settings, `flow-rules.toml` for window rules, and
 //! JSON Schema files). This module resolves that directory at runtime using a
 //! three-level priority chain:
 //!
 //! 1. **CLI override** — `--config <dir>` flag passed by the user.
-//! 2. **Environment variable** — `STM_CONFIG_DIR` set by the daemon launcher
+//! 2. **Environment variable** — `FLOW_CONFIG_DIR` set by the daemon launcher
 //!    or the user's shell profile.
-//! 3. **Default** — `%USERPROFILE%\.config\stm\` (Linux-style `~/.config/stm/`
+//! 3. **Default** — `%USERPROFILE%\.config\flow\` (Linux-style `~/.config/flow/`
 //!    adapted for Windows).
 //!
-//! # Why `~/.config/stm/` instead of `%APPDATA%\stm\`?
+//! # Why `~/.config/flow/` instead of `%APPDATA%\flow\`?
 //!
 //! The original implementation used `%APPDATA%`, but this has two drawbacks:
 //! - `%APPDATA%` points into a hidden `AppData\Roaming` directory that most
@@ -20,7 +20,7 @@
 //! - `%APPDATA%` paths are long and verbose, making them cumbersome to type
 //!   in documentation or terminal commands.
 //!
-//! `%USERPROFILE%\.config\stm\` follows the XDG Base Directory convention
+//! `%USERPROFILE%\.config\flow\` follows the XDG Base Directory convention
 //! (`$XDG_CONFIG_HOME/appname/`), which is well-known to developers and
 //! increasingly expected on all platforms. On Windows, `%USERPROFILE%` is
 //! always set (e.g., `C:\Users\<username>`).
@@ -37,15 +37,15 @@ use std::path::{Path, PathBuf};
 /// Environment variable name for overriding the config directory.
 ///
 /// When set, [`resolve_config_dir`] uses this value as the config directory,
-/// bypassing the default `%USERPROFILE%\.config\stm\` path.
+/// bypassing the default `%USERPROFILE%\.config\flow\` path.
 ///
 /// # Examples
 ///
 /// ```text
-/// set STM_CONFIG_DIR=C:\Users\alice\my-stm-config
-/// stm start
+/// set FLOW_CONFIG_DIR=C:\Users\alice\my-flow-config
+/// flow start
 /// ```
-pub const CONFIG_DIR_ENV: &str = "STM_CONFIG_DIR";
+pub const CONFIG_DIR_ENV: &str = "FLOW_CONFIG_DIR";
 
 /// Resolve the config directory using the priority chain.
 ///
@@ -53,9 +53,9 @@ pub const CONFIG_DIR_ENV: &str = "STM_CONFIG_DIR";
 /// in this order:
 ///
 /// 1. If `cli_override` is `Some(path)`, that path is used directly.
-/// 2. If the [`CONFIG_DIR_ENV`] (`STM_CONFIG_DIR`) environment variable is set,
+/// 2. If the [`CONFIG_DIR_ENV`] (`FLOW_CONFIG_DIR`) environment variable is set,
 ///    its value is used.
-/// 3. Otherwise, `%USERPROFILE%\.config\stm\` is used as the default.
+/// 3. Otherwise, `%USERPROFILE%\.config\flow\` is used as the default.
 ///
 /// After resolution, the directory (and all parent directories) is created
 /// if it does not already exist. A warning is logged if directory creation
@@ -73,25 +73,25 @@ pub const CONFIG_DIR_ENV: &str = "STM_CONFIG_DIR";
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::resolve_config_dir;
+/// use flow_wm::config::dirs::resolve_config_dir;
 /// use std::path::Path;
 ///
 /// // With a CLI override:
-/// let dir = resolve_config_dir(Some(Path::new("C:\\custom\\stm")));
-/// assert!(dir.ends_with("stm"));
+/// let dir = resolve_config_dir(Some(Path::new("C:\\custom\\flow")));
+/// assert!(dir.ends_with("flow"));
 ///
 /// // Without override (uses env var or default):
 /// let dir = resolve_config_dir(None);
-/// assert!(dir.ends_with("stm"));
+/// assert!(dir.ends_with("flow"));
 /// ```
 #[must_use]
 pub fn resolve_config_dir(cli_override: Option<&Path>) -> PathBuf {
     let (dir, source) = if let Some(override_path) = cli_override {
         (override_path.to_path_buf(), "CLI --config flag")
     } else if let Ok(env_val) = std::env::var(CONFIG_DIR_ENV) {
-        (PathBuf::from(&env_val), "STM_CONFIG_DIR env var")
+        (PathBuf::from(&env_val), "FLOW_CONFIG_DIR env var")
     } else {
-        (default_config_dir(), "default (USERPROFILE/.config/stm)")
+        (default_config_dir(), "default (USERPROFILE/.config/flow)")
     };
 
     // Ensure the directory exists so users can create config files without
@@ -120,40 +120,40 @@ pub fn resolve_config_dir(cli_override: Option<&Path>) -> PathBuf {
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::config_dir;
+/// use flow_wm::config::dirs::config_dir;
 /// let dir = config_dir();
-/// assert!(dir.ends_with("stm"));
+/// assert!(dir.ends_with("flow"));
 /// ```
 #[must_use]
 pub fn config_dir() -> PathBuf {
     resolve_config_dir(None)
 }
 
-/// Returns the path to the user's `stm-rules.toml` file using the default
+/// Returns the path to the user's `flow-rules.toml` file using the default
 /// config directory resolution.
 ///
-/// The path is resolved via [`resolve_config_dir`]`(None)`, then `stm-rules.toml`
+/// The path is resolved via [`resolve_config_dir`]`(None)`, then `flow-rules.toml`
 /// is appended. This is the file where users define window classification rules
 /// and default actions.
 ///
 /// # Returns
 ///
-/// Full path to `stm-rules.toml` as a [`PathBuf`].
+/// Full path to `flow-rules.toml` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::user_rules_path;
+/// use flow_wm::config::dirs::user_rules_path;
 /// let path = user_rules_path();
-/// assert!(path.ends_with("stm-rules.toml"));
-/// assert!(path.to_string_lossy().contains("stm"));
+/// assert!(path.ends_with("flow-rules.toml"));
+/// assert!(path.to_string_lossy().contains("flow"));
 /// ```
 #[must_use]
 pub fn user_rules_path() -> PathBuf {
-    resolve_config_dir(None).join("stm-rules.toml")
+    resolve_config_dir(None).join("flow-rules.toml")
 }
 
-/// Returns the path to the user's `stm-rules.toml` file in an explicitly
+/// Returns the path to the user's `flow-rules.toml` file in an explicitly
 /// provided config directory.
 ///
 /// This is used when the config directory has already been resolved
@@ -166,39 +166,39 @@ pub fn user_rules_path() -> PathBuf {
 ///
 /// # Returns
 ///
-/// `dir.join("stm-rules.toml")` as a [`PathBuf`].
+/// `dir.join("flow-rules.toml")` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::user_rules_path_in;
+/// use flow_wm::config::dirs::user_rules_path_in;
 /// use std::path::Path;
 ///
 /// let custom = Path::new("C:\\my-config");
 /// let path = user_rules_path_in(custom);
-/// assert_eq!(path, custom.join("stm-rules.toml"));
+/// assert_eq!(path, custom.join("flow-rules.toml"));
 /// ```
 #[must_use]
 pub fn user_rules_path_in(dir: &Path) -> PathBuf {
-    dir.join("stm-rules.toml")
+    dir.join("flow-rules.toml")
 }
 
-/// Returns the path to the user's `history-stm-rules.toml` file using the default
+/// Returns the path to the user's `history-flow-rules.toml` file using the default
 /// config directory resolution.
 ///
 /// The path is resolved via [`resolve_config_dir`]`(None)`, then
-/// `history-stm-rules.toml` is appended. This file stores machine-learned
+/// `history-flow-rules.toml` is appended. This file stores machine-learned
 /// window classification rules (see [`crate::config::history::HistoryStore`]).
 ///
 /// # Returns
 ///
-/// Full path to `history-stm-rules.toml` as a [`PathBuf`].
+/// Full path to `history-flow-rules.toml` as a [`PathBuf`].
 #[must_use]
 pub fn history_rules_path() -> PathBuf {
-    resolve_config_dir(None).join("history-stm-rules.toml")
+    resolve_config_dir(None).join("history-flow-rules.toml")
 }
 
-/// Returns the path to the user's `history-stm-rules.toml` file in an explicitly
+/// Returns the path to the user's `history-flow-rules.toml` file in an explicitly
 /// provided config directory.
 ///
 /// This is used when the config directory has already been resolved
@@ -211,13 +211,13 @@ pub fn history_rules_path() -> PathBuf {
 ///
 /// # Returns
 ///
-/// `dir.join("history-stm-rules.toml")` as a [`PathBuf`].
+/// `dir.join("history-flow-rules.toml")` as a [`PathBuf`].
 #[must_use]
 pub fn history_rules_path_in(dir: &Path) -> PathBuf {
-    dir.join("history-stm-rules.toml")
+    dir.join("history-flow-rules.toml")
 }
 
-/// Returns the path to the user's `stm.toml` app config file in an explicitly
+/// Returns the path to the user's `flow.toml` app config file in an explicitly
 /// provided config directory.
 ///
 /// This is used when the config directory has already been resolved
@@ -230,56 +230,56 @@ pub fn history_rules_path_in(dir: &Path) -> PathBuf {
 ///
 /// # Returns
 ///
-/// `dir.join("stm.toml")` as a [`PathBuf`].
+/// `dir.join("flow.toml")` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::user_app_config_path_in;
+/// use flow_wm::config::dirs::user_app_config_path_in;
 /// use std::path::Path;
 ///
 /// let custom = Path::new("C:\\my-config");
 /// let path = user_app_config_path_in(custom);
-/// assert_eq!(path, custom.join("stm.toml"));
+/// assert_eq!(path, custom.join("flow.toml"));
 /// ```
 #[must_use]
 pub fn user_app_config_path_in(dir: &Path) -> PathBuf {
-    dir.join("stm.toml")
+    dir.join("flow.toml")
 }
 
-/// Returns the path to the user's `stm.toml` app config file using the default
+/// Returns the path to the user's `flow.toml` app config file using the default
 /// config directory resolution.
 ///
-/// The path is resolved via [`config_dir`]`, then `stm.toml` is appended.
+/// The path is resolved via [`config_dir`]`, then `flow.toml` is appended.
 /// This file contains application settings such as padding and
 /// animation preferences.
 ///
 /// # Returns
 ///
-/// Full path to `stm.toml` as a [`PathBuf`].
+/// Full path to `flow.toml` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::user_app_config_path;
+/// use flow_wm::config::dirs::user_app_config_path;
 /// let path = user_app_config_path();
-/// assert!(path.ends_with("stm.toml"));
+/// assert!(path.ends_with("flow.toml"));
 /// ```
 #[must_use]
 pub fn user_app_config_path() -> PathBuf {
-    config_dir().join("stm.toml")
+    config_dir().join("flow.toml")
 }
 
 // ── Logs directory and date-stamped log file paths ─────────────────
 //
 // Logs are co-located with the config directory (under `<config_dir>/logs/`)
-// rather than under `%LOCALAPPDATA%\stm\logs\`. This matches the
+// rather than under `%LOCALAPPDATA%\flow\logs\`. This matches the
 // discoverability decision made by [`resolve_config_dir`]: users can find
 // and `tail` their logs without digging through hidden `AppData` folders.
 // The same rationale that rejected `%APPDATA%` for config applies doubly to
 // logs, which users want to inspect frequently while debugging.
 //
-// The daemon writes one log file per day, named `stmd-YYYY-MM-DD.log`,
+// The daemon writes one log file per day, named `flowd-YYYY-MM-DD.log`,
 // opened in **append** mode so multiple daemon starts on the same day
 // accumulate into a single file. No automatic rotation or deletion is
 // performed — all historical logs are preserved. The `date` string is
@@ -300,10 +300,10 @@ pub fn user_app_config_path() -> PathBuf {
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::logs_dir_in;
+/// use flow_wm::config::dirs::logs_dir_in;
 /// use std::path::Path;
 ///
-/// let logs = logs_dir_in(Path::new("C:\\stm"));
+/// let logs = logs_dir_in(Path::new("C:\\flow"));
 /// assert!(logs.ends_with("logs"));
 /// ```
 #[must_use]
@@ -312,7 +312,7 @@ pub fn logs_dir_in(dir: &Path) -> PathBuf {
 }
 
 /// Returns the logs subdirectory path using the default config directory
-/// resolution (CLI flag → `STM_CONFIG_DIR` → `%USERPROFILE%\.config\stm\`).
+/// resolution (CLI flag → `FLOW_CONFIG_DIR` → `%USERPROFILE%\.config\flow\`).
 ///
 /// Convenience wrapper around [`logs_dir_in`] that resolves the config
 /// directory first via [`resolve_config_dir`]`(None)`.
@@ -340,23 +340,23 @@ pub fn logs_dir() -> PathBuf {
 ///
 /// # Returns
 ///
-/// `logs_dir_in(dir).join(format!("stmd-{date}.log"))` as a [`PathBuf`].
+/// `logs_dir_in(dir).join(format!("flowd-{date}.log"))` as a [`PathBuf`].
 ///
 /// # Examples
 ///
 /// ```ignore
-/// use scrolling_tiling_manager::config::dirs::log_file_path_in;
+/// use flow_wm::config::dirs::log_file_path_in;
 /// use std::path::Path;
 ///
-/// let path = log_file_path_in(Path::new("C:\\stm"), "2026-06-17");
-/// assert!(path.ends_with("stmd-2026-06-17.log"));
+/// let path = log_file_path_in(Path::new("C:\\flow"), "2026-06-17");
+/// assert!(path.ends_with("flowd-2026-06-17.log"));
 /// ```
 #[must_use]
 pub fn log_file_path_in(dir: &Path, date: &str) -> PathBuf {
-    logs_dir_in(dir).join(format!("stmd-{date}.log"))
+    logs_dir_in(dir).join(format!("flowd-{date}.log"))
 }
 
-/// Compute the default config directory: `%USERPROFILE%\.config\stm\`.
+/// Compute the default config directory: `%USERPROFILE%\.config\flow\`.
 ///
 /// Falls back to `%APPDATA%` with `\AppData\Roaming` stripped, and ultimately
 /// to `"."` (current directory) if neither environment variable is set.
@@ -366,7 +366,7 @@ pub fn log_file_path_in(dir: &Path, date: &str) -> PathBuf {
 fn default_config_dir() -> PathBuf {
     // Primary: USERPROFILE (always set on normal Windows user accounts).
     if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        return PathBuf::from(userprofile).join(".config").join("stm");
+        return PathBuf::from(userprofile).join(".config").join("flow");
     }
 
     // Fallback: APPDATA (strip the trailing \AppData\Roaming).
@@ -386,19 +386,19 @@ fn default_config_dir() -> PathBuf {
             "USERPROFILE not set; falling back to APPDATA-derived path {:?}",
             user_home
         );
-        return user_home.join(".config").join("stm");
+        return user_home.join(".config").join("flow");
     }
 
     // Last resort: current directory.
     log::warn!("neither USERPROFILE nor APPDATA is set; falling back to '.' for config dir");
-    PathBuf::from(".").join("stm")
+    PathBuf::from(".").join("flow")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A module-level Mutex that serializes all tests that mutate `STM_CONFIG_DIR`.
+    /// A module-level Mutex that serializes all tests that mutate `FLOW_CONFIG_DIR`.
     ///
     /// `cargo test` runs tests in parallel within a module. Tests that call
     /// `std::env::set_var` / `remove_var` on the same variable race with each
@@ -413,29 +413,29 @@ mod tests {
 
     /// Positive: `user_rules_path` ends with the expected filename.
     #[test]
-    fn user_rules_path_ends_with_stm_rules_toml() {
+    fn user_rules_path_ends_with_flow_rules_toml() {
         let path = user_rules_path();
-        assert!(path.ends_with("stm-rules.toml"), "path was: {path:?}");
+        assert!(path.ends_with("flow-rules.toml"), "path was: {path:?}");
     }
 
-    /// Positive: `user_rules_path` contains `stm` in its path components.
+    /// Positive: `user_rules_path` contains `flow` in its path components.
     #[test]
-    fn user_rules_path_is_under_stm_subdir() {
+    fn user_rules_path_is_under_flow_subdir() {
         let path = user_rules_path();
         assert!(
-            path.to_string_lossy().contains("stm"),
-            "path should contain 'stm' subdir: {path:?}"
+            path.to_string_lossy().contains("flow"),
+            "path should contain 'flow' subdir: {path:?}"
         );
     }
 
-    /// Positive: the parent of the rules path should be named "stm".
+    /// Positive: the parent of the rules path should be named "flow".
     #[test]
-    fn user_rules_path_parent_is_stm() {
+    fn user_rules_path_parent_is_flow() {
         let path = user_rules_path();
         assert_eq!(
             path.parent().and_then(|p| p.file_name()),
-            Some(std::ffi::OsStr::new("stm")),
-            "parent dir should be 'stm': {path:?}"
+            Some(std::ffi::OsStr::new("flow")),
+            "parent dir should be 'flow': {path:?}"
         );
     }
 
@@ -446,14 +446,14 @@ mod tests {
         assert!(!path.as_os_str().is_empty(), "path should not be empty");
     }
 
-    /// Positive: the filename component is exactly "stm-rules.toml".
+    /// Positive: the filename component is exactly "flow-rules.toml".
     #[test]
-    fn user_rules_path_filename_is_stm_rules_toml() {
+    fn user_rules_path_filename_is_flow_rules_toml() {
         let path = user_rules_path();
         assert_eq!(
             path.file_name(),
-            Some(std::ffi::OsStr::new("stm-rules.toml")),
-            "filename should be stm-rules.toml: {path:?}"
+            Some(std::ffi::OsStr::new("flow-rules.toml")),
+            "filename should be flow-rules.toml: {path:?}"
         );
     }
 
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(dir, custom, "CLI override should be used directly");
     }
 
-    /// Positive: `STM_CONFIG_DIR` env var is used when no CLI override.
+    /// Positive: `FLOW_CONFIG_DIR` env var is used when no CLI override.
     ///
     /// We temporarily set the env var for this test and restore the original
     /// value afterward to avoid polluting the test environment.
@@ -475,7 +475,7 @@ mod tests {
     fn resolve_config_dir_without_override_uses_env() {
         let _guard = ENV_LOCK.lock().unwrap();
         let original = std::env::var(CONFIG_DIR_ENV).ok();
-        unsafe { std::env::set_var(CONFIG_DIR_ENV, "C:\\env-config\\stm") };
+        unsafe { std::env::set_var(CONFIG_DIR_ENV, "C:\\env-config\\flow") };
         let dir = resolve_config_dir(None);
         // Restore
         match original {
@@ -484,7 +484,7 @@ mod tests {
         }
         assert_eq!(
             dir,
-            PathBuf::from("C:\\env-config\\stm"),
+            PathBuf::from("C:\\env-config\\flow"),
             "env var should override default"
         );
     }
@@ -501,29 +501,29 @@ mod tests {
         if let Some(val) = original {
             unsafe { std::env::set_var(CONFIG_DIR_ENV, val) }
         }
-        // The path should end with stm and contain .config
+        // The path should end with flow and contain .config
         let path_str = dir.to_string_lossy();
         assert!(
-            path_str.contains(".config") && path_str.ends_with("stm"),
-            "default path should be …/.config/stm: {dir:?}"
+            path_str.contains(".config") && path_str.ends_with("flow"),
+            "default path should be …/.config/flow: {dir:?}"
         );
     }
 
     // ── Path helper tests ──────────────────────────────────────────────
 
-    /// Negative: CLI override takes precedence even when `STM_CONFIG_DIR` is set.
+    /// Negative: CLI override takes precedence even when `FLOW_CONFIG_DIR` is set.
     ///
     /// This tests the priority ordering: `--config` flag > env var. Both are set,
     /// and the CLI override path must win.
     #[test]
     fn resolve_config_dir_cli_override_beats_env_var() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // Arrange: set STM_CONFIG_DIR to a different directory.
+        // Arrange: set FLOW_CONFIG_DIR to a different directory.
         let original = std::env::var(CONFIG_DIR_ENV).ok();
-        unsafe { std::env::set_var(CONFIG_DIR_ENV, "C:\\env-config\\stm") };
+        unsafe { std::env::set_var(CONFIG_DIR_ENV, "C:\\env-config\\flow") };
 
         // Act: resolve with a CLI override that differs from the env var.
-        let cli_path = Path::new("C:\\cli-override\\stm");
+        let cli_path = Path::new("C:\\cli-override\\flow");
         let dir = resolve_config_dir(Some(cli_path));
 
         // Restore env.
@@ -535,20 +535,20 @@ mod tests {
         // Assert: CLI override is returned, not the env var path.
         assert_eq!(
             dir, cli_path,
-            "CLI override must win over STM_CONFIG_DIR env var"
+            "CLI override must win over FLOW_CONFIG_DIR env var"
         );
         assert_ne!(
             dir,
-            PathBuf::from("C:\\env-config\\stm"),
+            PathBuf::from("C:\\env-config\\flow"),
             "env var path must not be returned when CLI override is given"
         );
     }
 
-    /// Positive: `user_app_config_path` returns a path ending with `stm.toml`.
+    /// Positive: `user_app_config_path` returns a path ending with `flow.toml`.
     #[test]
-    fn user_app_config_path_returns_stm_toml() {
+    fn user_app_config_path_returns_flow_toml() {
         let path = user_app_config_path();
-        assert!(path.ends_with("stm.toml"), "path was: {path:?}");
+        assert!(path.ends_with("flow.toml"), "path was: {path:?}");
     }
 
     /// Positive: `user_rules_path_in` appends correctly.
@@ -556,7 +556,7 @@ mod tests {
     fn user_rules_path_in_returns_correct_path() {
         let dir = Path::new("C:\\test\\config");
         let path = user_rules_path_in(dir);
-        assert_eq!(path, dir.join("stm-rules.toml"));
+        assert_eq!(path, dir.join("flow-rules.toml"));
     }
 
     /// Positive: `user_app_config_path_in` appends correctly.
@@ -564,7 +564,7 @@ mod tests {
     fn user_app_config_path_in_returns_correct_path() {
         let dir = Path::new("C:\\test\\config");
         let path = user_app_config_path_in(dir);
-        assert_eq!(path, dir.join("stm.toml"));
+        assert_eq!(path, dir.join("flow.toml"));
     }
 
     // ── Logs path tests ────────────────────────────────────────────────
@@ -589,7 +589,7 @@ mod tests {
     fn log_file_path_in_produces_dated_filename() {
         let dir = Path::new("C:\\test\\config");
         let path = log_file_path_in(dir, "2026-06-17");
-        assert!(path.ends_with("stmd-2026-06-17.log"), "path was: {path:?}");
+        assert!(path.ends_with("flowd-2026-06-17.log"), "path was: {path:?}");
     }
 
     /// Positive: `log_file_path_in` nests the file directly under the logs dir.
@@ -617,10 +617,10 @@ mod tests {
 
     /// Positive: `history_rules_path` ends with the expected filename.
     #[test]
-    fn history_rules_path_ends_with_history_stm_rules_toml() {
+    fn history_rules_path_ends_with_history_flow_rules_toml() {
         let path = history_rules_path();
         assert!(
-            path.ends_with("history-stm-rules.toml"),
+            path.ends_with("history-flow-rules.toml"),
             "path was: {path:?}"
         );
     }
@@ -630,6 +630,6 @@ mod tests {
     fn history_rules_path_in_returns_correct_path() {
         let dir = Path::new("C:\\test\\config");
         let path = history_rules_path_in(dir);
-        assert_eq!(path, dir.join("history-stm-rules.toml"));
+        assert_eq!(path, dir.join("history-flow-rules.toml"));
     }
 }

@@ -26,7 +26,7 @@
 //! # Sizing
 //!
 //! All size parameters come from [`MutationConfig`], derived from
-//! [`StmConfig`](crate::config::StmConfig). The engine receives this (not the full
+//! [`FlowConfig`](crate::config::FlowConfig). The engine receives this (not the full
 //! config) to stay decoupled from config parsing. Column widths are stored in
 //! pixels ([`width_px`](crate::layout::types::Column::width_px)); expand/shrink
 //! move along a discrete **slot ladder** that preserves `window_gap`, while
@@ -55,7 +55,7 @@ pub struct NeighborLocation {
 
 /// Parameters that configure how mutations behave.
 ///
-/// Extracted from [`StmConfig`](crate::config::StmConfig) by the daemon.
+/// Extracted from [`FlowConfig`](crate::config::FlowConfig) by the daemon.
 /// The layout engine receives this (not the full config) to stay decoupled
 /// from config parsing details.
 ///

@@ -1,7 +1,7 @@
 //! Configuration derivation helpers.
 //!
 //! This module contains methods that derive configuration values from
-//! [`StmConfig`] for use by the layout engine and animator.
+//! [`FlowConfig`] for use by the layout engine and animator.
 
 use std::time::Duration;
 
@@ -9,19 +9,19 @@ use crate::animation::AnimatorConfig;
 use crate::animation::config::PositionAnimation;
 use crate::animation::easing::EasingStyle;
 use crate::config::types::ConfigEasing;
-use crate::config::types::StmConfig;
+use crate::config::types::FlowConfig;
 use crate::layout::types::{MonitorInfo, Padding as LayoutPadding};
 
 use super::types::LayoutConfig;
 
-/// Derive scrolling-space parameters from [`StmConfig`].
+/// Derive scrolling-space parameters from [`FlowConfig`].
 ///
-/// Converts the user-facing config types (from `stm.toml`) into the
+/// Converts the user-facing config types (from `flow.toml`) into the
 /// layout-engine-specific types needed by [`ScrollingSpace::new`](crate::workspace::ScrollingSpace::new).
 ///
 /// # Column Width Resolution
 ///
-/// When `StmConfig::column_width` is `Some(v)`, that value is used directly
+/// When `FlowConfig::column_width` is `Some(v)`, that value is used directly
 /// (power-user override). When `None`, the width is computed from
 /// `columns_per_screen`:
 ///
@@ -31,7 +31,7 @@ use super::types::LayoutConfig;
 ///
 /// where `N = columns_per_screen`. This ensures the layout fills the entire
 /// screen with uniform gaps.
-pub(super) fn derive_layout_config(app_config: &StmConfig, monitor: &MonitorInfo) -> LayoutConfig {
+pub(super) fn derive_layout_config(app_config: &FlowConfig, monitor: &MonitorInfo) -> LayoutConfig {
     let gap = app_config.padding.window_gap;
     let column_width = match app_config.column_width {
         Some(cw) => {
@@ -120,13 +120,13 @@ fn config_easing_to_style(easing: &ConfigEasing) -> EasingStyle {
     }
 }
 
-/// Derive animator configuration from [`StmConfig`].
+/// Derive animator configuration from [`FlowConfig`].
 ///
 /// The `override_duration` parameter allows the caller to force a specific
 /// animation duration. Pass `Duration::ZERO` to let the config decide
 /// (enabled → user-configured ms, disabled → zero/instant).
 pub(super) fn derive_animator_config(
-    app_config: &StmConfig,
+    app_config: &FlowConfig,
     override_duration: Duration,
 ) -> AnimatorConfig {
     let duration = if override_duration != Duration::ZERO {
@@ -155,26 +155,26 @@ mod tests {
     use crate::config::types::AnimationConfig;
     use crate::config::types::ConfigEasing;
 
-    /// Build a default [`StmConfig`] with animation enabled and a given duration.
-    fn make_enabled_config(duration_ms: u32) -> StmConfig {
-        StmConfig {
+    /// Build a default [`FlowConfig`] with animation enabled and a given duration.
+    fn make_enabled_config(duration_ms: u32) -> FlowConfig {
+        FlowConfig {
             animation: AnimationConfig {
                 enabled: true,
                 duration_ms,
                 ..AnimationConfig::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         }
     }
 
-    /// Build a [`StmConfig`] with animation disabled.
-    fn make_disabled_config() -> StmConfig {
-        StmConfig {
+    /// Build a [`FlowConfig`] with animation disabled.
+    fn make_disabled_config() -> FlowConfig {
+        FlowConfig {
             animation: AnimationConfig {
                 enabled: false,
                 ..AnimationConfig::default()
             },
-            ..StmConfig::default()
+            ..FlowConfig::default()
         }
     }
 

@@ -45,7 +45,7 @@ use crate::config::Color;
 
 /// Window class name used for all border overlays. Registered once per
 /// process via [`ensure_window_class_registered`].
-const OVERLAY_CLASS_NAME: PCWSTR = w!("STMBorderOverlay");
+const OVERLAY_CLASS_NAME: PCWSTR = w!("FlowBorderOverlay");
 
 /// Stores the class atom once `RegisterClassExW` succeeds. Subsequent calls
 /// return the cached atom without touching Win32.

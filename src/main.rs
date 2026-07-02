@@ -1,36 +1,36 @@
-//! stmd — ScrollingTilingManager daemon
+//! flowd — FlowWM daemon
 //!
 //! This is the main daemon process that owns all state, manages windows,
-//! and responds to IPC commands from the `stm` CLI client.
+//! and responds to IPC commands from the `flow` CLI client.
 //!
 //! The daemon:
 //! 1. Optionally switches to a test desktop (`--desktop` flag, debug only)
-//! 2. Loads configuration from `stm.toml` and `stm-rules.toml`
-//! 3. Constructs a [`ScrollTilingManager`](scrolling_tiling_manager::daemon::ScrollTilingManager)
+//! 2. Loads configuration from `flow.toml` and `flow-rules.toml`
+//! 3. Constructs a [`FlowWM`](flow_wm::daemon::FlowWM)
 //!    which performs all initialization (window scan, layout init, hook setup)
-//! 4. Enters the IPC event loop via `stm.run()`
+//! 4. Enters the IPC event loop via `flow.run()`
 
 use std::path::Path;
 
 use clap::Parser;
 
-use scrolling_tiling_manager::config::{
+use flow_wm::config::{
     WindowRulesConfig, dirs, init_config_dir, load_app_config, load_default_rules,
     load_rules_config,
 };
-use scrolling_tiling_manager::daemon::ScrollTilingManager;
-use scrolling_tiling_manager::logging;
+use flow_wm::daemon::FlowWM;
+use flow_wm::logging;
 
 #[cfg(debug_assertions)]
-use scrolling_tiling_manager::registry::desktop;
+use flow_wm::registry::desktop;
 
 /// Daemon CLI arguments.
 #[derive(Parser)]
-#[command(name = "stmd", version, about = "ScrollingTilingManager daemon")]
+#[command(name = "flowd", version, about = "FlowWM daemon")]
 #[command(propagate_version = true)]
 struct Args {
-    /// Config directory path. Overrides `STM_CONFIG_DIR` env var and default path.
-    /// Usually set by `stm start --config` which passes it via `STM_CONFIG_DIR`.
+    /// Config directory path. Overrides `FLOW_CONFIG_DIR` env var and default path.
+    /// Usually set by `flow start --config` which passes it via `FLOW_CONFIG_DIR`.
     #[arg(long)]
     config: Option<String>,
 
@@ -62,24 +62,24 @@ fn main() {
     logging::init(args.log_file.as_deref().map(Path::new));
 
     if let Err(e) = run(args) {
-        log::error!("stmd: fatal error: {e}");
+        log::error!("flowd: fatal error: {e}");
         std::process::exit(1);
     }
 }
 
-/// Run the daemon: load config, build STM, run event loop.
+/// Run the daemon: load config, build flow, run event loop.
 ///
 /// This function is the thin orchestration layer between CLI argument
-/// parsing and the [`ScrollTilingManager`] constructor. All actual daemon
-/// logic lives inside `ScrollTilingManager`.
+/// parsing and the [`FlowWM`] constructor. All actual daemon
+/// logic lives inside `FlowWM`.
 ///
 /// # Steps
 ///
 /// 1. Optionally switch to a test desktop (debug builds only).
 /// 2. Resolve and initialize the config directory.
 /// 3. Load application config and window rules.
-/// 4. Construct [`ScrollTilingManager`] (performs all subsystem init).
-/// 5. Call `stm.run()` to enter the IPC event loop.
+/// 4. Construct [`FlowWM`] (performs all subsystem init).
+/// 5. Call `flow.run()` to enter the IPC event loop.
 ///
 /// Returns on `Stop` command or fatal error.
 fn run(args: Args) -> Result<(), String> {
@@ -90,7 +90,7 @@ fn run(args: Args) -> Result<(), String> {
     }
 
     // 2. Resolve config directory using the priority chain:
-    //    --config flag > STM_CONFIG_DIR env var > ~/.config/stm/ default.
+    //    --config flag > FLOW_CONFIG_DIR env var > ~/.config/flow/ default.
     let config_dir = dirs::resolve_config_dir(args.config.as_deref().map(Path::new));
     log::info!("using config directory: {}", config_dir.display());
 
@@ -100,21 +100,21 @@ fn run(args: Args) -> Result<(), String> {
     // 3. Load configuration.
     //
     // CODE is the single source of truth: every field carries a serde default
-    // (see `config::defaults`), so the user's `stm.toml` may be partial or even
+    // (see `config::defaults`), so the user's `flow.toml` may be partial or even
     // empty. There is no shipped-defaults TOML merged at runtime.
     //
-    // `stm.toml` is authoritative: a parse/IO error means the user's stated
+    // `flow.toml` is authoritative: a parse/IO error means the user's stated
     // preferences are unreadable, so refuse to start rather than silently
-    // running with defaults. The `stm` client surfaces the same error to the
+    // running with defaults. The `flow` client surfaces the same error to the
     // user's terminal via a pre-flight check before we get here; this is the
     // daemon-side backstop for a config change in the race window.
     let app_config = load_app_config(&dirs::user_app_config_path_in(&config_dir))
-        .map_err(|e| format!("stmd: {e}"))?;
-    // `stm-rules.toml` is advisory: a parse error falls back to default rules
+        .map_err(|e| format!("flowd: {e}"))?;
+    // `flow-rules.toml` is advisory: a parse error falls back to default rules
     // rather than aborting — the daemon stays usable (classifies windows as float).
     let user_rules =
         load_rules_config(&dirs::user_rules_path_in(&config_dir)).unwrap_or_else(|e| {
-            log::warn!("stmd: {e}; using default window rules");
+            log::warn!("flowd: {e}; using default window rules");
             WindowRulesConfig::default()
         });
     let default_rules = load_default_rules();
@@ -126,19 +126,19 @@ fn run(args: Args) -> Result<(), String> {
     #[cfg(not(debug_assertions))]
     let desktop_name = None;
 
-    // 5. Build and run — STM owns everything from here.
-    let mut stm = ScrollTilingManager::new(
+    // 5. Build and run — flow owns everything from here.
+    let mut flow = FlowWM::new(
         app_config,
         user_rules,
         default_rules,
         config_dir,
         desktop_name,
     )?;
-    stm.run();
+    flow.run();
 
     // Graceful exit (Stop command or fatal wait error): rescue any windows
     // stranded off-screen before tearing down. See `daemon::shutdown`.
-    stm.rescue_stranded_windows();
+    flow.rescue_stranded_windows();
 
     Ok(())
 }

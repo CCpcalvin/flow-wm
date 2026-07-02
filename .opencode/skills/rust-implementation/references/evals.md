@@ -45,11 +45,11 @@
 **Expected output:**
 - Struct derives `Serialize, Deserialize, Debug, Clone, JsonSchema`
 - Integration with existing config loading pipeline in `config/lifecycle.rs`
-- Error mapped to `StmError::Config`, not propagated as a foreign error type
+- Error mapped to `FlowError::Config`, not propagated as a foreign error type
 - Unit test: round-trip serialise → deserialise
 
 **Pass/fail checks:**
 - [ ] `serde` derives present, not hand-rolled impl
-- [ ] Error mapped to `StmError::Config`, not a foreign error type
+- [ ] Error mapped to `FlowError::Config`, not a foreign error type
 - [ ] `cargo fmt --check` exits 0
 - [ ] `schemars::JsonSchema` derive present for JSON Schema support

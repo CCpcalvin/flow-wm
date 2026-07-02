@@ -138,25 +138,25 @@ avoid interrupting the in-flight tiling init animation
 
 ```mermaid
 sequenceDiagram
-    participant CLI as stm CLI
-    participant STM as Daemon
+    participant CLI as flow CLI
+    participant flow as Daemon
     participant SS as ScrollingSpace
     participant FS as FloatingSpace
     participant Reg as WindowRegistry
     participant Anim as Animator
 
-    CLI->>STM: set-window float
-    STM->>Reg: focused()
-    Reg-->>STM: WindowId
-    STM->>SS: remove_window(focused)
+    CLI->>flow: set-window float
+    flow->>Reg: focused()
+    Reg-->>flow: WindowId
+    flow->>SS: remove_window(focused)
     Note over SS: right-side compresses left<br/>last_focused_window → successor
-    SS-->>STM: AppliedLayout (scrolling post-remove)
-    STM->>STM: centered_rect(preferred, work_area)
-    STM->>FS: add(focused, centered_rect)
-    STM->>FS: to_actual_layout()
-    FS-->>STM: ActualLayout (floats)
-    STM->>Reg: state = Floating(Active { rect })
-    STM->>Anim: animate_workspaces([(scroll_actual, 0), (float_actual, 0)])
+    SS-->>flow: AppliedLayout (scrolling post-remove)
+    flow->>flow: centered_rect(preferred, work_area)
+    flow->>FS: add(focused, centered_rect)
+    flow->>FS: to_actual_layout()
+    FS-->>flow: ActualLayout (floats)
+    flow->>Reg: state = Floating(Active { rect })
+    flow->>Anim: animate_workspaces([(scroll_actual, 0), (float_actual, 0)])
 ```
 
 Key point: **OS focus stays on the same window**. It pops to center while
@@ -177,24 +177,24 @@ the user's foreground window doesn't change.
 
 ```mermaid
 sequenceDiagram
-    participant CLI as stm CLI
-    participant STM as Daemon
+    participant CLI as flow CLI
+    participant flow as Daemon
     participant FS as FloatingSpace
     participant SS as ScrollingSpace
     participant Reg as WindowRegistry
     participant Anim as Animator
 
-    CLI->>STM: set-window tile
-    STM->>Reg: focused()
-    Reg-->>STM: WindowId
-    STM->>FS: remove(focused)
-    STM->>SS: insert_window(focused)
+    CLI->>flow: set-window tile
+    flow->>Reg: focused()
+    Reg-->>flow: WindowId
+    flow->>FS: remove(focused)
+    flow->>SS: insert_window(focused)
     Note over SS: inserts right of last_focused_window<br/>shifts right side rightward<br/>sets last_focused_window = focused<br/>ensure_column_visible
-    SS-->>STM: AppliedLayout (scrolling post-insert)
-    STM->>FS: to_actual_layout()
-    FS-->>STM: ActualLayout (floats minus one)
-    STM->>Reg: update_tiling_slots + tiled_rects
-    STM->>Anim: animate_workspaces([(scroll_actual, 0), (float_actual, 0)])
+    SS-->>flow: AppliedLayout (scrolling post-insert)
+    flow->>FS: to_actual_layout()
+    FS-->>flow: ActualLayout (floats minus one)
+    flow->>Reg: update_tiling_slots + tiled_rects
+    flow->>Anim: animate_workspaces([(scroll_actual, 0), (float_actual, 0)])
 ```
 
 Key point: the window snaps from its floating rect into a tile slot.
@@ -285,7 +285,7 @@ space's cursor is irrelevant for this lookup.
 
 ## Configuration
 
-The `[floating]` section in `stm.toml` controls default floating window
+The `[floating]` section in `flow.toml` controls default floating window
 dimensions:
 
 ```toml
@@ -320,9 +320,9 @@ for the full design rationale.
 ### Command Surface
 
 ```
-stm dispatch set-window float     # float the focused window
-stm dispatch set-window tile      # tile the focused window
-stm dispatch set-window cycle     # toggle based on current state
+flow dispatch set-window float     # float the focused window
+flow dispatch set-window tile      # tile the focused window
+flow dispatch set-window cycle     # toggle based on current state
 ```
 
 The IPC wire format:
@@ -340,7 +340,7 @@ the legacy toggle name and the new cycle mode are semantically identical.
 
 `resolve_set_window_action` is a pure `const fn` extracted from
 `dispatch_set_window` so the full mode × state decision table is unit-testable
-without constructing a `ScrollTilingManager` (which owns Win32 handles).
+without constructing a `FlowWM` (which owns Win32 handles).
 
 ```mermaid
 flowchart TB

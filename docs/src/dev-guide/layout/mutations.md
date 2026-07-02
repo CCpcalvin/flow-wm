@@ -1,6 +1,6 @@
 # Mutations
 
-Every layout change in ScrollingTilingManager is expressed as a **pure function** that takes the current `VirtualLayout` and returns a new one. There is no in-place mutation, no side effects, no Win32 calls — every function is `#[must_use]` and fully unit-testable on any platform. The `src/layout/mutations.rs` module contains the complete catalog of these operations, each consuming only the virtual layout and a [`MutationConfig`](../../src/layout/mutations.rs) struct that carries the monitor dimensions, column width, gap settings, and the precomputed expand/shrink ladder.
+Every layout change in FlowWM is expressed as a **pure function** that takes the current `VirtualLayout` and returns a new one. There is no in-place mutation, no side effects, no Win32 calls — every function is `#[must_use]` and fully unit-testable on any platform. The `src/layout/mutations.rs` module contains the complete catalog of these operations, each consuming only the virtual layout and a [`MutationConfig`](../../src/layout/mutations.rs) struct that carries the monitor dimensions, column width, gap settings, and the precomputed expand/shrink ladder.
 
 ## Mutation catalog
 
@@ -24,7 +24,7 @@ Every layout change in ScrollingTilingManager is expressed as a **pure function*
 | Sizing | Set column width | `set_column_width(layout, focused, target_px, config)` | Sets the focused column to an explicit pixel width (free-form, not snapped to ladder). Bounded by `[min_column_width_px, abs_max_width]`. Calls `ensure_column_visible`. |
 | Sizing | Resize column | `resize_column(layout, focused, delta_px, config)` | Adds a pixel delta to the current width and delegates to `set_column_width`. Used by drag-resize. |
 | State | Toggle monocle | `toggle_monocle(layout, focused, saved, config)` | Enters monocle by setting the focused column to `abs_max_width` and saving the previous width. Exits monocle by restoring the saved width (defaults to `column_width`). |
-| Viewport center | Center focused column | `center_viewport_on_focused(layout, focus_col, config)` | Computes a free-form `viewport_offset` that places the focused column's center at the monitor midpoint, using prefix-sum canvas positions (variable-width aware). **Always** centers, even when all columns already fit. Exposed as the `stm dispatch center` command. |
+| Viewport center | Center focused column | `center_viewport_on_focused(layout, focus_col, config)` | Computes a free-form `viewport_offset` that places the focused column's center at the monitor midpoint, using prefix-sum canvas positions (variable-width aware). **Always** centers, even when all columns already fit. Exposed as the `flow dispatch center` command. |
 | Viewport center | Center canvas | `center_viewport_canvas(layout, config)` | Computes a free-form `viewport_offset` that centers the entire canvas in the monitor: `(canvas_width - monitor_width) / 2`. May return a negative offset when the canvas is narrower than the monitor (projection handles this). Used by `initialize_windows` (fit case) and the move-to-workspace auto-center hook (fit case). |
 
 ## The F4-ladder slot model
@@ -151,14 +151,14 @@ There are three viewport-centering behaviors, each driven by a different trigger
 
 ```mermaid
 flowchart TD
-    Trigger["Trigger: user runs `stm dispatch center`,<br/>or automated flow needs viewport adjustment"]
+    Trigger["Trigger: user runs `flow dispatch center`,<br/>or automated flow needs viewport adjustment"]
     Trigger --> Decision{"What should be centered?"}
 
     Decision -->|"Explicit user command"| Focused["**Center focused column**<br/>viewport_offset = canvas_x(focused)<br/>- (monitor_width - focused_width) / 2<br/><br/>Always centers, even when all columns fit."]
     Decision -->|"Automated flow + everything fits"| Canvas["**Center canvas**<br/>viewport_offset =<br/>(canvas_width - monitor_width) / 2<br/><br/>May be negative when canvas < monitor."]
     Decision -->|"Automated flow + overflow"| Ensure["**Ensure column visible**<br/>existing `ensure_column_visible`<br/>(free-form min-scroll, gap margin)<br/><br/>No centering — just reveal the column."]
 
-    Focused -.->|Used by| FC["`stm dispatch center` command<br/>(dispatch_center → ScrollingSpace::center_focused_column)"]
+    Focused -.->|Used by| FC["`flow dispatch center` command<br/>(dispatch_center → ScrollingSpace::center_focused_column)"]
     Canvas -.->|Used by| CC["`initialize_windows` fit case<br/>move-to-workspace fit case<br/>(ScrollingSpace::center_canvas)"]
     Ensure -.->|Used by| EC["`initialize_windows` overflow case<br/>move-to-workspace overflow case<br/>(ScrollingSpace::ensure_focused_visible)"]
 ```
@@ -172,7 +172,7 @@ viewport_offset = canvas_x(focused) - (monitor_width - focused_width) / 2
 
 The `(f + 1) * window_gap` term is the easy off-by-one trap: the canvas starts with a left-edge gap, then each column contributes its width plus a trailing gap, so column `f`'s left edge sits at `(f + 1)` gaps plus the widths of all preceding columns. `focused_width` is the focused column's **actual** `width_px` (read from the layout, not assumed) — this is the fix for the original bug where the old `center_viewport_grid`/`center_viewport_absolute` functions assumed uniform widths and computed `f * slot` instead.
 
-This is the only behavior that centers **unconditionally** — the user explicitly asked for it via `stm dispatch center`. The other two behaviors are policy decisions made by automated flows.
+This is the only behavior that centers **unconditionally** — the user explicitly asked for it via `flow dispatch center`. The other two behaviors are policy decisions made by automated flows.
 
 ### `center_viewport_canvas` — center the entire canvas
 
@@ -192,7 +192,7 @@ Both functions took `(num_columns, focus_col, config)` and computed positions as
 
 | Property | `center_viewport_on_focused` | `center_viewport_canvas` | `ensure_column_visible` |
 |----------|------------------------------|--------------------------|-------------------------|
-| Trigger | Explicit user command (`stm dispatch center`) | Automated flow, all columns fit | Automated flow, canvas overflows |
+| Trigger | Explicit user command (`flow dispatch center`) | Automated flow, all columns fit | Automated flow, canvas overflows |
 | Centers | Focused column at monitor midpoint | Entire canvas at monitor midpoint | Nothing — minimum-scroll reveal |
 | Offset quantization | Free-form | Free-form | Free-form |
 | Negative offset possible | Yes (when focused col is near canvas left) | Yes (when canvas < monitor) | No (clamped to ≥ 0) |

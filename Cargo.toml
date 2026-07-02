@@ -1,22 +1,22 @@
 [package]
-name = "scrolling-tiling-manager"
+name = "flow-wm"
 version = "0.1.0"
 edition = "2024"
 description = "A scrolling, infinite-horizontal-canvas tiling window manager for Windows"
 license = "MIT"
-repository = "https://github.com/CCpcalvin/scrolling-tiling-manager"
+repository = "https://github.com/CCpcalvin/flow-wm"
 
 [[bin]]
-name = "stmd"
+name = "flowd"
 path = "src/main.rs"
 
 [[bin]]
-name = "stm"
-path = "src/bin/stm.rs"
+name = "flow"
+path = "src/bin/flow.rs"
 
 [[bin]]
-name = "stm-watchdog"
-path = "src/bin/stm-watchdog.rs"
+name = "flow-watchdog"
+path = "src/bin/flow-watchdog.rs"
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }

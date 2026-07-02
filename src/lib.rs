@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! ScrollingTilingManager (`stm`) — a tiling window manager for Windows built
+//! FlowWM (`flow`) — a tiling window manager for Windows built
 //! around a **scrolling, infinite-horizontal-canvas** layout model.
 //!
 //! # Binaries
@@ -9,9 +9,9 @@
 //!
 //! | Binary | Role |
 //! |--------|------|
-//! | `stmd` | Daemon — owns all state, manages windows |
-//! | `stm` | CLI client — sends commands to the daemon via named-pipe IPC |
-//! | `stm-watchdog` | Crash-recovery helper — restores windows if the daemon dies |
+//! | `flowd` | Daemon — owns all state, manages windows |
+//! | `flow` | CLI client — sends commands to the daemon via named-pipe IPC |
+//! | `flow-watchdog` | Crash-recovery helper — restores windows if the daemon dies |
 //!
 //! # Modules
 //!
@@ -19,7 +19,7 @@
 //! - [`layout`] — pure layout math: mutation + projection (zero Win32)
 //! - [`registry`] — window metadata, classification, and the Win32 bridge
 //! - [`animation`] — embedded animation crate (`WindowAnimator`, `DwmFlush` pacing)
-//! - [`daemon`] — `ScrollTilingManager` coordinator, hook handlers, dispatch
+//! - [`daemon`] — `FlowWM` coordinator, hook handlers, dispatch
 //! - [`ipc`] — named-pipe server and message protocol
 //! - [`config`] — TOML config (code is the single source of truth)
 //! - [`common`] — shared bridge types (`WindowId`, `Rect`, `Direction`)

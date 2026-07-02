@@ -2,17 +2,17 @@
 //!
 //! This module contains:
 //!
-//! - [`ScrollTilingManager::animate_layout`] — converts an [`AppliedLayout`]
+//! - [`FlowWM::animate_layout`] — converts an [`AppliedLayout`]
 //!   into animation targets and submits to the animator.
-//! - [`ScrollTilingManager::animate_workspaces`] — multi-workspace variant
+//! - [`FlowWM::animate_workspaces`] — multi-workspace variant
 //!   that submits a single combined batch with per-workspace vertical
 //!   `y_offset` applied (used by `SwitchWorkspace` / `MoveWindowToWorkspace`).
-//! - [`ScrollTilingManager::teleport_workspaces`] — bypass-animator variant
+//! - [`FlowWM::teleport_workspaces`] — bypass-animator variant
 //!   that directly `SetWindowPos`-es bystander workspaces into place with no
 //!   animation, used to maintain the workspace stacking invariant during
 //!   switches without visual noise.
 //! - [`animate_layout_raw`] — standalone version used during construction when
-//!   `ScrollTilingManager` doesn't exist yet.
+//!   `FlowWM` doesn't exist yet.
 
 use windows::Win32::Foundation::HWND;
 
@@ -21,15 +21,15 @@ use crate::common::Rect;
 use crate::layout::types::{ActualLayout, AppliedLayout};
 use crate::registry::WindowRegistry;
 
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Convert an [`AppliedLayout`] into animation targets and submit to the animator.
     ///
     /// This is the critical conversion point between the layout engine's output
-    /// (STM types) and the animation system's input (animation types):
+    /// (flow types) and the animation system's input (animation types):
     ///
-    /// | STM Type | Animation Type |
+    /// | flow Type | Animation Type |
     /// |----------|---------------|
     /// | `WindowId(isize)` | `WindowRef(isize)` |
     /// | `Rect { x, y, width, height }` position | `IVec2::new(x, y)` |
@@ -358,14 +358,14 @@ impl ScrollTilingManager {
 
 /// Convert an [`AppliedLayout`] into animation targets and submit to an animator.
 ///
-/// This is a standalone version of [`ScrollTilingManager::animate_layout`] that
-/// takes `&mut WindowAnimator` directly instead of `&mut ScrollTilingManager`.
-/// Used during construction when `ScrollTilingManager` doesn't exist yet
+/// This is a standalone version of [`FlowWM::animate_layout`] that
+/// takes `&mut WindowAnimator` directly instead of `&mut FlowWM`.
+/// Used during construction when `FlowWM` doesn't exist yet
 /// but the animator needs to snap windows to their initial positions.
 ///
 /// # Visible-Rect to Window-Rect Translation
 ///
-/// Like [`ScrollTilingManager::animate_layout`], this function translates each
+/// Like [`FlowWM::animate_layout`], this function translates each
 /// entry's rect from the layout engine's visible-rect space to Win32 window-rect
 /// space using the window's stored
 /// [`InvisibleBounds`](crate::common::InvisibleBounds). This is necessary even
@@ -375,10 +375,10 @@ impl ScrollTilingManager {
 /// # Border Thickness
 ///
 /// `border_thickness` and `border_overlap` are passed explicitly because this
-/// function runs before `ScrollTilingManager` exists — the caller reads them
+/// function runs before `FlowWM` exists — the caller reads them
 /// from the config and forwards them. The effective per-edge shrink is
 /// `(thickness - overlap)`, same as
-/// [`ScrollTilingManager::animate_layout`].
+/// [`FlowWM::animate_layout`].
 pub(super) fn animate_layout_raw(
     animator: &mut WindowAnimator,
     layout: &AppliedLayout,

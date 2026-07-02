@@ -25,7 +25,7 @@ impl IVec2 {
 /// Uses `(x, y, w, h)` rather than Win32's `(left, top, right, bottom)`.
 /// The Win32 backend converts between the two representations internally.
 ///
-/// **Note**: This type differs from STM's `common::Rect` which uses
+/// **Note**: This type differs from flow's `common::Rect` which uses
 /// `{x, y, width, height}`. The two types coexist in different modules and
 /// are converted at integration boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]

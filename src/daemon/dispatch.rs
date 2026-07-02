@@ -2,7 +2,7 @@
 //!
 //! This module contains:
 //!
-//! - [`ScrollTilingManager::dispatch`] — routes each [`SocketMessage`] variant
+//! - [`FlowWM::dispatch`] — routes each [`SocketMessage`] variant
 //!   to the appropriate subsystem.
 //! - Individual `dispatch_*` helper methods for each command category.
 //! - Helper functions for unimplemented commands.
@@ -23,7 +23,7 @@ use crate::workspace::{FloatingSpace, WorkspaceId, workspace_y_offset};
 use windows::Win32::Foundation::HWND;
 
 use super::config_derive;
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
 // Built-in fallback policy for a floating window's default size when the user
 // hasn't set `floating.default_width` / `floating.default_height`.
@@ -56,7 +56,7 @@ const MAX_FLOAT_HEIGHT: i32 =
 ///
 /// Extracted as a standalone pure fn so the integer arithmetic (ratios, cap
 /// clamping, per-dimension independence) is unit-testable without constructing
-/// a `ScrollTilingManager` (which owns Win32 handles and cannot be built in a
+/// a `FlowWM` (which owns Win32 handles and cannot be built in a
 /// unit test). The caller is still responsible for the per-dimension
 /// `Option::unwrap_or` choice between an explicit user value and the matching
 /// fallback component returned here.
@@ -67,7 +67,7 @@ fn fallback_float_size(work_area: Size) -> Size {
     }
 }
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Dispatch a single IPC command and return the response.
     ///
     /// Routes each [`SocketMessage`] variant to the appropriate subsystem:
@@ -916,7 +916,7 @@ impl ScrollTilingManager {
     /// - Already in the desired state → no-op `Ok`.
     ///
     /// On a successful non-no-op transition, also records the decision to
-    /// `history-stm-rules.toml` so the next window of the same app is
+    /// `history-flow-rules.toml` so the next window of the same app is
     /// classified automatically. See (`docs/src/dev-guide/classification.md`).
     ///
     /// # Animation
@@ -1004,7 +1004,7 @@ impl ScrollTilingManager {
         response
     }
 
-    /// Persist a `set-window` transition to `history-stm-rules.toml`.
+    /// Persist a `set-window` transition to `history-flow-rules.toml`.
     ///
     /// `NoOp` transitions are ignored (no user intent to record). The store is
     /// saved only when `record` reports a change, so repeated identical
@@ -1018,7 +1018,7 @@ impl ScrollTilingManager {
             return;
         }
         if let Err(e) = self.history.save(&history_rules_path_in(&self.config_dir)) {
-            log::warn!("failed to persist history-stm-rules.toml: {e}");
+            log::warn!("failed to persist history-flow-rules.toml: {e}");
         }
         self.registry
             .set_learned_rules(self.history.rules().to_vec());
@@ -1107,7 +1107,7 @@ impl ScrollTilingManager {
     /// The shared primitive behind every "a window becomes a float" path:
     /// - [`set_window_to_float`] (the `set-window` toggle), which first removes
     ///   the window from the scrolling space and animates both layouts.
-    /// - [`on_window_created`](super::hooks::ScrollTilingManager::on_window_created)'s
+    /// - [`on_window_created`](super::hooks::FlowWM::on_window_created)'s
     ///   fresh-float branch, for a window classified as float at creation.
     /// - the startup scan's adoption of pre-existing floats in
     ///   [`new`](Self::new).
@@ -1180,7 +1180,7 @@ impl ScrollTilingManager {
         SocketResponse::Ok
     }
 
-    /// Reload `stm.toml` (and `stm-rules.toml`) from disk and apply the
+    /// Reload `flow.toml` (and `flow-rules.toml`) from disk and apply the
     /// live-reloadable fields to the running daemon.
     ///
     /// Layout state is preserved: window order, columns, focus, and the scroll
@@ -1192,12 +1192,12 @@ impl ScrollTilingManager {
     /// Uses **validate-before-apply**: the new config is loaded and validated
     /// before any state is touched, so a parse/validation error leaves the
     /// daemon running on its previous config with nothing to roll back.
-    /// `stm-rules.toml` is reloaded non-fatally — a rules failure warns and
+    /// `flow-rules.toml` is reloaded non-fatally — a rules failure warns and
     /// keeps the current rules.
     ///
     /// # Errors
     ///
-    /// Returns [`SocketResponse::Error`] only when `stm.toml` cannot be loaded
+    /// Returns [`SocketResponse::Error`] only when `flow.toml` cannot be loaded
     /// or fails validation. The window-rule file never fails the command.
     fn dispatch_reload_config(&mut self) -> SocketResponse {
         // Load + validate BEFORE touching any state (validate-before-apply:
@@ -1270,7 +1270,7 @@ impl ScrollTilingManager {
         // the current rules so the rest of the reload still takes effect.
         match load_rules_config(&user_rules_path_in(&self.config_dir)) {
             Ok(rules) => self.registry.set_user_rules(rules),
-            Err(error) => log::warn!("stmd: {error}; keeping current window rules"),
+            Err(error) => log::warn!("flowd: {error}; keeping current window rules"),
         }
 
         SocketResponse::Ok
@@ -1286,7 +1286,7 @@ fn unimplemented_command(name: &str) -> SocketResponse {
 /// requested mode and the focused window's current state.
 ///
 /// Extracted from `dispatch_set_window` so the full mode × state decision table
-/// is unit-testable without constructing a `ScrollTilingManager` (which owns
+/// is unit-testable without constructing a `FlowWM` (which owns
 /// Win32 handles and cannot be built in a unit test). See
 /// (`docs/src/dev-guide/floating-space.md`) for the transition design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1459,7 +1459,7 @@ mod tests {
     // ── action_to_learned: transition → recorded action ────────────────
     //
     // These tests pin the mapping used by `dispatch_set_window` to decide
-    // whether a transition should be persisted to `history-stm-rules.toml`.
+    // whether a transition should be persisted to `history-flow-rules.toml`.
     // Like the resolve tests above, they run with NO daemon and NO Win32.
 
     #[test]

@@ -54,9 +54,9 @@ use crate::layout::types::{ActualLayout, AppliedLayout, MonitorInfo, Padding, Vi
 /// # Example
 ///
 /// ```rust
-/// use scrolling_tiling_manager::workspace::ScrollingSpace;
-/// use scrolling_tiling_manager::layout::types::{MonitorInfo, Padding};
-/// use scrolling_tiling_manager::common::{Rect, WindowId, Direction};
+/// use flow_wm::workspace::ScrollingSpace;
+/// use flow_wm::layout::types::{MonitorInfo, Padding};
+/// use flow_wm::common::{Rect, WindowId, Direction};
 ///
 /// let monitor = MonitorInfo {
 ///     work_area: Rect { x: 0, y: 0, width: 1920, height: 1080 },
@@ -84,7 +84,7 @@ pub struct ScrollingSpace {
     actual: ActualLayout,
     /// The monitor being managed.
     monitor: MonitorInfo,
-    /// Configuration derived from `StmConfig`.
+    /// Configuration derived from `FlowConfig`.
     config: MutationConfig,
     /// Saved column width before monocle mode (per column index), in pixels.
     monocle_saved_width: Option<(usize, i32)>,
@@ -539,11 +539,11 @@ impl ScrollingSpace {
     /// # Example
     ///
     /// ```rust
-    /// # use scrolling_tiling_manager::workspace::ScrollingSpace;
-    /// # use scrolling_tiling_manager::layout::types::{MonitorInfo, Padding};
-    /// # use scrolling_tiling_manager::common::WindowId;
+    /// # use flow_wm::workspace::ScrollingSpace;
+    /// # use flow_wm::layout::types::{MonitorInfo, Padding};
+    /// # use flow_wm::common::WindowId;
     /// # let monitor = MonitorInfo {
-    /// #     work_area: scrolling_tiling_manager::common::Rect { x: 0, y: 0, width: 1920, height: 1080 },
+    /// #     work_area: flow_wm::common::Rect { x: 0, y: 0, width: 1920, height: 1080 },
     /// # };
     /// # let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, Padding { window_gap: 4, up: 0, down: 0 }, 4);
     /// engine.add_window(WindowId(1)); // col 0, focused

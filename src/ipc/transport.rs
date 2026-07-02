@@ -1,6 +1,6 @@
-//! Named pipe transport for IPC between `stm` CLI and `stmd` daemon.
+//! Named pipe transport for IPC between `flow` CLI and `flowd` daemon.
 //!
-//! Uses the Windows named pipe `\\.\pipe\stm` with synchronous (blocking) I/O.
+//! Uses the Windows named pipe `\\.\pipe\flow` with synchronous (blocking) I/O.
 //! Messages are newline-delimited JSON (see [`super::message`]).
 
 use std::ffi::OsStr;
@@ -131,9 +131,9 @@ impl Drop for EventHandle {
 // across threads is safe — the kernel synchronizes access to the event object.
 unsafe impl Send for EventHandle {}
 
-/// Named pipe server for the `stmd` daemon.
+/// Named pipe server for the `flowd` daemon.
 ///
-/// Listens on `\\.\pipe\stm`, accepts one client at a time (sequential),
+/// Listens on `\\.\pipe\flow`, accepts one client at a time (sequential),
 /// reads newline-delimited JSON messages, and writes responses.
 ///
 /// # Event-Driven Architecture
@@ -409,7 +409,7 @@ fn write_all(handle: HANDLE, data: &[u8]) -> io::Result<()> {
 // The synchronous `read_line`/`write_all` above block forever: a `ReadFile`
 // on a byte-mode pipe returns only when data arrives or the peer disconnects,
 // with no timeout. That is acceptable for the *server* (whose clients are
-// one-shot `stm` invocations that always send immediately), but dangerous for
+// one-shot `flow` invocations that always send immediately), but dangerous for
 // the *client*: if the daemon accepts the connection yet never replies, the
 // CLI — or a test's cleanup path — hangs indefinitely.
 //
@@ -616,7 +616,7 @@ fn read_line_overlapped(handle: HANDLE, deadline: Instant) -> io::Result<String>
 
 /// Connect to the daemon's named pipe, send a message, and read the response.
 ///
-/// This is the primary function used by the `stm` CLI to communicate with
+/// This is the primary function used by the `flow` CLI to communicate with
 /// the daemon. The pipe handle is RAII-wrapped — it is closed even if an
 /// error occurs mid-transaction.
 ///
@@ -632,7 +632,7 @@ pub fn send_message(msg: &SocketMessage) -> io::Result<SocketResponse> {
 /// Connect to a specific named pipe, send a message, and read the response.
 ///
 /// Like [`send_message`] but takes the pipe path directly instead of reading
-/// from the `STM_PIPE_NAME` environment variable. Thread-safe for concurrent
+/// from the `FLOW_PIPE_NAME` environment variable. Thread-safe for concurrent
 /// use with different pipe names (no global env-var mutation).
 ///
 /// # Timeout behaviour
@@ -693,8 +693,8 @@ pub fn is_daemon_running() -> bool {
 
 /// Open the daemon's named pipe, returning an RAII-wrapped handle.
 ///
-/// Uses the pipe name from the `STM_PIPE_NAME` environment variable
-/// (or the default `\\.\pipe\stm`).
+/// Uses the pipe name from the `FLOW_PIPE_NAME` environment variable
+/// (or the default `\\.\pipe\flow`).
 fn connect_to_pipe() -> io::Result<PipeHandle> {
     connect_to_named_pipe(&message::pipe_name())
 }

@@ -1,5 +1,5 @@
 //! Machine-learned window classification rules, persisted to
-//! `history-stm-rules.toml`.
+//! `history-flow-rules.toml`.
 //!
 //! The [`HistoryStore`] records the user's explicit `set-window float|tile`
 //! decisions keyed on `exe + class` (falling back to `exe`-only when `class` is
@@ -21,25 +21,25 @@ use crate::config::types::{MatchRule, WindowAction, WindowRule, WindowRulesConfi
 pub struct HistoryStore {
     /// The learned rules. `default_action` on this config is unused by the
     /// pipeline (the user's `default_action` governs) but is serialized to
-    /// keep the TOML shape consistent with `stm-rules.toml`.
+    /// keep the TOML shape consistent with `flow-rules.toml`.
     config: WindowRulesConfig,
 }
 
-/// Header comment prepended to `history-stm-rules.toml` on every save.
+/// Header comment prepended to `history-flow-rules.toml` on every save.
 const HISTORY_FILE_HEADER: &str = "\
-# history-stm-rules.toml — learned window classification rules.
+# history-flow-rules.toml — learned window classification rules.
 #
-# This file is maintained automatically by stmd based on your `set-window`
-# float/tile decisions. You may edit or delete entries by hand; stmd will
+# This file is maintained automatically by flowd based on your `set-window`
+# float/tile decisions. You may edit or delete entries by hand; flowd will
 # recreate the file as you continue using it. To clear ALL learned rules,
 # delete this file (or empty the [[rules]] list).
 #
-# Priority chain: user rules (stm-rules.toml) > learned rules (this file)
+# Priority chain: user rules (flow-rules.toml) > learned rules (this file)
 # > default rules > default_action.
 ";
 
 impl HistoryStore {
-    /// Load from `history-stm-rules.toml`. Resilient: missing file, parse
+    /// Load from `history-flow-rules.toml`. Resilient: missing file, parse
     /// error, or IO error all return an empty store with a warning log.
     /// The daemon must never fail to start because of a bad history file.
     #[must_use]
@@ -287,7 +287,7 @@ action = "tile"
     #[test]
     fn save_then_load_round_trips() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("history-stm-rules.toml");
+        let path = dir.path().join("history-flow-rules.toml");
 
         let mut store = HistoryStore::default();
         store.record(WindowAction::Tile, "chrome.exe", Some("Chrome_WidgetWin_1"));
@@ -306,7 +306,7 @@ action = "tile"
     #[test]
     fn save_includes_human_readable_header() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("history-stm-rules.toml");
+        let path = dir.path().join("history-flow-rules.toml");
 
         let mut store = HistoryStore::default();
         store.record(WindowAction::Tile, "app.exe", None);
@@ -314,7 +314,7 @@ action = "tile"
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(
-            contents.contains("history-stm-rules.toml"),
+            contents.contains("history-flow-rules.toml"),
             "header should contain the file name"
         );
         assert!(
@@ -327,7 +327,7 @@ action = "tile"
     #[test]
     fn save_output_is_valid_toml() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("history-stm-rules.toml");
+        let path = dir.path().join("history-flow-rules.toml");
 
         let mut store = HistoryStore::default();
         store.record(WindowAction::Tile, "app.exe", Some("SomeClass"));

@@ -117,14 +117,14 @@
 
 The original centering implementation had two functions: `mutations::center_viewport_grid` (slot-aligned) and `mutations::center_viewport_absolute` (free-form). Both took `(num_columns, focus_col, config)` and computed positions as `f * slot` or `gap + N * slot` — they never saw `&VirtualLayout`. This was correct when every column had the same width, but once expand/shrink/drag-resize landed (allowing per-column widths), the math silently went wrong: `projection::project` and `ensure_column_visible` already used prefix sums correctly, so centering was the lone holdout producing visibly off-center results whenever any column was non-default width.
 
-A separate `stm dispatch centergrid` command exposed the grid variant to users, but the grid/absolute distinction turned out to be a red herring: the real axis is "what should be centered" (focused column vs entire canvas vs nothing), not "is the offset quantized to slot boundaries".
+A separate `flow dispatch centergrid` command exposed the grid variant to users, but the grid/absolute distinction turned out to be a red herring: the real axis is "what should be centered" (focused column vs entire canvas vs nothing), not "is the offset quantized to slot boundaries".
 
 ### Decision
 
 1. **Replace** `center_viewport_grid` and `center_viewport_absolute` with two prefix-sum primitives that take `&VirtualLayout`:
    - `center_viewport_on_focused(layout, focus_col, config)` — centers the focused column at the monitor midpoint. **Always** centers, even when all columns fit.
    - `center_viewport_canvas(layout, config)` — centers the entire canvas via `(canvas_width - monitor_width) / 2`. May be negative.
-2. **Delete** the `stm dispatch centergrid` command, the `SocketMessage::CenterGrid` IPC variant, and the `dispatch_center_grid` handler. The single `stm dispatch center` command (now backed by `center_viewport_on_focused`) is the only user-facing center operation.
+2. **Delete** the `flow dispatch centergrid` command, the `SocketMessage::CenterGrid` IPC variant, and the `dispatch_center_grid` handler. The single `flow dispatch center` command (now backed by `center_viewport_on_focused`) is the only user-facing center operation.
 3. **Fit predicate rewrite.** Replace `columns.len() < columns_per_screen` with `canvas_width(layout, window_gap) ≤ monitor_width` in both `initialize_windows` and the move-to-workspace auto-center hook. The `columns_per_screen` config field is retained for compatibility but is no longer consulted by the centering logic.
 4. **Three behaviors**, mapped to triggers:
    - Explicit user command → `center_viewport_on_focused` (always centers).

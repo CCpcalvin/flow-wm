@@ -1,6 +1,6 @@
-//! Integration tests for `stm dispatch swap-column` and `stm dispatch move-window`.
+//! Integration tests for `flow dispatch swap-column` and `flow dispatch move-window`.
 //!
-//! These tests create an isolated desktop, start `stmd` on it, create dummy
+//! These tests create an isolated desktop, start `flowd` on it, create dummy
 //! windows, and exercise the swap/move CLI commands. The daemon's layout is
 //! queried before and after each command to verify that columns are actually
 //! swapped.
@@ -10,7 +10,7 @@
 //!
 //! # Desktop isolation
 //!
-//! Every test creates a [`TestDesktop`] and spawns `stmd` directly via
+//! Every test creates a [`TestDesktop`] and spawns `flowd` directly via
 //! [`start_test_daemon`] with the `--desktop` flag. The user's real desktop is
 //! never touched. Each test gets a unique pipe name for parallel isolation.
 
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use predicates::prelude::*;
 
-use super::common::{stm, unique_pipe_name};
+use super::common::{flow, unique_pipe_name};
 use super::test_desktop::{
     DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, send_ipc_ignore, start_test_daemon,
     unique_title,
@@ -60,7 +60,7 @@ fn column_window_ids(json: &serde_json::Value) -> Vec<Vec<i64>> {
 
 // ── swap-column tests ────────────────────────────────────────────────
 
-/// `stm dispatch swap-column right` swaps the focused column with its right
+/// `flow dispatch swap-column right` swaps the focused column with its right
 /// neighbour.
 ///
 /// Setup: two windows → two columns. Focus is moved to the leftmost column
@@ -82,7 +82,7 @@ fn swap_column_right_swaps_two_columns() {
     std::thread::sleep(HOOK_SETTLE);
 
     // Ensure the focused window is in the leftmost column.
-    use scrolling_tiling_manager::ipc::message::SocketMessage;
+    use flow_wm::ipc::message::SocketMessage;
     send_ipc_ignore(&pipe, &SocketMessage::FocusLeft);
     std::thread::sleep(SWAP_SETTLE);
 
@@ -96,7 +96,7 @@ fn swap_column_right_swaps_two_columns() {
     );
 
     // Act: swap columns to the right.
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "swap-column", "right"])
         .assert()
         .stdout(predicate::str::contains("column swapped"))
@@ -121,7 +121,7 @@ fn swap_column_right_swaps_two_columns() {
     );
 }
 
-/// `stm dispatch swap-column left` swaps the focused column with its left
+/// `flow dispatch swap-column left` swaps the focused column with its left
 /// neighbour.
 ///
 /// Setup: two windows → two columns. Focus is moved to the rightmost column
@@ -142,7 +142,7 @@ fn swap_column_left_swaps_two_columns() {
     std::thread::sleep(HOOK_SETTLE);
 
     // Ensure focus is on the rightmost column.
-    use scrolling_tiling_manager::ipc::message::SocketMessage;
+    use flow_wm::ipc::message::SocketMessage;
     send_ipc_ignore(&pipe, &SocketMessage::FocusRight);
     std::thread::sleep(SWAP_SETTLE);
 
@@ -155,7 +155,7 @@ fn swap_column_left_swaps_two_columns() {
     );
 
     // Act: swap columns to the left.
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "swap-column", "left"])
         .assert()
         .stdout(predicate::str::contains("column swapped"))
@@ -177,7 +177,7 @@ fn swap_column_left_swaps_two_columns() {
 
 // ── move-window tests ────────────────────────────────────────────────
 
-/// `stm dispatch move-window right` on tiled windows is equivalent to
+/// `flow dispatch move-window right` on tiled windows is equivalent to
 /// `swap-column right` (the semantic "move" resolves to a column swap for
 /// horizontal movement of tiled windows).
 #[ignore = "non-deterministic on isolated test desktop: daemon hooks may not register/tile windows before the assertion (startup hook race)"]
@@ -196,7 +196,7 @@ fn move_window_right_swaps_two_columns() {
     std::thread::sleep(HOOK_SETTLE);
 
     // Ensure focus is on the leftmost column.
-    use scrolling_tiling_manager::ipc::message::SocketMessage;
+    use flow_wm::ipc::message::SocketMessage;
     send_ipc_ignore(&pipe, &SocketMessage::FocusLeft);
     std::thread::sleep(SWAP_SETTLE);
 
@@ -209,7 +209,7 @@ fn move_window_right_swaps_two_columns() {
     );
 
     // Act: move window right (semantic → column swap for tiled L/R).
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "move-window", "right"])
         .assert()
         .stdout(predicate::str::contains("window moved"))
@@ -231,7 +231,7 @@ fn move_window_right_swaps_two_columns() {
 
 // ── Edge-case tests ──────────────────────────────────────────────────
 
-/// `stm dispatch swap-column right` at the right edge (single column) returns
+/// `flow dispatch swap-column right` at the right edge (single column) returns
 /// an error — there is no column to swap with.
 #[ignore = "non-deterministic on isolated test desktop: daemon hooks may not register/tile windows before the assertion (startup hook race)"]
 #[test]
@@ -256,7 +256,7 @@ fn swap_column_right_at_edge_returns_error() {
     );
 
     // Act: swap right should fail (no column to the right).
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "swap-column", "right"])
         .assert()
         .failure();

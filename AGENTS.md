@@ -35,7 +35,7 @@ Rules:
 - ASCII diagrams belong in mdBook (rendered as Mermaid), never in docstrings.
 - Build the book with `mdbook build docs/`; render rustdoc with `cargo doc --no-deps --document-private-items`.
 
-- **Config defaults: CODE is the single source of truth.** Default values live in the `Default` impls of each config struct in `src/config/types.rs`. Each struct carries `#[serde(default)]` at the container level, so a user's `stm.toml` may be partial, empty, or nested-partial — serde fills the gaps from the `Default` impl. `default-config.toml` in the repo root is a hand-written EXAMPLE copied to users by `stm config init`; it is NOT read at runtime. When you add or change a config field, update BOTH the `Default` impl in `src/config/types.rs` AND `default-config.toml` — the `default_config_toml_matches_compiled_defaults` test enforces they stay in sync.
+- **Config defaults: CODE is the single source of truth.** Default values live in the `Default` impls of each config struct in `src/config/types.rs`. Each struct carries `#[serde(default)]` at the container level, so a user's `flow.toml` may be partial, empty, or nested-partial — serde fills the gaps from the `Default` impl. `default-config.toml` in the repo root is a hand-written EXAMPLE copied to users by `flow config init`; it is NOT read at runtime. When you add or change a config field, update BOTH the `Default` impl in `src/config/types.rs` AND `default-config.toml` — the `default_config_toml_matches_compiled_defaults` test enforces they stay in sync.
 
 ## graphify
 

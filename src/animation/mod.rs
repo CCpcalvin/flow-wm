@@ -13,8 +13,8 @@
 //!    each window.
 //!
 //! ```rust,ignore
-//! use scrolling_tiling_manager::animation::{AnimatorConfig, WindowAnimator, WindowRef, WindowTarget, IVec2};
-//! use scrolling_tiling_manager::animation::backend::win32::Win32Backend;
+//! use flow_wm::animation::{AnimatorConfig, WindowAnimator, WindowRef, WindowTarget, IVec2};
+//! use flow_wm::animation::backend::win32::Win32Backend;
 //!
 //! let backend = Win32Backend::new();
 //! let config  = AnimatorConfig::default();
@@ -49,7 +49,7 @@ pub use types::AnimationError;
 pub use types::IVec2;
 /// Re-export of the animation engine's rectangle type.
 ///
-/// This type uses `{x, y, w, h}` fields, distinct from STM's `common::Rect`
+/// This type uses `{x, y, w, h}` fields, distinct from flow's `common::Rect`
 /// which uses `{x, y, width, height}`. The two types coexist in different
 /// modules and are converted at integration boundaries.
 pub use types::Rect as AnimRect;

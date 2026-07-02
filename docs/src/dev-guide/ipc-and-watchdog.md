@@ -1,14 +1,14 @@
 # IPC and Watchdog
 
-The `stm` CLI communicates with the `stmd` daemon over a single Windows named pipe
+The `flow` CLI communicates with the `flowd` daemon over a single Windows named pipe
 using newline-delimited JSON. The daemon listens for one client at a time on a
 background accept thread, while the main IPC thread processes hook events and
-dispatches commands. A separate `stm-watchdog` binary is planned for crash recovery.
+dispatches commands. A separate `flow-watchdog` binary is planned for crash recovery.
 
 ## Named-Pipe Protocol
 
-The IPC transport uses the Windows named pipe `\\.\pipe\stm` (configurable via the
-`STM_PIPE_NAME` environment variable for integration tests). The wire format is
+The IPC transport uses the Windows named pipe `\\.\pipe\flow` (configurable via the
+`FLOW_PIPE_NAME` environment variable for integration tests). The wire format is
 newline-delimited JSON: each message is a single JSON object terminated by `\n`,
 serialised by `serde_json`. The encoding and decoding helpers live in
 [`src/ipc/message.rs`](../../src/ipc/message.rs).
@@ -22,11 +22,11 @@ silently replacing the first.
 
 ```mermaid
 sequenceDiagram
-    participant CLI as stm CLI
+    participant CLI as flow CLI
     participant Pipe as named pipe
     participant Accept as Accept Thread
     participant IPC as IPC Thread
-    participant STM as ScrollTilingManager
+    participant flow as FlowWM
 
     CLI->>Pipe: CreateFileW (overlapped)
     Accept->>Accept: ConnectNamedPipe (blocking)
@@ -34,8 +34,8 @@ sequenceDiagram
     IPC->>IPC: WaitForMultipleObjects wakes
     IPC->>Pipe: read_message() -- blocking ReadFile
     Pipe-->>IPC: {"type":"focus_left"}\n
-    IPC->>STM: dispatch(SocketMessage::FocusLeft)
-    STM-->>IPC: SocketResponse::Ok
+    IPC->>flow: dispatch(SocketMessage::FocusLeft)
+    flow-->>IPC: SocketResponse::Ok
     IPC->>Pipe: write_response() -- WriteFile
     Pipe-->>CLI: {"status":"ok"}\n
     IPC->>Pipe: DisconnectNamedPipe
@@ -69,7 +69,7 @@ computation.
 
 The server side in [`src/ipc/transport.rs`](../../src/ipc/transport.rs) uses
 synchronous (blocking) I/O -- appropriate because the daemon's clients are one-
-shot `stm` invocations that always send immediately. The `PipeServer` struct
+shot `flow` invocations that always send immediately. The `PipeServer` struct
 manages a background accept thread: `start_accept()` spawns a short-lived thread
 that blocks in `ConnectNamedPipe`, then signals a Win32 event to wake the main
 thread's `WaitForMultipleObjects`. See [threading model](threading-model.md) for
@@ -127,9 +127,9 @@ message `"type"` tag. A response-shaped JSON will not parse as a `SocketMessage`
 and vice versa -- the tests in [`src/ipc/message.rs`](../../src/ipc/message.rs)
 enforce this explicitly.
 
-## The `stm` CLI Client
+## The `flow` CLI Client
 
-The CLI ([`src/bin/stm.rs`](../../src/bin/stm.rs)) is built with `clap` and
+The CLI ([`src/bin/flow.rs`](../../src/bin/flow.rs)) is built with `clap` and
 structured into four top-level command groups. Every dispatch command sends a
 single `SocketMessage` and prints a one-line success or error message. The CLI
 does no layout computation -- it is a thin transport layer. See
@@ -140,24 +140,24 @@ a command arrives.
 
 | Command | Action |
 |---------|--------|
-| `stm start [--config <dir>] [--log-file <path>]` | Spawn `stmd.exe` detached, poll until pipe is ready |
-| `stm stop` | Send `Stop` via named pipe |
+| `flow start [--config <dir>] [--log-file <path>]` | Spawn `flowd.exe` detached, poll until pipe is ready |
+| `flow stop` | Send `Stop` via named pipe |
 
-`stm start` locates `stmd.exe` next to the current executable, spawns it with
+`flow start` locates `flowd.exe` next to the current executable, spawns it with
 `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` (falling back to plain `spawn()`
 under WSL interop), then polls the pipe at 200 ms intervals for up to 5 seconds.
-The `--config` flag sets `STM_CONFIG_DIR` in the current process before spawning
+The `--config` flag sets `FLOW_CONFIG_DIR` in the current process before spawning
 so the child inherits it; the `--log-file` flag is forwarded as a CLI argument.
 
 ### Config
 
 | Command | Action |
 |---------|--------|
-| `stm config init` | Create config dir + write default files (no daemon contact) |
-| `stm config reload` | Send `ReloadConfig` to daemon |
-| `stm config edit` | Open config dir in `$EDITOR` / `VISUAL` / `notepad.exe` |
-| `stm config path` | Print resolved config directory path |
-| `stm config check` | Validate config files locally |
+| `flow config init` | Create config dir + write default files (no daemon contact) |
+| `flow config reload` | Send `ReloadConfig` to daemon |
+| `flow config edit` | Open config dir in `$EDITOR` / `VISUAL` / `notepad.exe` |
+| `flow config path` | Print resolved config directory path |
+| `flow config check` | Validate config files locally |
 
 All config commands except `reload` operate on local files without contacting the
 daemon. The config directory resolution chain is documented in
@@ -167,21 +167,21 @@ daemon. The config directory resolution chain is documented in
 
 | Command | Action |
 |---------|--------|
-| `stm query all` | Send `QueryWindowsAll`, pretty-print JSON response |
+| `flow query all` | Send `QueryWindowsAll`, pretty-print JSON response |
 
 ### Dispatch
 
 | Command | Maps to |
 |---------|---------|
-| `stm dispatch focus left/right/up/down` | `FocusLeft/Right/Up/Down` |
-| `stm dispatch swap-column left/right` | `SwapColumn` |
-| `stm dispatch move-window left/right` | `MoveWindow` |
-| `stm dispatch expand-column` | `ExpandColumn` |
-| `stm dispatch shrink-column` | `ShrinkColumn` |
-| `stm dispatch close-window` | `CloseWindow` |
-| `stm dispatch switch-workspace <id>` | `SwitchWorkspace` |
-| `stm dispatch swap-workspace <id>` | `SwapWorkspace` (stub) |
-| `stm dispatch move-to-workspace <id>` | `MoveWindowToWorkspace` |
+| `flow dispatch focus left/right/up/down` | `FocusLeft/Right/Up/Down` |
+| `flow dispatch swap-column left/right` | `SwapColumn` |
+| `flow dispatch move-window left/right` | `MoveWindow` |
+| `flow dispatch expand-column` | `ExpandColumn` |
+| `flow dispatch shrink-column` | `ShrinkColumn` |
+| `flow dispatch close-window` | `CloseWindow` |
+| `flow dispatch switch-workspace <id>` | `SwitchWorkspace` |
+| `flow dispatch swap-workspace <id>` | `SwapWorkspace` (stub) |
+| `flow dispatch move-to-workspace <id>` | `MoveWindowToWorkspace` |
 
 The dispatch commands that change layout flow through the daemon's 3-stage
 pipeline (mutate, project, animate) as described in
@@ -192,33 +192,33 @@ and the asynchronous window destruction.
 
 ## Graceful-Shutdown Window Rescue
 
-`stm stop` sends the `Stop` command, the event loop exits, and then -- before the
-daemon process tears down -- [`ScrollTilingManager::rescue_stranded_windows`]
+`flow stop` sends the `Stop` command, the event loop exits, and then -- before the
+daemon process tears down -- [`FlowWM::rescue_stranded_windows`]
 runs once. Its job is to bring windows that became **physically inaccessible**
-during this STM session back onto the screen, without disturbing anything the
+during this flow session back onto the screen, without disturbing anything the
 user can currently see.
 
 ### Why rescue is needed
 
-STM parks non-active workspaces off-screen (one monitor height above or below
+flow parks non-active workspaces off-screen (one monitor height above or below
 the active one) and scrolls windows horizontally across the infinite tiling
 canvas. If the daemon simply exited, every window on a non-active workspace --
 plus any window scrolled into the off-screen packing region of the active
-workspace -- would be left stranded where STM put it: visible to Win32 (so a
-future STM run would re-classify them as already-tiled) but unreachable to the
+workspace -- would be left stranded where flow put it: visible to Win32 (so a
+future flow run would re-classify them as already-tiled) but unreachable to the
 user, who has no way to scroll to a workspace that no longer exists.
 
 ### The visibility rule
 
-The rescue pass treats the **operating system as ground truth**, not STM's own
+The rescue pass treats the **operating system as ground truth**, not flow's own
 bookkeeping. For each controlled window it calls `GetWindowRect` to find the
 window's current rect, then asks: does the window's **visible content** overlap
 the active monitor's `work_area`?
 
 - **Yes (visible)** -- the user can see this window right now. Leave it exactly
-  where it is. The user has almost certainly rearranged things by hand since STM
+  where it is. The user has almost certainly rearranged things by hand since flow
   started; rewinding their work would be hostile.
-- **No (stranded)** -- the window is off-screen purely because STM moved it.
+- **No (stranded)** -- the window is off-screen purely because flow moved it.
   Bring it back.
 
 The visible-content rect is the raw `GetWindowRect` rect with the window's
@@ -248,7 +248,7 @@ flowchart TD
 
 ### The rescue target: `pre_manage_rect`
 
-Each controlled window remembers the rect it had **when STM first noticed it**
+Each controlled window remembers the rect it had **when flow first noticed it**
 (stored as `pre_manage_rect` at registration time). The rescue moves stranded
 windows back to that anchor, then clamps the anchor into the `work_area` in case
 the anchor itself is off-screen (e.g. the window came from a now-detached
@@ -260,28 +260,28 @@ and only the position is nudged on-screen.
 
 ### Tiles and floats are unified
 
-There is no special-casing between tiling and floating: every window STM is
+There is no special-casing between tiling and floating: every window flow is
 actively positioning -- a `Tiling(Active)` or `Floating(Active)` window -- goes
 through the same loop. `Minimized`, `Hidden`, and `Ignored` windows never reach
-it. STM does not actively place minimized/hidden windows, so their position is
+it. flow does not actively place minimized/hidden windows, so their position is
 the OS's and the user's responsibility; leaving them alone on shutdown avoids
 surprising the user by moving windows they intentionally hid.
 
 ### The "pre-this-run" contract
 
-`pre_manage_rect` is the position the window held **before this STM run**, not
-before the very first STM run in history. Consequences:
+`pre_manage_rect` is the position the window held **before this flow run**, not
+before the very first flow run in history. Consequences:
 
-- If the previous STM session was killed **uncleanly** (crash, `taskkill /f`,
+- If the previous flow session was killed **uncleanly** (crash, `taskkill /f`,
   Ctrl-C), windows it had tiled remain at their tiled positions. The next run
   captures *those* as the new baseline. The desktop self-heals after **one
-  clean** `stm stop`.
+  clean** `flow stop`.
 - Minimized/hidden windows are out of scope entirely (see above); float windows
   lose any in-run drag history (acceptable for v1), restoring to their
   registration-time anchor.
 
 The unclean-shutdown case -- where the daemon process is gone and cannot run the
-rescue pass -- is exactly what the [`stm-watchdog`](#stm-watchdog-stub) is
+rescue pass -- is exactly what the [`flow-watchdog`](#flow-watchdog-stub) is
 planned for: it will restore from an on-disk snapshot without needing the daemon
 alive.
 
@@ -289,21 +289,21 @@ alive.
 
 | Step | Location |
 |------|----------|
-| Wired after the event loop exits | [`src/main.rs`](../../src/main.rs) -- `stm.run()` then `stm.rescue_stranded_windows()` |
+| Wired after the event loop exits | [`src/main.rs`](../../src/main.rs) -- `flow.run()` then `flow.rescue_stranded_windows()` |
 | The rescue loop | [`src/daemon/shutdown.rs`](../../src/daemon/shutdown.rs) |
 | Which windows are controlled | `WindowRegistry::restorable_windows` in [`src/registry/core.rs`](../../src/registry/core.rs) |
 | Clamp geometry | `Rect::clamped_into` in [`src/common/types.rs`](../../src/common/types.rs) |
 
-## `stm-watchdog` (Stub)
+## `flow-watchdog` (Stub)
 
-[`src/bin/stm-watchdog.rs`](../../src/bin/stm-watchdog.rs) is a planned crash-
+[`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs) is a planned crash-
 recovery helper. When the daemon exits unexpectedly, the watchdog is expected to
 restore windows from a recovery snapshot so they are not stranded off-screen.
 
 The binary currently prints `"not yet implemented"` and exits. When implemented,
-it will be spawned by `stmd` as a child process with `--parent-pid` and
+it will be spawned by `flowd` as a child process with `--parent-pid` and
 `--recovery-path` arguments. The watchdog will poll the parent PID and, on exit,
-read the recovery snapshot (`stm-recovery.json`) and call `SetWindowPos` on
+read the recovery snapshot (`flow-recovery.json`) and call `SetWindowPos` on
 each HWND to restore windows to their pre-manage geometry.
 
 ### Why a Separate Binary

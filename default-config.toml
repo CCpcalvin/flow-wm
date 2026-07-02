@@ -1,20 +1,20 @@
-#:schema ./schemas/stm-config.schema.json
+#:schema ./schemas/flow-config.schema.json
 
-# Example application configuration for ScrollingTilingManager.
+# Example application configuration for FlowWM.
 #
-# This file is a HAND-WRITTEN EXAMPLE. `stm config init` copies it verbatim
-# into your config directory (~/.config/stm/stm.toml) as a fully-commented
+# This file is a HAND-WRITTEN EXAMPLE. `flow config init` copies it verbatim
+# into your config directory (~/.config/flow/flow.toml) as a fully-commented
 # starting point.
 #
 # It is NOT read at runtime. The canonical default values live in code, in
 # src/config/defaults.rs, and are applied by serde when fields are absent from
-# your stm.toml. That means your stm.toml may be partial or even empty.
+# your flow.toml. That means your flow.toml may be partial or even empty.
 #
 # Keep this file in sync with src/config/defaults.rs: the test
 # `default_config_toml_matches_compiled_defaults` enforces that deserializing
-# this file yields exactly StmConfig::default().
+# this file yields exactly FlowConfig::default().
 #
-# For field documentation, see the StmConfig docstring in src/config/types.rs.
+# For field documentation, see the FlowConfig docstring in src/config/types.rs.
 
 # Number of columns that fit side-by-side on one monitor screen.
 # The actual pixel width of each column is computed at runtime from this value,

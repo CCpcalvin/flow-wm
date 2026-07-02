@@ -17,7 +17,7 @@
 //! There is **no** `Arc<Mutex<Registry>>`. The IPC thread owns the registry
 //! directly; the hook thread runs `SetWinEventHook` ×N and a `GetMessageW` loop,
 //! and the callback only calls `sender.send(HookEvent)` — it never touches any
-//! STM field. The IPC thread drains the channel via `receiver.try_recv()` and
+//! flow field. The IPC thread drains the channel via `receiver.try_recv()` and
 //! applies all state transitions under `&mut self`.
 //!
 //! # Hook registration
@@ -44,7 +44,7 @@
 //!
 //! The last two hooks recover windows that `EVENT_OBJECT_CREATE` misses. `CREATE`
 //! fires very early in the Win32 lifecycle — before a window is visible, titled,
-//! or has finalized its styles. stm's registration gate (visible + titled)
+//! or has finalized its styles. flow's registration gate (visible + titled)
 //! therefore drops some windows that *would* otherwise tile:
 //!
 //! - **Late title (NAMECHANGE recovery)**: apps like Windows Terminal set their
@@ -118,7 +118,7 @@ const EVENT_OBJECT_HIDE: u32 = 0x8003;
 /// `EVENT_OBJECT_STATECHANGE` — a window object's state bits changed.
 ///
 /// Fires when Win32 window-state bits flip — most importantly `WS_MAXIMIZE`
-/// being set or cleared. stm uses this to *recover* a window that was ignored
+/// being set or cleared. flow uses this to *recover* a window that was ignored
 /// at creation because it launched maximized (or fullscreen): once the user
 /// restores it, the state bits change and we re-classify it so it can join
 /// the tiling layout. See Option D in the module-level hook table.
@@ -142,9 +142,9 @@ const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
 /// `EVENT_OBJECT_CREATE` fires very early in the Win32 lifecycle — often before
 /// the window has a title. Apps like Windows Terminal set their title
 /// asynchronously (only after their hosted shell starts), routinely more than
-/// 500 ms after `CREATE`. Because stm's title-empty gate drops titleless
+/// 500 ms after `CREATE`. Because flow's title-empty gate drops titleless
 /// windows after a short retry window, such windows are never registered.
-/// `NAMECHANGE` fires the moment the title finally lands, giving stm a second
+/// `NAMECHANGE` fires the moment the title finally lands, giving flow a second
 /// chance to classify and register the window. See Option A in the module-level
 /// hook table.
 const EVENT_OBJECT_NAMECHANGE: u32 = 0x800C;
@@ -241,8 +241,8 @@ pub enum HookEvent {
     /// This is the recovery path for windows whose title arrives *late* — most
     /// notably Windows Terminal, which sets its title asynchronously after its
     /// hosted shell starts. Because `EVENT_OBJECT_CREATE` fires before the
-    /// title exists, stm's title-empty gate drops such windows after a short
-    /// retry window. `NAMECHANGE` gives stm a second chance: when the title
+    /// title exists, flow's title-empty gate drops such windows after a short
+    /// retry window. `NAMECHANGE` gives flow a second chance: when the title
     /// finally lands, the daemon re-attempts registration **only for windows
     /// not already tracked** (re-classifying a tracked window on every title
     /// change would cause layout churn).
@@ -309,11 +309,11 @@ static FLOAT_HWNS: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
 
 /// Whether `EVENT_OBJECT_LOCATIONCHANGE` for float windows is currently forwarded.
 ///
-/// Flipped to `false` by the daemon while stm is animating floating windows
+/// Flipped to `false` by the daemon while flow is animating floating windows
 /// (so its own `SetWindowPos` calls are not mis-captured as user drags) and
 /// flipped back to `true` once the animation-duration timer elapses, after a
 /// resync poll. Defaults to `true` so user drags are captured whenever no
-/// stm float animation is in flight.
+/// flow float animation is in flight.
 static FLOAT_TRACKING_ACTIVE: AtomicBool = AtomicBool::new(true);
 
 /// Recovers from a poisoned [`Mutex`] guard by taking the inner value.
@@ -384,7 +384,7 @@ pub fn is_float_hwnd(hwnd: isize) -> bool {
 
 /// Returns a snapshot of all active-workspace float HWNDs.
 ///
-/// Used by the resume poll to re-read every float's rect after a stm float
+/// Used by the resume poll to re-read every float's rect after a flow float
 /// animation completes.
 #[must_use]
 pub fn float_hwnds_snapshot() -> Vec<isize> {
@@ -433,7 +433,7 @@ impl Drop for HookThreadHandle {
 /// RAII wrapper around the manual-reset Win32 Event used to wake the main
 /// thread when a hook event arrives.
 ///
-/// Created in [`start_hook_thread`] and stored by `ScrollTilingManager`.
+/// Created in [`start_hook_thread`] and stored by `FlowWM`.
 /// The main thread waits on this handle via `WaitForMultipleObjects`, allowing
 /// hook events (window creation, destruction, focus changes) to be processed
 /// immediately — even when no IPC client is connected.
@@ -458,7 +458,7 @@ impl HookSignal {
     ///
     /// The caller must ensure the `HookSignal` outlives any use of the
     /// raw handle. In practice, `HookSignal` lives for the entire daemon
-    /// lifetime (stored on `ScrollTilingManager`).
+    /// lifetime (stored on `FlowWM`).
     pub fn raw(&self) -> HANDLE {
         self.0
     }
@@ -848,7 +848,7 @@ unsafe extern "system" fn hook_callback(
 
     // LOCATIONCHANGE is the ultra-noisy event: filter it hard. Only forward
     // when the window is a tracked active-workspace float AND tracking is
-    // currently enabled (disabled while stm animates floats). All other event
+    // currently enabled (disabled while flow animates floats). All other event
     // types are forwarded unconditionally as before.
     if event == EVENT_OBJECT_LOCATIONCHANGE
         && (!FLOAT_TRACKING_ACTIVE.load(Ordering::Acquire) || !is_float_hwnd(hwnd_val))

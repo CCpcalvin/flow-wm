@@ -1,6 +1,6 @@
 //! Geometry primitives, direction enum, and platform-independent window handle.
 //!
-//! These types are the vocabulary shared by every subsystem in stm. They contain
+//! These types are the vocabulary shared by every subsystem in flow. They contain
 //! no platform-specific logic — the actual Win32 conversion (`WindowId` → `HWND`)
 //! happens only in the (future) `registry` module.
 
@@ -17,7 +17,7 @@
 /// Touching rectangles are **not** overlapping (consistent with Win32 `IntersectRect`):
 ///
 /// ```
-/// # use scrolling_tiling_manager::common::Rect;
+/// # use flow_wm::common::Rect;
 /// let a = Rect { x: 0, y: 0, width: 100, height: 100 };
 /// let b = Rect { x: 100, y: 0, width: 100, height: 100 };
 /// assert!(!a.overlaps(b)); // touching at x=100 → no overlap
@@ -88,7 +88,7 @@ pub enum Direction {
 /// `WindowId` implements `Hash` + `Eq`, so it works as a `HashMap`/`HashSet` key:
 ///
 /// ```
-/// # use scrolling_tiling_manager::common::WindowId;
+/// # use flow_wm::common::WindowId;
 /// # use std::collections::HashSet;
 /// let mut set = HashSet::new();
 /// set.insert(WindowId(1));
@@ -139,7 +139,7 @@ impl Rect {
     ///
     /// # Negative values
     ///
-    /// A negative `amount` would *outset* the rect. Callers within stm always
+    /// A negative `amount` would *outset* the rect. Callers within flow always
     /// pass `u32 as i32` (capped at 50 by `BorderConfig::validate`), so this
     /// is unreachable in practice. The multiplication uses `saturating_mul`
     /// defensively so an accidental huge value cannot debug-panic.
@@ -255,7 +255,7 @@ impl InvisibleBounds {
     /// # Example
     ///
     /// ```
-    /// # use scrolling_tiling_manager::common::{InvisibleBounds, Rect};
+    /// # use flow_wm::common::{InvisibleBounds, Rect};
     /// let bounds = InvisibleBounds { left: 7, top: 0, right: 7, bottom: 7 };
     /// let visible = Rect { x: 100, y: 0, width: 800, height: 600 };
     /// let window = bounds.visible_to_window(visible);
@@ -283,7 +283,7 @@ impl InvisibleBounds {
     /// # Example
     ///
     /// ```
-    /// # use scrolling_tiling_manager::common::{InvisibleBounds, Rect};
+    /// # use flow_wm::common::{InvisibleBounds, Rect};
     /// let bounds = InvisibleBounds { left: 7, top: 0, right: 7, bottom: 7 };
     /// let window = Rect { x: 93, y: 0, width: 814, height: 607 };
     /// let visible = bounds.window_to_visible(window);

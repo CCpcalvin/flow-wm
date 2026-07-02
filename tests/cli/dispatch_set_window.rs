@@ -1,13 +1,13 @@
-//! Integration tests for `stm dispatch set-window {float,tile,cycle}`.
+//! Integration tests for `flow dispatch set-window {float,tile,cycle}`.
 //!
 //! These exercise the full `dispatch_set_window` → `set_window_to_float` →
 //! `set_window_to_tile` pipeline end-to-end on an isolated desktop: a real
-//! `stmd` daemon, real Win32 windows, real IPC. The decision logic itself
+//! `flowd` daemon, real Win32 windows, real IPC. The decision logic itself
 //! (mode × state → action) is unit-tested in `src/daemon/dispatch.rs`; these
 //! tests prove the *wiring* — that floating a window removes it from the
 //! tiling layout, and tiling it re-inserts it.
 //!
-//! Each test creates an isolated [`TestDesktop`], spawns `stmd` on it, creates
+//! Each test creates an isolated [`TestDesktop`], spawns `flowd` on it, creates
 //! dummy windows, and queries the virtual layout before/after each command.
 //! See `dispatch_swap.rs` for the harness pattern this file mirrors.
 
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use predicates::prelude::*;
 
-use super::common::{stm, unique_pipe_name};
+use super::common::{flow, unique_pipe_name};
 use super::test_desktop::{
     DaemonGuard, TestDesktop, TestWindow, query_layout_virtual, send_ipc_ignore, start_test_daemon,
     unique_title, wait_until_windows_tiled,
@@ -57,8 +57,8 @@ fn column_count(json: &serde_json::Value) -> usize {
 
 // ── tile → float → tile round-trip ───────────────────────────────────
 
-/// `stm dispatch set-window float` removes the focused window from the tiling
-/// layout, and `stm dispatch set-window tile` re-inserts it.
+/// `flow dispatch set-window float` removes the focused window from the tiling
+/// layout, and `flow dispatch set-window tile` re-inserts it.
 ///
 /// Setup: two windows → two columns. Focus is moved to the leftmost window
 /// (deterministic target). Floating it must collapse the layout to one
@@ -82,7 +82,7 @@ fn set_window_float_then_tile_roundtrips_layout() {
     wait_until_windows_tiled(&pipe, 2).expect("2 windows tiled at baseline");
 
     // Drive focus to the leftmost window so the float target is deterministic.
-    use scrolling_tiling_manager::ipc::message::SocketMessage;
+    use flow_wm::ipc::message::SocketMessage;
     send_ipc_ignore(&pipe, &SocketMessage::FocusLeft);
     std::thread::sleep(DISPATCH_SETTLE);
 
@@ -100,7 +100,7 @@ fn set_window_float_then_tile_roundtrips_layout() {
     );
 
     // Act 1: float the focused window.
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "set-window", "float"])
         .assert()
         .stdout(predicate::str::contains("window set to float"))
@@ -121,7 +121,7 @@ fn set_window_float_then_tile_roundtrips_layout() {
     );
 
     // Act 2: tile it again (OS focus stays on the floated window per spec).
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "set-window", "tile"])
         .assert()
         .stdout(predicate::str::contains("window set to tile"))
@@ -144,7 +144,7 @@ fn set_window_float_then_tile_roundtrips_layout() {
 
 // ── cycle toggle ─────────────────────────────────────────────────────
 
-/// `stm dispatch set-window cycle` toggles tiled → floating on the first call
+/// `flow dispatch set-window cycle` toggles tiled → floating on the first call
 /// (mirroring `set-window float` on a tiled window).
 ///
 /// This covers the `WindowMode::Cycle` branch end-to-end; the `Cycle` decision
@@ -164,7 +164,7 @@ fn set_window_cycle_toggles_tiled_to_floating() {
     let _wb = TestWindow::create(&title_b).expect("create window B");
     std::thread::sleep(HOOK_SETTLE);
 
-    use scrolling_tiling_manager::ipc::message::SocketMessage;
+    use flow_wm::ipc::message::SocketMessage;
     send_ipc_ignore(&pipe, &SocketMessage::FocusLeft);
     std::thread::sleep(DISPATCH_SETTLE);
 
@@ -172,7 +172,7 @@ fn set_window_cycle_toggles_tiled_to_floating() {
     assert_eq!(column_count(&before), 2);
 
     // Act: cycle a tiled window → must float (leave the tiling layout).
-    stm(&pipe)
+    flow(&pipe)
         .args(["dispatch", "set-window", "cycle"])
         .assert()
         .stdout(predicate::str::contains("window set to cycle"))

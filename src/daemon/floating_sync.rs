@@ -8,7 +8,7 @@
 //! mirror.
 //!
 //! See (`docs/src/dev-guide/floating-space.md`) for why both copies are kept in
-//! sync and how the timer suppression avoids capturing stm's own animation
+//! sync and how the timer suppression avoids capturing flow's own animation
 //! moves as user drags.
 
 use std::time::{Duration, Instant};
@@ -23,9 +23,9 @@ use crate::registry::types::{FloatingState, WindowState};
 use crate::registry::win32 as registry_win32;
 
 use super::borders::float_border_rect;
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Apply a location-change notification for a floating window.
     ///
     /// Re-reads the window's rect via `GetWindowRect`, converts it from
@@ -36,7 +36,7 @@ impl ScrollTilingManager {
     /// The hook callback already filters by `FLOAT_HWNS` membership and
     /// `FLOAT_TRACKING_ACTIVE`; this handler re-checks both on the main thread
     /// to close the race between the callback forwarding an event and the
-    /// daemon flipping tracking off (stm float animation) or removing the
+    /// daemon flipping tracking off (flow float animation) or removing the
     /// window from the float set (tile/destroy/switch).
     pub(super) fn on_float_location_changed(&mut self, hwnd: isize) {
         // Race-closing re-check #1: tracking may have been turned off after
@@ -135,7 +135,7 @@ impl ScrollTilingManager {
         );
     }
 
-    /// Suppress float-location tracking for the duration of one stm-initiated
+    /// Suppress float-location tracking for the duration of one flow-initiated
     /// float animation.
     ///
     /// Turns `FLOAT_TRACKING_ACTIVE` off and arms `float_resume_deadline` to

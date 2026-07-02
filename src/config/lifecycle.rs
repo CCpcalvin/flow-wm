@@ -3,19 +3,19 @@
 //! This module owns the four-phase config lifecycle:
 //!
 //! 1. **Init** — [`init_config_dir`] creates the config directory and writes
-//!    default config files (`stm.toml`, `stm-rules.toml`) plus JSON Schema files
-//!    for IDE autocomplete. The `stm.toml` written is a fully-commented example
+//!    default config files (`flow.toml`, `flow-rules.toml`) plus JSON Schema files
+//!    for IDE autocomplete. The `flow.toml` written is a fully-commented example
 //!    ([`DEFAULT_CONFIG_EXAMPLE`]).
 //!
-//! 2. **Load** — [`load_app_config`] reads the user's `stm.toml`. Because every
+//! 2. **Load** — [`load_app_config`] reads the user's `flow.toml`. Because every
 //!    field has a serde default (see each struct`s `Default` impl), the
 //!    file may be partial or empty. [`load_rules_config`] does the same for
 //!    window rules; [`load_default_rules`] loads the bundled default rules.
 //!
 //! 3. **Validate** — [`check_config`] validates config files without loading
-//!    them into the daemon. Used by `stm config check`.
+//!    them into the daemon. Used by `flow config check`.
 //!
-//! 4. **Use** — The daemon extracts fields from [`StmConfig`](super::types::StmConfig)
+//! 4. **Use** — The daemon extracts fields from [`FlowConfig`](super::types::FlowConfig)
 //!    into the layout engine.
 //!
 //! # CODE is the single source of truth
@@ -24,7 +24,7 @@
 //! serde `#[serde(default)]` container attributes. There is **no shipped-defaults
 //! TOML merged at runtime** — a previous design did that, but it silently fell
 //! back to stale compiled-in `Default` values when the shipped file was absent
-//! during development (the build never copied it next to `stmd.exe`). Making
+//! during development (the build never copied it next to `flowd.exe`). Making
 //! code the source of truth removes that failure mode.
 //!
 //! [`DEFAULT_CONFIG_EXAMPLE`] is a hand-written starter file, not a runtime
@@ -32,7 +32,7 @@
 //! sync with the compiled defaults by a test.
 //!
 //! Default *rules* — the classification list — are a different case: they come
-//! from [`DEFAULT_RULES_TOML`], which embeds `default-stm-rules.toml` into the
+//! from [`DEFAULT_RULES_TOML`], which embeds `default-flow-rules.toml` into the
 //! binary via `include_str!`. [`WindowRulesConfig::default`] (empty rules)
 //! remains only as the parse-failure fallback.
 //!
@@ -41,7 +41,7 @@
 //! Load functions distinguish three failure modes (see [`ConfigLoadError`]):
 //! a missing file is benign (fresh install) and yields `T::default()`; a parse
 //! or I/O error is propagated as `Err` so callers decide policy. The daemon
-//! (`stmd`) treats an `stm.toml` parse error as fatal, while the `stm` client
+//! (`flowd`) treats an `flow.toml` parse error as fatal, while the `flow` client
 //! runs a pre-flight check to surface the error on the user's terminal before
 //! spawning the daemon. Rules-file failures are non-fatal everywhere (warn +
 //! default rules).
@@ -59,48 +59,48 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 
 use super::schema;
-use super::types::{StmConfig, WindowRulesConfig};
-use crate::common::{StmError, StmResult};
+use super::types::{FlowConfig, WindowRulesConfig};
+use crate::common::{FlowError, FlowResult};
 
-/// The hand-written, fully-commented example `stm.toml` copied into a user's
+/// The hand-written, fully-commented example `flow.toml` copied into a user's
 /// config directory by [`init_config_dir`].
 ///
 /// Embedded at compile time via [`include_str!`]. This is **not** read at
 /// runtime for defaults — defaults live in each struct`s `Default` impl
 /// and are applied by serde. This file is purely the starter template written by
-/// `stm config init`. A test in [`types`](super::types) guarantees it stays in
-/// sync with the compiled [`StmConfig::default`](super::types::StmConfig::default).
+/// `flow config init`. A test in [`types`](super::types) guarantees it stays in
+/// sync with the compiled [`FlowConfig::default`](super::types::FlowConfig::default).
 pub const DEFAULT_CONFIG_EXAMPLE: &str = include_str!("../../default-config.toml");
 
 /// The bundled default window classification rules, embedded at compile time.
 ///
-/// This is the content of `default-stm-rules.toml` from the project root,
+/// This is the content of `default-flow-rules.toml` from the project root,
 /// baked into the binary via [`include_str!`]. It is parsed in-memory by
 /// [`load_default_rules`] — there is **no runtime file lookup**, so the
 /// defaults are always present and cannot be accidentally deleted or corrupted
 /// by an end user. Users override these defaults via their own
-/// `stm-rules.toml`, which the classification pipeline checks first.
+/// `flow-rules.toml`, which the classification pipeline checks first.
 ///
-/// A test (`default_stm_rules_toml_parses_correctly`) guarantees the embedded
+/// A test (`default_flow_rules_toml_parses_correctly`) guarantees the embedded
 /// content parses cleanly as [`WindowRulesConfig`].
-pub const DEFAULT_RULES_TOML: &str = include_str!("../../default-stm-rules.toml");
+pub const DEFAULT_RULES_TOML: &str = include_str!("../../default-flow-rules.toml");
 
-/// Schema header for `stm-rules.toml` files (taplo LSP autocomplete).
+/// Schema header for `flow-rules.toml` files (taplo LSP autocomplete).
 ///
 /// Prepended to the TOML content when [`init_config_dir`] writes the default
-/// `stm-rules.toml`. The relative path `./schemas/stm-rules.schema.json` is resolved
+/// `flow-rules.toml`. The relative path `./schemas/flow-rules.schema.json` is resolved
 /// against the config directory, so the schema file must be in `dir/schemas/`.
 ///
-/// (The `stm.toml` example does not need a prepended header — it already carries
+/// (The `flow.toml` example does not need a prepended header — it already carries
 /// its own `#:schema` line as part of [`DEFAULT_CONFIG_EXAMPLE`].)
-const STM_RULES_SCHEMA_HEADER: &str = "#:schema ./schemas/stm-rules.schema.json\n\n";
+const FLOW_RULES_SCHEMA_HEADER: &str = "#:schema ./schemas/flow-rules.schema.json\n\n";
 
 // ── Load functions ────────────────────────────────────────────────────
 
 /// Internal cause of a config load failure, distinguishing the benign
 /// missing-file case from genuine errors.
 ///
-/// The public boundary collapses `Io` + `Parse` into [`StmError::Config`];
+/// The public boundary collapses `Io` + `Parse` into [`FlowError::Config`];
 /// `Missing` is handled inside each loader as `Ok(T::default())` and never
 /// reaches public callers.
 enum ConfigLoadError {
@@ -141,12 +141,12 @@ fn load_toml<T: DeserializeOwned>(path: &Path) -> Result<T, ConfigLoadError> {
 
 /// Load application config from a TOML file.
 ///
-/// Reads [`StmConfig`] from the given TOML file.
+/// Reads [`FlowConfig`] from the given TOML file.
 ///
-/// - **File not found** → returns `Ok(StmConfig::default())` (benign: fresh install).
-/// - **Parse error or I/O error** → returns `Err(StmError::Config)` carrying the
+/// - **File not found** → returns `Ok(FlowConfig::default())` (benign: fresh install).
+/// - **Parse error or I/O error** → returns `Err(FlowError::Config)` carrying the
 ///   path and underlying cause, so callers can surface the failure to the user.
-/// - **Success** → calls [`StmConfig::validate()`] and logs warnings if validation
+/// - **Success** → calls [`FlowConfig::validate()`] and logs warnings if validation
 ///   fails, but still returns the loaded config. Logs at `info` level on success.
 ///
 /// This function never panics and imposes no error policy -- callers decide how
@@ -154,25 +154,25 @@ fn load_toml<T: DeserializeOwned>(path: &Path) -> Result<T, ConfigLoadError> {
 ///
 /// # Arguments
 ///
-/// * `path` - Path to the `stm.toml` file.
+/// * `path` - Path to the `flow.toml` file.
 ///
 /// # Errors
 ///
-/// [`StmError::Config`] if the file exists but cannot be read or parsed, with a
+/// [`FlowError::Config`] if the file exists but cannot be read or parsed, with a
 /// message of the form `failed to load config <path>: <reason>`. A missing file
 /// is not an error — it yields the default config.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::config::load_app_config;
+/// use flow_wm::config::load_app_config;
 /// use std::path::Path;
 ///
-/// let config = load_app_config(Path::new("stm.toml")).unwrap_or_default();
+/// let config = load_app_config(Path::new("flow.toml")).unwrap_or_default();
 /// println!("columns_per_screen = {}", config.columns_per_screen);
 /// ```
-pub fn load_app_config(path: &Path) -> StmResult<StmConfig> {
-    match load_toml::<StmConfig>(path) {
+pub fn load_app_config(path: &Path) -> FlowResult<FlowConfig> {
+    match load_toml::<FlowConfig>(path) {
         Ok(config) => {
             // Validate post-deserialization — log warnings but don't fail.
             if let Err(warning) = config.validate() {
@@ -183,9 +183,9 @@ pub fn load_app_config(path: &Path) -> StmResult<StmConfig> {
         }
         Err(ConfigLoadError::Missing) => {
             log::debug!("app config not found at {:?}; using defaults", path);
-            Ok(StmConfig::default())
+            Ok(FlowConfig::default())
         }
-        Err(e) => Err(StmError::Config(format!(
+        Err(e) => Err(FlowError::Config(format!(
             "failed to load config {}: {e}",
             path.display()
         ))),
@@ -197,7 +197,7 @@ pub fn load_app_config(path: &Path) -> StmResult<StmConfig> {
 /// Reads [`WindowRulesConfig`] from the given TOML file.
 ///
 /// - **File not found** → returns `Ok(WindowRulesConfig::default())` (benign).
-/// - **Parse error or I/O error** → returns `Err(StmError::Config)` carrying the
+/// - **Parse error or I/O error** → returns `Err(FlowError::Config)` carrying the
 ///   path and underlying cause.
 /// - **Success** → returns the parsed config. Logs at `info` level on success.
 ///
@@ -206,14 +206,14 @@ pub fn load_app_config(path: &Path) -> StmResult<StmConfig> {
 ///
 /// # Arguments
 ///
-/// * `path` - Path to the `stm-rules.toml` file.
+/// * `path` - Path to the `flow-rules.toml` file.
 ///
 /// # Errors
 ///
-/// [`StmError::Config`] if the file exists but cannot be read or parsed, with a
+/// [`FlowError::Config`] if the file exists but cannot be read or parsed, with a
 /// message of the form `failed to load config <path>: <reason>`. A missing file
 /// is not an error — it yields the default config.
-pub fn load_rules_config(path: &Path) -> StmResult<WindowRulesConfig> {
+pub fn load_rules_config(path: &Path) -> FlowResult<WindowRulesConfig> {
     match load_toml::<WindowRulesConfig>(path) {
         Ok(config) => {
             log::info!("loaded window rules from {:?}", path);
@@ -223,7 +223,7 @@ pub fn load_rules_config(path: &Path) -> StmResult<WindowRulesConfig> {
             log::debug!("rules config not found at {:?}; using defaults", path);
             Ok(WindowRulesConfig::default())
         }
-        Err(e) => Err(StmError::Config(format!(
+        Err(e) => Err(FlowError::Config(format!(
             "failed to load config {}: {e}",
             path.display()
         ))),
@@ -233,22 +233,22 @@ pub fn load_rules_config(path: &Path) -> StmResult<WindowRulesConfig> {
 /// Load the bundled default window rules.
 ///
 /// The rules are embedded into the binary at compile time via
-/// [`DEFAULT_RULES_TOML`] (sourced from `default-stm-rules.toml` in the project
+/// [`DEFAULT_RULES_TOML`] (sourced from `default-flow-rules.toml` in the project
 /// root) and parsed in-memory. There is **no runtime file lookup** — the
 /// defaults are always present and cannot be accidentally deleted or corrupted
-/// by the user. (Users override defaults via their own `stm-rules.toml`, which
+/// by the user. (Users override defaults via their own `flow-rules.toml`, which
 /// the classification pipeline checks at an earlier layer.)
 ///
 /// Because the content is fixed at compile time, a parse failure here indicates
-/// a bug in the shipped `default-stm-rules.toml` — caught in CI by the
-/// [`default_stm_rules_toml_parses_correctly`] test. As a last line of defense,
+/// a bug in the shipped `default-flow-rules.toml` — caught in CI by the
+/// [`default_flow_rules_toml_parses_correctly`] test. As a last line of defense,
 /// an empty [`WindowRulesConfig`] is returned and the error is logged.
 ///
 /// # Design rationale
 ///
-/// A previous design read `default-stm-rules.toml` from the executable's
+/// A previous design read `default-flow-rules.toml` from the executable's
 /// directory at runtime. This silently fell back to empty rules during
-/// development (the build never copied the file next to `stmd.exe`) and would
+/// development (the build never copied the file next to `flowd.exe`) and would
 /// have shipped a separate plaintext file that users could accidentally break.
 /// Embedding eliminates both failure modes.
 ///
@@ -281,14 +281,14 @@ pub fn load_default_rules() -> WindowRulesConfig {
 /// multiple times is safe). Then writes each default file only if it doesn't
 /// already exist:
 ///
-/// - `stm.toml` — the fully-commented example template ([`DEFAULT_CONFIG_EXAMPLE`]),
+/// - `flow.toml` — the fully-commented example template ([`DEFAULT_CONFIG_EXAMPLE`]),
 ///   which already carries its own `#:schema` header. Defaults at runtime come
 ///   from serde (see each struct`s `Default` impl), so this file is a
 ///   human-readable starting point that users can trim or empty freely.
-/// - `stm-rules.toml` — default [`WindowRulesConfig`] as TOML, with a
+/// - `flow-rules.toml` — default [`WindowRulesConfig`] as TOML, with a
 ///   `#:schema` header prepended.
-/// - `schemas/stm-config.schema.json` — JSON Schema for [`StmConfig`].
-/// - `schemas/stm-rules.schema.json` — JSON Schema for [`WindowRulesConfig`].
+/// - `schemas/flow-config.schema.json` — JSON Schema for [`FlowConfig`].
+/// - `schemas/flow-rules.schema.json` — JSON Schema for [`WindowRulesConfig`].
 ///
 /// **Existing files are never overwritten.** This makes it safe to call
 /// repeatedly (e.g., on every daemon startup) without losing user edits.
@@ -304,17 +304,17 @@ pub fn load_default_rules() -> WindowRulesConfig {
 ///
 /// # Errors
 ///
-/// Returns `Err` if directory creation fails, or if writing `stm.toml` or
-/// `stm-rules.toml` fails. JSON Schema write failures are non-fatal (logged
+/// Returns `Err` if directory creation fails, or if writing `flow.toml` or
+/// `flow-rules.toml` fails. JSON Schema write failures are non-fatal (logged
 /// as warnings) and do not cause this function to return `Err`.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::config::init_config_dir;
+/// use flow_wm::config::init_config_dir;
 /// use std::path::Path;
 ///
-/// if let Err(e) = init_config_dir(Path::new("~/.config/stm")) {
+/// if let Err(e) = init_config_dir(Path::new("~/.config/flow")) {
 ///     eprintln!("failed to init config dir: {e}");
 /// }
 /// ```
@@ -332,37 +332,37 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
 
     // Serialize default configs for the user's config directory.
     //
-    // stm.toml: write the fully-commented example template
+    // flow.toml: write the fully-commented example template
     // ([`DEFAULT_CONFIG_EXAMPLE`]). It already carries its own `#:schema`
     // header. Defaults at runtime come from serde (see each struct`s `Default` impl),
     // so this file is purely a human-readable starting point — users can trim it
     // to just the fields they want to override, or even empty it entirely.
-    let stm_toml_content = DEFAULT_CONFIG_EXAMPLE;
+    let flow_toml_content = DEFAULT_CONFIG_EXAMPLE;
 
-    // stm-rules.toml: write the Rust defaults. Rules don't have a partial-override
+    // flow-rules.toml: write the Rust defaults. Rules don't have a partial-override
     // model, so a complete starter file is appropriate.
     let default_rules_toml = toml::to_string(&WindowRulesConfig::default())
         .map_err(|e| format!("failed to serialize default WindowRulesConfig: {e}"))?;
 
-    // Write example stm.toml, if it doesn't exist.
-    let stm_toml = dir.join("stm.toml");
-    match write_default_config_file(&stm_toml, stm_toml_content) {
+    // Write example flow.toml, if it doesn't exist.
+    let flow_toml = dir.join("flow.toml");
+    match write_default_config_file(&flow_toml, flow_toml_content) {
         Ok(written) => {
             if written {
-                log::info!("wrote example config to {:?}", stm_toml);
+                log::info!("wrote example config to {:?}", flow_toml);
             }
         }
         Err(e) => {
             return Err(format!(
                 "failed to write default config {:?}: {e}",
-                stm_toml
+                flow_toml
             ));
         }
     }
 
-    // Write default stm-rules.toml with schema header, if it doesn't exist.
-    let rules_toml = dir.join("stm-rules.toml");
-    let rules_content = format!("{STM_RULES_SCHEMA_HEADER}{default_rules_toml}");
+    // Write default flow-rules.toml with schema header, if it doesn't exist.
+    let rules_toml = dir.join("flow-rules.toml");
+    let rules_content = format!("{FLOW_RULES_SCHEMA_HEADER}{default_rules_toml}");
     match write_default_config_file(&rules_toml, &rules_content) {
         Ok(written) => {
             if written {
@@ -378,7 +378,7 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
     }
 
     // Generate and write JSON Schemas into the schemas/ subdirectory.
-    let config_schema_path = schemas_dir.join("stm-config.schema.json");
+    let config_schema_path = schemas_dir.join("flow-config.schema.json");
     match schema::generate_config_schema() {
         Ok(schema_json) => match write_default_config_file(&config_schema_path, &schema_json) {
             Ok(true) => log::info!("wrote config schema to {:?}", config_schema_path),
@@ -396,7 +396,7 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
         }
     }
 
-    let rules_schema_path = schemas_dir.join("stm-rules.schema.json");
+    let rules_schema_path = schemas_dir.join("flow-rules.schema.json");
     match schema::generate_rules_schema() {
         Ok(schema_json) => match write_default_config_file(&rules_schema_path, &schema_json) {
             Ok(true) => log::info!("wrote rules schema to {:?}", rules_schema_path),
@@ -420,19 +420,19 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
 
 /// Validate config files in a directory without loading them into the daemon.
 ///
-/// Checks both `stm.toml` and `stm-rules.toml` in the given directory:
+/// Checks both `flow.toml` and `flow-rules.toml` in the given directory:
 ///
-/// - Loads `stm.toml` and deserializes it as [`StmConfig`], then runs semantic
+/// - Loads `flow.toml` and deserializes it as [`FlowConfig`], then runs semantic
 ///   validation. Because every field carries a serde default (see
 ///   each struct`s `Default` impl), partial user files are valid —
 ///   missing keys are filled in automatically, exactly as the daemon does.
-/// - Loads `stm-rules.toml` and checks it parses correctly as [`WindowRulesConfig`].
+/// - Loads `flow-rules.toml` and checks it parses correctly as [`WindowRulesConfig`].
 ///
 /// Missing files are **not errors** — they simply mean the user hasn't created
 /// a config yet and defaults will be used. This function only reports actual
 /// parse/validation failures.
 ///
-/// **Logs nothing** — designed for pure CLI validation (`stm config check`) where
+/// **Logs nothing** — designed for pure CLI validation (`flow config check`) where
 /// the caller controls output formatting.
 ///
 /// # Arguments
@@ -447,38 +447,38 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::config::check_config;
+/// use flow_wm::config::check_config;
 /// use std::path::Path;
 ///
-/// if let Err(e) = check_config(Path::new("~/.config/stm")) {
+/// if let Err(e) = check_config(Path::new("~/.config/flow")) {
 ///     eprintln!("config error: {e}");
 /// }
 /// ```
 #[must_use = "validation errors must be handled"]
 pub fn check_config(dir: &Path) -> Result<(), String> {
-    let stm_path = dir.join("stm.toml");
+    let flow_path = dir.join("flow.toml");
 
-    // Only validate stm.toml if it exists — missing is not an error.
+    // Only validate flow.toml if it exists — missing is not an error.
     // Serde defaults fill in any absent fields (see the struct's `Default` impl), so a
     // partial user file validates successfully, matching daemon behavior.
-    if stm_path.exists() {
-        let contents = std::fs::read_to_string(&stm_path)
-            .map_err(|e| format!("failed to read {stm_path:?}: {e}"))?;
-        let config: StmConfig =
-            toml::from_str(&contents).map_err(|e| format!("stm.toml parse error: {e}"))?;
+    if flow_path.exists() {
+        let contents = std::fs::read_to_string(&flow_path)
+            .map_err(|e| format!("failed to read {flow_path:?}: {e}"))?;
+        let config: FlowConfig =
+            toml::from_str(&contents).map_err(|e| format!("flow.toml parse error: {e}"))?;
         config
             .validate()
-            .map_err(|e| format!("stm.toml validation error: {e}"))?;
+            .map_err(|e| format!("flow.toml validation error: {e}"))?;
     }
 
-    let rules_path = dir.join("stm-rules.toml");
+    let rules_path = dir.join("flow-rules.toml");
 
-    // Only validate stm-rules.toml if it exists — missing is not an error.
+    // Only validate flow-rules.toml if it exists — missing is not an error.
     if rules_path.exists() {
         let contents = std::fs::read_to_string(&rules_path)
             .map_err(|e| format!("failed to read {:?}: {e}", rules_path))?;
         let _: WindowRulesConfig =
-            toml::from_str(&contents).map_err(|e| format!("stm-rules.toml parse error: {e}"))?;
+            toml::from_str(&contents).map_err(|e| format!("flow-rules.toml parse error: {e}"))?;
     }
 
     Ok(())
@@ -532,7 +532,7 @@ mod tests {
 
     // ── load_app_config tests ──────────────────────────────────────────
 
-    /// Positive: valid TOML file parses into the expected `StmConfig`.
+    /// Positive: valid TOML file parses into the expected `FlowConfig`.
     #[test]
     fn load_app_config_valid_file_parses_correctly() {
         let toml_content = r#"
@@ -569,9 +569,9 @@ strategy = "original_slot"
     /// Negative: missing file returns default config (not panic, not error).
     #[test]
     fn load_app_config_missing_file_returns_default() {
-        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm.toml");
+        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\flow.toml");
         let config = load_app_config(&path).unwrap();
-        assert_eq!(config, StmConfig::default());
+        assert_eq!(config, FlowConfig::default());
         assert_eq!(config.min_column_width_px, 640);
         assert_eq!(config.padding.window_gap, 16);
         assert_eq!(config.padding.up, 0);
@@ -587,7 +587,7 @@ strategy = "original_slot"
         let result = load_app_config(f.path());
         assert!(
             result.is_err(),
-            "malformed stm.toml should propagate an error"
+            "malformed flow.toml should propagate an error"
         );
         let err = result.unwrap_err().to_string();
         assert!(
@@ -603,7 +603,7 @@ strategy = "original_slot"
         f.write_all(b"").unwrap();
 
         let config = load_app_config(f.path()).unwrap();
-        assert_eq!(config, StmConfig::default());
+        assert_eq!(config, FlowConfig::default());
         assert_eq!(config.padding.window_gap, 16);
     }
 
@@ -721,51 +721,51 @@ strategy = "original_slot"
         );
 
         // Default files should exist.
-        assert!(dir.join("stm.toml").exists(), "stm.toml should be created");
+        assert!(dir.join("flow.toml").exists(), "flow.toml should be created");
         assert!(
-            dir.join("stm-rules.toml").exists(),
-            "stm-rules.toml should be created"
+            dir.join("flow-rules.toml").exists(),
+            "flow-rules.toml should be created"
         );
 
         // Schema files should be in schemas/ subdirectory.
         assert!(
-            dir.join("schemas/stm-config.schema.json").exists(),
-            "schemas/stm-config.schema.json should be created"
+            dir.join("schemas/flow-config.schema.json").exists(),
+            "schemas/flow-config.schema.json should be created"
         );
         assert!(
-            dir.join("schemas/stm-rules.schema.json").exists(),
-            "schemas/stm-rules.schema.json should be created"
+            dir.join("schemas/flow-rules.schema.json").exists(),
+            "schemas/flow-rules.schema.json should be created"
         );
 
-        // stm.toml should start with the schema header.
-        let contents = std::fs::read_to_string(dir.join("stm.toml")).unwrap();
+        // flow.toml should start with the schema header.
+        let contents = std::fs::read_to_string(dir.join("flow.toml")).unwrap();
         assert!(
             contents.contains("#:schema"),
-            "stm.toml should contain taplo schema header"
+            "flow.toml should contain taplo schema header"
         );
 
-        // stm.toml is the full, commented example template. It should parse as
-        // a valid StmConfig that equals the compiled defaults (serde fills gaps,
+        // flow.toml is the full, commented example template. It should parse as
+        // a valid FlowConfig that equals the compiled defaults (serde fills gaps,
         // but the example carries every field explicitly anyway).
-        let parsed: StmConfig = toml::from_str(&contents).expect("stm.toml should parse");
+        let parsed: FlowConfig = toml::from_str(&contents).expect("flow.toml should parse");
         assert_eq!(
             parsed,
-            StmConfig::default(),
+            FlowConfig::default(),
             "init should write an example that matches compiled defaults"
         );
         assert!(
             contents.contains("min_column_width_px = 640"),
-            "stm.toml should be the full example, not an empty stub"
+            "flow.toml should be the full example, not an empty stub"
         );
 
-        // stm-rules.toml should start with the schema header.
-        let contents = std::fs::read_to_string(dir.join("stm-rules.toml")).unwrap();
+        // flow-rules.toml should start with the schema header.
+        let contents = std::fs::read_to_string(dir.join("flow-rules.toml")).unwrap();
         assert!(
             contents.contains("#:schema"),
-            "stm-rules.toml should contain taplo schema header"
+            "flow-rules.toml should contain taplo schema header"
         );
 
-        // stm-rules.toml should contain valid WindowRulesConfig TOML.
+        // flow-rules.toml should contain valid WindowRulesConfig TOML.
         let rules: WindowRulesConfig = toml::from_str(&contents).unwrap();
         assert_eq!(rules.default_action, WindowAction::Float);
     }
@@ -776,15 +776,15 @@ strategy = "original_slot"
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Create stm.toml with custom content BEFORE init.
+        // Create flow.toml with custom content BEFORE init.
         let custom_content = "column_width = 9999\n";
-        std::fs::write(dir.join("stm.toml"), custom_content).unwrap();
+        std::fs::write(dir.join("flow.toml"), custom_content).unwrap();
 
         let result = init_config_dir(dir);
         assert!(result.is_ok(), "init_config_dir failed: {result:?}");
 
         // File should still have the custom content.
-        let contents = std::fs::read_to_string(dir.join("stm.toml")).unwrap();
+        let contents = std::fs::read_to_string(dir.join("flow.toml")).unwrap();
         assert_eq!(contents, custom_content);
         assert!(contents.contains("column_width = 9999"));
     }
@@ -804,15 +804,15 @@ strategy = "original_slot"
         assert!(result.is_ok(), "check_config failed: {result:?}");
     }
 
-    /// Negative: invalid stm.toml returns validation error.
+    /// Negative: invalid flow.toml returns validation error.
     #[test]
     fn check_config_invalid_app_config_returns_err() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Minimal partial stm.toml: serde fills the rest, but negative padding
+        // Minimal partial flow.toml: serde fills the rest, but negative padding
         // still fails semantic validation.
-        std::fs::write(dir.join("stm.toml"), "[padding]\nwindow_gap = -1\n").unwrap();
+        std::fs::write(dir.join("flow.toml"), "[padding]\nwindow_gap = -1\n").unwrap();
 
         let result = check_config(dir);
         assert!(
@@ -834,12 +834,12 @@ strategy = "original_slot"
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Directory is empty — no stm.toml or stm-rules.toml.
+        // Directory is empty — no flow.toml or flow-rules.toml.
         let result = check_config(dir);
         assert!(result.is_ok(), "empty directory should pass check_config");
     }
 
-    /// Positive: partial stm.toml passes validation (merge fills missing fields).
+    /// Positive: partial flow.toml passes validation (merge fills missing fields).
     ///
     /// This is the key behavior fix: partial user files should pass `check_config`
     /// because serde fills gaps from the struct's `Default` impl.
@@ -848,17 +848,17 @@ strategy = "original_slot"
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        // Write a partial stm.toml with only one field.
-        std::fs::write(dir.join("stm.toml"), "column_width = 800\n").unwrap();
+        // Write a partial flow.toml with only one field.
+        std::fs::write(dir.join("flow.toml"), "column_width = 800\n").unwrap();
 
         let result = check_config(dir);
         assert!(
             result.is_ok(),
-            "partial stm.toml should pass check_config (merged with defaults): {result:?}"
+            "partial flow.toml should pass check_config (merged with defaults): {result:?}"
         );
     }
 
-    /// Negative: syntactically malformed `stm.toml` returns a parse error.
+    /// Negative: syntactically malformed `flow.toml` returns a parse error.
     ///
     /// Unlike `check_config_invalid_app_config_returns_err` (which uses valid TOML
     /// with invalid *values*), this tests completely garbled syntax.
@@ -867,29 +867,29 @@ strategy = "original_slot"
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        std::fs::write(dir.join("stm.toml"), b"this is = not = valid = toml = [[[[").unwrap();
+        std::fs::write(dir.join("flow.toml"), b"this is = not = valid = toml = [[[[").unwrap();
 
         let result = check_config(dir);
         assert!(
             result.is_err(),
-            "malformed stm.toml should cause check_config to fail"
+            "malformed flow.toml should cause check_config to fail"
         );
         let err_msg = result.unwrap_err();
         assert!(
-            err_msg.contains("stm.toml parse error"),
+            err_msg.contains("flow.toml parse error"),
             "error message should identify parse failure: {err_msg}"
         );
     }
 
-    /// Negative: malformed `stm-rules.toml` returns a parse error.
+    /// Negative: malformed `flow-rules.toml` returns a parse error.
     #[test]
     fn check_config_malformed_rules_returns_err() {
-        // Arrange: directory with a syntactically invalid stm-rules.toml.
+        // Arrange: directory with a syntactically invalid flow-rules.toml.
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
         std::fs::write(
-            dir.join("stm-rules.toml"),
+            dir.join("flow-rules.toml"),
             b"this is = not = valid = toml = [[[[",
         )
         .unwrap();
@@ -900,11 +900,11 @@ strategy = "original_slot"
         // Assert: returns an error mentioning the rules file.
         assert!(
             result.is_err(),
-            "malformed stm-rules.toml should cause check_config to fail"
+            "malformed flow-rules.toml should cause check_config to fail"
         );
         let err_msg = result.unwrap_err();
         assert!(
-            err_msg.contains("stm-rules.toml"),
+            err_msg.contains("flow-rules.toml"),
             "error message should identify the rules file: {err_msg}"
         );
     }
@@ -939,7 +939,7 @@ initial_width_px = 960
     /// Negative: missing file returns default config (not panic, not error).
     #[test]
     fn load_rules_config_missing_file_returns_default() {
-        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\stm-rules.toml");
+        let path = std::path::PathBuf::from("C:\\__nonexistent_test_path__\\flow-rules.toml");
         let config = load_rules_config(&path).unwrap();
         assert_eq!(config.default_action, WindowAction::Float);
         assert!(config.rules.is_empty());
@@ -954,7 +954,7 @@ initial_width_px = 960
         let result = load_rules_config(f.path());
         assert!(
             result.is_err(),
-            "malformed stm-rules.toml should propagate an error"
+            "malformed flow-rules.toml should propagate an error"
         );
         let err = result.unwrap_err().to_string();
         assert!(
@@ -963,7 +963,7 @@ initial_width_px = 960
         );
     }
 
-    /// Negative: empty TOML propagates an error. Unlike `StmConfig`, the rules
+    /// Negative: empty TOML propagates an error. Unlike `FlowConfig`, the rules
     /// type carries no container `#[serde(default)]`, so an empty file is a
     /// genuine parse error (`default_action` is required). Init handles this
     /// non-fatally: warn + fall back to default rules.
@@ -975,7 +975,7 @@ initial_width_px = 960
         let result = load_rules_config(f.path());
         assert!(
             result.is_err(),
-            "empty stm-rules.toml should propagate an error (default_action is required)"
+            "empty flow-rules.toml should propagate an error (default_action is required)"
         );
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1057,7 +1057,7 @@ initial_width_px = 960
     ///
     /// Mirrors `load_app_config_parse_error_message_includes_path`: proves the
     /// path-in-message contract holds symmetrically for the rules loader too,
-    /// so a broken `stm-rules.toml` is unambiguously identified in the error.
+    /// so a broken `flow-rules.toml` is unambiguously identified in the error.
     #[test]
     fn load_rules_config_parse_error_message_includes_path() {
         // Arrange: a malformed TOML file with a known path.
@@ -1104,23 +1104,23 @@ initial_width_px = 960
     }
 
     /// The `DEFAULT_RULES_TOML` constant (embedded via `include_str!`) must
-    /// contain the same content as the on-disk `default-stm-rules.toml` file.
+    /// contain the same content as the on-disk `default-flow-rules.toml` file.
     /// (Both sides include the `#:schema` header line, which is harmless to
     /// `toml::from_str` since it parses it as a TOML comment.)
     ///
     /// This guards against a scenario where someone edits the on-disk file
     /// but the `include_str!` path is stale (or vice-versa). Both
     /// `load_default_rules_returns_embedded_rules` and
-    /// `default_stm_rules_toml_parses_correctly` parse their respective
+    /// `default_flow_rules_toml_parses_correctly` parse their respective
     /// sources, but only this test confirms they are **identical**.
     #[test]
     fn embedded_rules_toml_matches_disk_file() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR should be set during tests");
-        let disk_path = std::path::PathBuf::from(manifest_dir).join("default-stm-rules.toml");
+        let disk_path = std::path::PathBuf::from(manifest_dir).join("default-flow-rules.toml");
 
         if !disk_path.exists() {
-            eprintln!("skipping: default-stm-rules.toml not found at {disk_path:?}");
+            eprintln!("skipping: default-flow-rules.toml not found at {disk_path:?}");
             return;
         }
 
@@ -1139,7 +1139,7 @@ initial_width_px = 960
     ///
     /// The actual `load_default_rules()` function parses the compile-time
     /// `DEFAULT_RULES_TOML` constant, which is always valid TOML (the
-    /// `default_stm_rules_toml_parses_correctly` test guarantees this).
+    /// `default_flow_rules_toml_parses_correctly` test guarantees this).
     /// The `Err` branch — returning `WindowRulesConfig::default()` — is
     /// therefore **not directly exercisable** through the public API.
     ///
@@ -1172,21 +1172,21 @@ initial_width_px = 960
         assert!(fallback.rules.is_empty(), "fallback should have no rules");
     }
 
-    // ── default-stm-rules.toml parse test ────────────────────────────────
+    // ── default-flow-rules.toml parse test ────────────────────────────────
 
-    /// Positive: the bundled `default-stm-rules.toml` in the project root
+    /// Positive: the bundled `default-flow-rules.toml` in the project root
     /// parses correctly as `WindowRulesConfig`.
     ///
     /// This catches syntax errors or schema drift in the shipped defaults.
     #[test]
-    fn default_stm_rules_toml_parses_correctly() {
+    fn default_flow_rules_toml_parses_correctly() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR should be set during tests");
-        let path = std::path::PathBuf::from(manifest_dir).join("default-stm-rules.toml");
+        let path = std::path::PathBuf::from(manifest_dir).join("default-flow-rules.toml");
 
         // Only run if the file exists (it should in the project tree).
         if !path.exists() {
-            eprintln!("skipping: default-stm-rules.toml not found at {path:?}");
+            eprintln!("skipping: default-flow-rules.toml not found at {path:?}");
             return;
         }
 
@@ -1201,7 +1201,7 @@ initial_width_px = 960
     // ── default-config.toml parse test ──────────────────────────────────
 
     /// Positive: the hand-written `default-config.toml` example parses correctly
-    /// as `StmConfig`.
+    /// as `FlowConfig`.
     ///
     /// This catches syntax errors in the example file. The authoritative
     /// cross-check (that the example's *values* match the compiled defaults)

@@ -2,7 +2,7 @@
 name: rust-test
 description: >
   Teaches TestEngineer to analyze test coverage, write missing unit/integration
-  tests, and run the full cargo test suite for the ScrollingTilingManager Rust
+  tests, and run the full cargo test suite for the FlowWM Rust
   Windows binary. Load at the start of every Rust test phase.
   Do NOT load for Python pytest, TypeScript Vitest, or generic Rust crate testing
   unrelated to Win32 / tiling logic.
@@ -10,7 +10,7 @@ description: >
 version: 2
 ---
 
-# Rust Testing Guide — ScrollingTilingManager (Windows Binary)
+# Rust Testing Guide — FlowWM (Windows Binary)
 
 **Scope:** coverage gap analysis, writing missing tests, running the full suite.
 This project is **Windows-only** — no `#[cfg(target_os)]` guards are needed. All
@@ -115,7 +115,7 @@ mod tests {
 Rules:
 - Every layout function: ≥ 1 zero-count/empty edge case + ≥ 1 nominal case.
 - Every config loader: ≥ 1 valid TOML round-trip + ≥ 1 malformed TOML error test.
-- Every `StmError` variant: ≥ 1 test that triggers it and checks the variant.
+- Every `FlowError` variant: ≥ 1 test that triggers it and checks the variant.
 
 ---
 
@@ -123,9 +123,9 @@ Rules:
 
 ```rust
 // tests/scrolling_space.rs
-use scrolling_tiling_manager::workspace::ScrollingSpace;
-use scrolling_tiling_manager::layout::types::{MonitorInfo, Padding};
-use scrolling_tiling_manager::common::types::WindowId;
+use flow_wm::workspace::ScrollingSpace;
+use flow_wm::layout::types::{MonitorInfo, Padding};
+use flow_wm::common::types::WindowId;
 
 fn small_monitor() -> MonitorInfo { /* a small fake work area */ }
 fn gapless_padding() -> Padding { Padding { window_gap: 0, up: 0, down: 0 } }
@@ -168,7 +168,7 @@ Win32 wrappers cannot be called without a real Windows desktop session. Test the
 ```rust
 // src/animation/backend/mock.rs (pattern)
 pub trait AnimationBackend {
-    fn animate_move(&self, hwnd: isize, from: Rect, to: Rect, hint: &AnimationHint) -> StmResult<()>;
+    fn animate_move(&self, hwnd: isize, from: Rect, to: Rect, hint: &AnimationHint) -> FlowResult<()>;
 }
 
 // Production: uses SetWindowPos via registry/win32.rs
@@ -178,7 +178,7 @@ pub struct MockAnimationBackend {
 }
 
 impl AnimationBackend for MockAnimationBackend {
-    fn animate_move(&self, hwnd: isize, from: Rect, to: Rect, _hint: &AnimationHint) -> StmResult<()> {
+    fn animate_move(&self, hwnd: isize, from: Rect, to: Rect, _hint: &AnimationHint) -> FlowResult<()> {
         self.calls.borrow_mut().push((hwnd, from, to));
         Ok(())
     }
@@ -220,7 +220,7 @@ outer_gap = 16
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"not toml {{{{").unwrap();
         let err = load_config(f.path()).unwrap_err();
-        assert!(matches!(err, crate::common::error::StmError::Config(_)));
+        assert!(matches!(err, crate::common::error::FlowError::Config(_)));
     }
 }
 ```
@@ -286,4 +286,4 @@ Note any pre-existing broken tests.
 - **Mock structs outside `#[cfg(test)]` inflate binary size**: `MockWindowMover`, `MockAnimationBackend`, and similar test doubles MUST be inside `#[cfg(test)]` blocks or in `tests/` — never in `src/` without the cfg guard.
 - **`ScrollingSpace` state carries over between tests**: If tests share a space instance via `#[fixture]` or lazy statics, a mutation in one test can poison the next. Always construct a fresh `ScrollingSpace::new(test_monitor(), 960, 320, test_padding(), 4)` in each test.
 - **WindowId is opaque — tests must use arbitrary values**: `WindowId::new(42)` is fine for tests. The actual HWND value does not matter for pure logic tests.
-- **`assert_cmd` tests require the binary to compile first**: CLI integration tests in `tests/cli.rs` run against the compiled `stmd` binary. If `main.rs` has compile errors, the entire CLI test suite fails with an opaque "process not found" error — fix compilation first.
+- **`assert_cmd` tests require the binary to compile first**: CLI integration tests in `tests/cli.rs` run against the compiled `flowd` binary. If `main.rs` has compile errors, the entire CLI test suite fails with an opaque "process not found" error — fix compilation first.

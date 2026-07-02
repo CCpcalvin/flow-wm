@@ -1,6 +1,6 @@
 # The Mutation Pipeline
 
-Every layout change in ScrollingTilingManager follows the same three-stage pipeline: **mutate**, **project**, then **animate**. A pure mutation function transforms the current `VirtualLayout` into a new one; the projection function converts that virtual layout into pixel-accurate screen rectangles; and the animation layer tweens windows from their current on-screen positions to their new targets. This functional, declarative approach means there is no mutable "update position, propagate, re-render" loop — each stage is a single deterministic function with no side effects.
+Every layout change in FlowWM follows the same three-stage pipeline: **mutate**, **project**, then **animate**. A pure mutation function transforms the current `VirtualLayout` into a new one; the projection function converts that virtual layout into pixel-accurate screen rectangles; and the animation layer tweens windows from their current on-screen positions to their new targets. This functional, declarative approach means there is no mutable "update position, propagate, re-render" loop — each stage is a single deterministic function with no side effects.
 
 ```mermaid
 flowchart TB

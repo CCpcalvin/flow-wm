@@ -1,6 +1,6 @@
 //! Integrated tests for the WindowRegistry.
 //!
-//! These tests create an isolated desktop, start `stmd` on it, create dummy
+//! These tests create an isolated desktop, start `flowd` on it, create dummy
 //! windows on it, and verify the registry state via IPC queries. The user's
 //! main desktop is never affected.
 

@@ -1,6 +1,6 @@
 # Roadmap and Future Work
 
-Where `stm` is headed. The core tiling engine, the scrolling canvas, the
+Where `flow` is headed. The core tiling engine, the scrolling canvas, the
 floating space, and niri-style workspace switching are all implemented and
 exercised end-to-end. What remains is polish, the long tail of IPC commands,
 multi-monitor support, and the aspirational input-driven features.
@@ -9,7 +9,7 @@ multi-monitor support, and the aspirational input-driven features.
 
 ```mermaid
 timeline
-    title stm Roadmap
+    title flow Roadmap
     Polish : SwapWorkspace animation
     Polish : Remaining IPC (PlaceAbove, Promote, QueryState, config reload, ForgetApp)
     Polish : Watchdog + recovery-snapshot persistence
@@ -72,18 +72,18 @@ stable so external tooling and keybindings can target them now:
 | `Promote` | Move the focused window to the master (first) position in its column |
 | `QueryState` | Read-only introspection of daemon/registry state beyond `QueryWindowsAll` |
 | `ReloadConfig` / `CheckConfig` / `SetConfigValue` | Runtime config mutation without a daemon restart |
-| `ForgetApp` / `ForgetAllApps` | Programmatic clearing of learned rules (today this requires hand-editing `history-stm-rules.toml`) |
+| `ForgetApp` / `ForgetAllApps` | Programmatic clearing of learned rules (today this requires hand-editing `history-flow-rules.toml`) |
 
 See [Classification & Learned Rules](./classification.md) for the learned-rules
 model that `ForgetApp` would expose programmatically.
 
 ### Watchdog and Recovery-Snapshot Persistence
 
-`stm-watchdog` ([`src/bin/stm-watchdog.rs`](../../src/bin/stm-watchdog.rs))
-is still a stub — it prints `"stm-watchdog: not yet implemented"` and exits.
-The planned design: `stmd` spawns the watchdog with `--parent-pid` and
+`flow-watchdog` ([`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs))
+is still a stub — it prints `"flow-watchdog: not yet implemented"` and exits.
+The planned design: `flowd` spawns the watchdog with `--parent-pid` and
 `--recovery-path`; the watchdog polls the parent PID and, on exit, reads a
-`stm-recovery.json` snapshot and calls `SetWindowPos` to restore each window
+`flow-recovery.json` snapshot and calls `SetWindowPos` to restore each window
 to its pre-manage geometry. The `Window` struct already carries
 `pre_manage_rect` for this purpose; the atomic write-to-temp-then-rename
 persistence path is what is missing. See
@@ -128,7 +128,7 @@ The current constructor hard-codes a single monitor derived from
 `get_primary_monitor_info()` ([`src/daemon/new.rs`](../../src/daemon/new.rs)).
 Expanding to multiple monitors requires iterating `EnumDisplayMonitors` /
 `MonitorFromPoint` + `GetMonitorInfoW`, building a `Monitor` per display,
-and adding `stm dispatch focusmonitor` / `move-to-workspace <id> <monitor>`
+and adding `flow dispatch focusmonitor` / `move-to-workspace <id> <monitor>`
 plumbing.
 
 ### Performance: Cloaking Off-Screen Windows
@@ -166,13 +166,13 @@ unimplemented input hook.
 Keybinding handling was **intentionally removed** from both the config and
 the codebase. The rationale: external tools like AutoHotkey, PowerToys, or
 Komorebi's keybinding layer are better at translating physical keypresses
-into IPC commands than a re-implemented keyboard hook. `stm`'s role is the
+into IPC commands than a re-implemented keyboard hook. `flow`'s role is the
 layout engine and window manager — not the input layer. See
 [Design Decisions](./design-decisions.md) for more on this separation of
 concerns.
 
-Users map their preferred hotkeys to `stm dispatch` CLI calls via their
-chosen keybinding tool. This keeps `stm`'s attack surface small and avoids
+Users map their preferred hotkeys to `flow dispatch` CLI calls via their
+chosen keybinding tool. This keeps `flow`'s attack surface small and avoids
 duplicating well-tested input infrastructure.
 
 ## Known Win32 Limitations
@@ -182,7 +182,7 @@ model.
 
 ### SetWindowPos vs DeferWindowPos
 
-`stm` uses `SetWindowPos` (immediate positioning) rather than
+`flow` uses `SetWindowPos` (immediate positioning) rather than
 `DeferWindowPos` (batch positioning). `DeferWindowPos` batches multiple
 repositions into a single repaint, but it is atomic: a single elevated
 admin window (protected by UIPI) fails the entire batch with
@@ -194,13 +194,13 @@ logs a warning but does not block the remaining windows. See
 
 `GetWindowRect` returns a rect that includes a hidden ~7px border on the
 left, right, and bottom edges. This is not the visual rect of the window.
-`stm` works around this via the `InvisibleBounds` tracking in the registry.
+`flow` works around this via the `InvisibleBounds` tracking in the registry.
 See the [Window Registry](./window-registry.md) chapter for how invisible
 bounds are measured and how `visible_to_window()` compensates.
 
 ### Applications Own Their Render
 
-`stm` can request a window position via `SetWindowPos`, but the application
+`flow` can request a window position via `SetWindowPos`, but the application
 controls its own rendering. Some apps (especially UWP and Electron-based)
 may not immediately respect position changes or may reposition themselves
 autonomously. This is a fundamental constraint of the Windows windowing
@@ -209,14 +209,14 @@ model.
 ## Warning System (Planned)
 
 If `komorebi`, `GlazeWM`, or another tiling window manager is detected as
-running, `stm` should display a warning and ask the user to close the
-conflicting manager before using `stm`. Coexistence with another WM that
+running, `flow` should display a warning and ask the user to close the
+conflicting manager before using `flow`. Coexistence with another WM that
 also moves windows will produce unpredictable results.
 
 ## Window Restoration
 
-When `stm` exits (gracefully or via crash), tiled windows may be positioned
-off-screen. The planned `stm-watchdog` (see above) handles crash recovery;
+When `flow` exits (gracefully or via crash), tiled windows may be positioned
+off-screen. The planned `flow-watchdog` (see above) handles crash recovery;
 on graceful shutdown the daemon performs the equivalent restore inline —
 querying all window positions and moving any off-screen windows to the
 nearest screen edge using `SetWindowPos` (no animation needed).

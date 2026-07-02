@@ -12,7 +12,7 @@ use crate::borders::{Border, BorderState, BorderStyle, style_for_state};
 use crate::common::Rect;
 use crate::registry::types::{FloatingState, TilingState, WindowState};
 
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
 /// Seat a floating window's border overlay for `visible_rect`.
 ///
@@ -33,7 +33,7 @@ pub(super) fn float_border_rect(visible_rect: Rect, thickness: u32, overlap: u32
     visible_rect.inset(-outset)
 }
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Resolve the appropriate border style for `hwnd` based on its current
     /// registry state and OS focus tracking.
     ///
@@ -157,7 +157,7 @@ impl ScrollTilingManager {
 
     /// Re-sync every tracked window's border overlay.
     ///
-    /// Called once at the end of [`ScrollTilingManager::new`](Self::new) to
+    /// Called once at the end of [`FlowWM::new`](Self::new) to
     /// attach borders for windows found during the initial scan. Per-event
     /// recoloring (focus changes, creates, etc.) goes through
     /// [`refresh_border_for`](Self::refresh_border_for) for the affected

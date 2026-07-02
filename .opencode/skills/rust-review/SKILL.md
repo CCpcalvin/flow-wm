@@ -1,7 +1,7 @@
 ---
 name: rust-review
 description: >
-  Teaches CodeReviewer to review Rust code for the ScrollingTilingManager
+  Teaches CodeReviewer to review Rust code for the FlowWM
   Windows binary — module boundaries, Win32 safety, error handling, Clippy
   compliance, and test adequacy. Load at the start of every Rust review phase.
   Do NOT load for Python, TypeScript, or generic Rust crate reviews unrelated
@@ -10,7 +10,7 @@ description: >
 version: 2
 ---
 
-# Rust Code Review Guide — ScrollingTilingManager (Windows Binary)
+# Rust Code Review Guide — FlowWM (Windows Binary)
 
 **Scope:** all `.rs` files from this batch's CoderAgents + test files and results.
 Do NOT compile or run the binary — review source and test output only.
@@ -23,17 +23,17 @@ Verify the dependency direction is respected:
 
 ```
 main.rs → registry/ + layout/ + config/ + ipc/ + animation/ + daemon/
-registry/ → common/ (for StmError, WindowId)
+registry/ → common/ (for FlowError, WindowId)
 layout/   → common/ (for WindowId) — NO registry/ or windows crate imports
 animation/ → layout/types (for AnimationHint) + registry/ (for Win32 backends)
-common/   → (no stm-internal imports — foundation layer)
+common/   → (no flow-internal imports — foundation layer)
 ```
 
 - [ ] `src/layout/` contains zero `use windows` or `use std::os::windows` imports
 - [ ] `src/registry/` contains no layout/business logic — only Win32 wrappers, HWND↔WindowId mapping, and window tracking
 - [ ] `src/main.rs` contains no raw Win32 calls — delegates to `registry/` modules
 - [ ] `src/config/` contains no Win32 imports
-- [ ] `src/common/` imports nothing from other stm modules (foundation layer)
+- [ ] `src/common/` imports nothing from other flow modules (foundation layer)
 - [ ] `src/animation/` does not import layout engine internals — only `layout::types`
 
 ## 2 — Unsafe Correctness
@@ -46,11 +46,11 @@ common/   → (no stm-internal imports — foundation layer)
 ## 3 — Error Handling
 
 - [ ] No `.unwrap()` or `.expect()` outside of `#[cfg(test)]` blocks
-- [ ] Win32 errors mapped to `StmError::Registry(String)` at the registry boundary
+- [ ] Win32 errors mapped to `FlowError::Registry(String)` at the registry boundary
 - [ ] I/O errors convert automatically via `From<std::io::Error>` impl
-- [ ] `StmError` variants cover Config, Layout, Io, and Registry domains
+- [ ] `FlowError` variants cover Config, Layout, Io, and Registry domains
 - [ ] `panic!` used only for true logic invariants with a comment explaining why recovery is impossible
-- [ ] `main` logs `StmError` and exits with a non-zero code on fatal errors
+- [ ] `main` logs `FlowError` and exits with a non-zero code on fatal errors
 
 ## 4 — Win32 Patterns
 
@@ -112,4 +112,4 @@ Do not reject for style choices not defined in this skill.
 - **`.unwrap()` in test helpers leaks into production**: Developers copy test fixture patterns into `src/`. Search for `.unwrap()` and `.expect()` in `src/` (not `tests/`) before approving — IDEs and Clippy don't flag these by default.
 - **Blanket `"Win32_Everything"` feature flag**: A blanket feature flag compiles in thousands of unused Win32 bindings, bloating binary and compile time. Reject if any feature is not referenced in the codebase.
 - **`layout/` importing `windows` crate indirectly via a `use` re-export**: A developer may add `pub use windows::Win32::Foundation::RECT;` in `registry/mod.rs` and then import that from `layout/`. The import chain still breaks the module boundary — check `use` paths in layout files, not just direct `use windows` statements.
-- **`StmError::Win32` does not exist**: The project does not have a `Win32` error variant. Win32 errors are mapped to `StmError::Registry(String)` at the boundary. Reject code that introduces a `Win32(windows::core::Error)` variant.
+- **`FlowError::Win32` does not exist**: The project does not have a `Win32` error variant. Win32 errors are mapped to `FlowError::Registry(String)` at the boundary. Reject code that introduces a `Win32(windows::core::Error)` variant.

@@ -1,4 +1,4 @@
-# ScrollingTilingManager (`stm`)
+# FlowWM (`flow`)
 
 A scrolling, infinite-horizontal-canvas tiling window manager for Windows 10/11. Windows occupy columns on a virtual canvas that extends wider than any single monitor. The viewport slides left and right, bringing columns in and out of view.
 
@@ -6,9 +6,9 @@ A scrolling, infinite-horizontal-canvas tiling window manager for Windows 10/11.
 
 | Binary | Role |
 |--------|------|
-| `stmd` | Daemon process — runs in the background, owns all state |
-| `stm` | CLI client — sends commands to the daemon via IPC |
-| `stm-watchdog` | Crash-recovery helper — restores windows if the daemon dies |
+| `flowd` | Daemon process — runs in the background, owns all state |
+| `flow` | CLI client — sends commands to the daemon via IPC |
+| `flow-watchdog` | Crash-recovery helper — restores windows if the daemon dies |
 
 ## Prerequisites
 
@@ -45,12 +45,12 @@ cargo fmt --check
 
 ```powershell
 # Start the daemon (foreground)
-stmd
+flowd
 
 # In another terminal, send commands
-stm start
-stm stop
-stm query windows all
+flow start
+flow stop
+flow query windows all
 ```
 
 ## Architecture

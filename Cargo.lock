@@ -287,6 +287,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow-wm"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "crossbeam-channel",
+ "env_logger",
+ "log",
+ "predicates",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "windows",
+]
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -651,27 +672,6 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn",
-]
-
-[[package]]
-name = "scrolling-tiling-manager"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "chrono",
- "clap",
- "crossbeam-channel",
- "env_logger",
- "log",
- "predicates",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
- "windows",
 ]
 
 [[package]]

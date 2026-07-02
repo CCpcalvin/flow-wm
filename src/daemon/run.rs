@@ -1,13 +1,13 @@
-//! ScrollTilingManager main event loop and hook event routing.
+//! FlowWM main event loop and hook event routing.
 //!
 //! This module contains:
 //!
-//! - [`ScrollTilingManager::run`] — the event-driven main loop that uses
+//! - [`FlowWM::run`] — the event-driven main loop that uses
 //!   `MsgWaitForMultipleObjects` to wait on hook events, IPC client
 //!   connections, and the Win32 message queue simultaneously.
-//! - [`ScrollTilingManager::process_hook_events`] — drains pending hook
+//! - [`FlowWM::process_hook_events`] — drains pending hook
 //!   events from the channel and routes them to individual handlers.
-//! - [`ScrollTilingManager::pump_messages`] — drains the Win32 message
+//! - [`FlowWM::pump_messages`] — drains the Win32 message
 //!   queue so cross-thread `SendMessage` calls from the border hook thread
 //!   can complete. Required because the main thread creates overlay windows
 //!   and is therefore a GUI thread that must pump messages.
@@ -39,7 +39,7 @@
 //!    border sync-dispatch never blocks on an IPC-blocked main thread.
 //!    Connection is detected with an independent zero-timeout
 //!    `WaitForSingleObject` poll rather than the wait's return index — see
-//!    [`ScrollTilingManager::run`] for why the return index alone starves IPC.
+//!    [`FlowWM::run`] for why the return index alone starves IPC.
 //! 5. Returns to `MsgWaitForMultipleObjects`.
 //!
 //! # Race-Free Hook Drain
@@ -65,7 +65,7 @@
 //! the window isn't fully initialized yet.
 //!
 //! To handle this, windows that fail classification are added to
-//! [`pending_creations`](super::types::ScrollTilingManager::pending_creations).
+//! [`pending_creations`](super::types::FlowWM::pending_creations).
 //! On every `process_hook_events` call, pending windows are retried. When the
 //! list is non-empty, `MsgWaitForMultipleObjects` uses a finite timeout (100 ms)
 //! instead of `INFINITE`, ensuring retries happen even without new hook events.
@@ -82,7 +82,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::registry::HookEvent;
 
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
 /// Maximum retry attempts for a pending window creation.
 ///
@@ -100,7 +100,7 @@ const MAX_PENDING_RETRIES: u8 = 5;
 /// has time to finish initializing (set title, become visible, finalize styles).
 const PENDING_RETRY_TIMEOUT_MS: u32 = 100;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Run the event-driven main loop. Blocks until the `Stop` command is
     /// received or a fatal error occurs.
     ///
@@ -181,7 +181,7 @@ impl ScrollTilingManager {
     /// would every border operation (and, eventually, every IPC dispatch).
     /// See `docs/src/dev-guide/borders.md`.
     pub fn run(&mut self) {
-        log::info!("stmd: daemon started, event-driven loop on named pipe");
+        log::info!("flowd: daemon started, event-driven loop on named pipe");
 
         // Start the first background accept — spawns a thread that blocks in
         // ConnectNamedPipe until a client connects.
@@ -220,7 +220,7 @@ impl ScrollTilingManager {
 
             // Check for WAIT_FAILED (0xFFFFFFFF).
             if wait_result.0 == u32::MAX {
-                log::error!("stmd: MsgWaitForMultipleObjects failed");
+                log::error!("flowd: MsgWaitForMultipleObjects failed");
                 break;
             }
 
@@ -295,12 +295,12 @@ impl ScrollTilingManager {
                             let is_stop = self.shutting_down;
 
                             if let Err(e) = self.server.write_response(&response) {
-                                log::warn!("stmd: failed to write response: {e}");
+                                log::warn!("flowd: failed to write response: {e}");
                                 break;
                             }
 
                             if is_stop {
-                                log::info!("stmd: shutting down");
+                                log::info!("flowd: shutting down");
                                 return;
                             }
                         }
@@ -313,7 +313,7 @@ impl ScrollTilingManager {
 
                 // Disconnect the client so a new one can connect.
                 if let Err(e) = self.server.disconnect() {
-                    log::warn!("stmd: failed to disconnect client: {e}");
+                    log::warn!("flowd: failed to disconnect client: {e}");
                 }
 
                 // Start accepting the next client on a background thread.
@@ -460,7 +460,7 @@ impl ScrollTilingManager {
                     // A tracked active-workspace float moved. Store its new
                     // rect so workspace round-trips restore the dragged
                     // position. The handler re-checks the tracking flag and
-                    // float-set membership to close the stm-animation race.
+                    // float-set membership to close the flow-animation race.
                     self.on_float_location_changed(hwnd);
                 }
             }
@@ -468,7 +468,7 @@ impl ScrollTilingManager {
     }
 }
 
-/// Pure, clock-injectable form of [`ScrollTilingManager::compute_wait_timeout`].
+/// Pure, clock-injectable form of [`FlowWM::compute_wait_timeout`].
 ///
 /// Returns the smaller of the two finite deadlines:
 /// - `has_pending_creations` → [`PENDING_RETRY_TIMEOUT_MS`].
@@ -477,7 +477,7 @@ impl ScrollTilingManager {
 ///
 /// Returns `u32::MAX` (`INFINITE`) when neither source is active. Extracted
 /// to a free function so the branching is unit-testable without constructing
-/// a full [`ScrollTilingManager`] (which needs Win32 + a hook thread).
+/// a full [`FlowWM`] (which needs Win32 + a hook thread).
 fn compute_wait_timeout_inner(
     has_pending_creations: bool,
     float_resume_deadline: Option<std::time::Instant>,

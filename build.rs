@@ -1,4 +1,4 @@
-//! Build script for `scrolling-tiling-manager`.
+//! Build script for `flow-wm`.
 //!
 //! This project targets Windows exclusively. The build script panics if the
 //! target OS is not Windows, preventing accidental compilation on other
@@ -9,7 +9,7 @@
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         panic!(
-            "scrolling-tiling-manager only supports Windows targets. \
+            "flow-wm only supports Windows targets. \
              Build with --target x86_64-pc-windows-msvc"
         );
     }

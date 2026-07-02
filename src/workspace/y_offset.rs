@@ -74,8 +74,8 @@ use crate::workspace::WorkspaceId;
 /// # Examples
 ///
 /// ```
-/// # use scrolling_tiling_manager::workspace::WorkspaceId;
-/// # use scrolling_tiling_manager::workspace::workspace_y_offset;
+/// # use flow_wm::workspace::WorkspaceId;
+/// # use flow_wm::workspace::workspace_y_offset;
 /// // Workspace 3 sits above active workspace 5.
 /// let off = workspace_y_offset(WorkspaceId(3), WorkspaceId(5), 1080, 4);
 /// assert_eq!(off, -(1080 + 4));

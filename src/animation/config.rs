@@ -11,7 +11,7 @@ use super::easing::EasingStyle;
 /// # Example
 ///
 /// ```rust
-/// use scrolling_tiling_manager::animation::AnimatorConfig;
+/// use flow_wm::animation::AnimatorConfig;
 /// use std::time::Duration;
 ///
 /// let config = AnimatorConfig {

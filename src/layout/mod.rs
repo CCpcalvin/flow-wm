@@ -1,6 +1,6 @@
 //! Layout engine — infinite horizontal canvas with camera-based viewport.
 //!
-//! The pure-math core of stm: all layout computation here is **platform-independent
+//! The pure-math core of flow: all layout computation here is **platform-independent
 //! Rust with zero Win32 dependencies**, testable on any platform. Position on the
 //! canvas is *implicit* (prefix-sum of column widths); a `viewport_offset` acts as
 //! a camera that determines which slice of the canvas is visible.

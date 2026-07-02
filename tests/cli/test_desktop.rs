@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use scrolling_tiling_manager::registry::desktop;
+use flow_wm::registry::desktop;
 
 /// Per-test unique counter for desktop names.
 static DESKTOP_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -32,13 +32,13 @@ static TITLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Generates a unique desktop name.
 fn unique_desktop_name() -> String {
     let id = DESKTOP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("stm-test-{id}")
+    format!("flow-test-{id}")
 }
 
 /// Generates a unique window title with a test prefix.
 pub fn unique_title(base: &str) -> String {
     let id = TITLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("StmTest-{base}-{id}")
+    format!("FlowTest-{base}-{id}")
 }
 
 // ── TestDesktop ─────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ pub fn unique_title(base: &str) -> String {
 /// drop(td); // switches back, closes desktop.
 /// ```
 pub struct TestDesktop {
-    /// The desktop name (passed to `stmd --desktop`).
+    /// The desktop name (passed to `flowd --desktop`).
     pub name: String,
     /// Handle to the created test desktop.
     desktop: HDESK,
@@ -127,7 +127,7 @@ impl TestWindow {
     /// The calling thread should already be on the test desktop via
     /// [`TestDesktop::create`].
     pub fn create(title: &str) -> Result<Self, String> {
-        let class_name = wide("StmTestClass");
+        let class_name = wide("FlowTestClass");
         register_test_class(&class_name)?;
 
         let wide_title = wide(title);
@@ -191,7 +191,7 @@ impl Drop for TestWindow {
 
 // ── Daemon helpers ──────────────────────────────────────────────────
 
-/// Owns an `stmd` child process and **force-kills it on drop**.
+/// Owns an `flowd` child process and **force-kills it on drop**.
 ///
 /// # Why this exists
 ///
@@ -208,7 +208,7 @@ impl Drop for TestWindow {
 ///    never read the `Stop` at all).
 /// 2. Without a kill, the daemon process is orphaned: its parent test process
 ///    is gone, nothing will ever wake it from its blocking kernel wait, and it
-///    lingers forever (confirmed in debugging — orphaned `stmd.exe` parked at
+///    lingers forever (confirmed in debugging — orphaned `flowd.exe` parked at
 ///    0 % CPU that no test can recover).
 ///
 /// `KillingChild` closes that hole. On drop it checks whether the daemon has
@@ -265,19 +265,19 @@ impl Drop for KillingChild {
     }
 }
 
-/// Start `stmd` in test mode on the given desktop.
+/// Start `flowd` in test mode on the given desktop.
 ///
 /// The daemon is spawned with `--desktop <name>` so both its main thread
 /// and hook thread join the isolated test desktop.
 ///
 /// The returned [`KillingChild`] force-kills the daemon when dropped, so a
 /// test that panics — or a daemon that stalls on the isolated desktop — can
-/// never leak an orphaned `stmd.exe`. See [`KillingChild`] for details.
+/// never leak an orphaned `flowd.exe`. See [`KillingChild`] for details.
 pub fn start_test_daemon(pipe: &str, desktop_name: &str) -> Result<KillingChild, String> {
     start_test_daemon_with_extra_args(pipe, desktop_name, &[])
 }
 
-/// Start `stmd` in test mode with additional CLI arguments (e.g. `--log-file`).
+/// Start `flowd` in test mode with additional CLI arguments (e.g. `--log-file`).
 ///
 /// Same as [`start_test_daemon`] but appends caller-supplied arguments after
 /// the standard `--desktop` flag. Used by tests that need to redirect the
@@ -288,7 +288,7 @@ pub fn start_test_daemon_with_extra_args(
     desktop_name: &str,
     extra_args: &[&str],
 ) -> Result<KillingChild, String> {
-    let exe = assert_cmd::cargo_bin!("stmd");
+    let exe = assert_cmd::cargo_bin!("flowd");
 
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     const DETACHED: u32 = 0x00000200 | 0x08000000;
@@ -296,7 +296,7 @@ pub fn start_test_daemon_with_extra_args(
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--desktop")
         .arg(desktop_name)
-        .env("STM_PIPE_NAME", pipe)
+        .env("FLOW_PIPE_NAME", pipe)
         .creation_flags(DETACHED);
 
     // Per-test filesystem key derived from the (unique) pipe name. Used for
@@ -311,34 +311,34 @@ pub fn start_test_daemon_with_extra_args(
     // rules file that tiles unknown windows.
     //
     // The compiled default is `default_action = "float"` (see `src/config/
-    // types.rs` and `default-stm-rules.toml`). Every window the tests create
-    // (class `StmTestClass`, exe `cli-*.exe`, title `StmTest-*`) matches NO
+    // types.rs` and `default-flow-rules.toml`). Every window the tests create
+    // (class `FlowTestClass`, exe `cli-*.exe`, title `FlowTest-*`) matches NO
     // rule at any layer, so without this override the classifier falls back to
     // `float` and no test window ever tiles — every integration assertion that
     // expects tiled columns would see `columns: []`. A caller that explicitly
     // passes its own `--config` in `extra_args` wins.
-    const TEST_RULES_TOML: &str = include_str!("fixtures/stm-rules.toml");
+    const TEST_RULES_TOML: &str = include_str!("fixtures/flow-rules.toml");
     let config_overridden = extra_args.contains(&"--config");
     if !config_overridden {
-        let config_dir = std::env::temp_dir().join(format!("stm-test-config-{safe}"));
+        let config_dir = std::env::temp_dir().join(format!("flow-test-config-{safe}"));
         std::fs::create_dir_all(&config_dir)
             .map_err(|e| format!("failed to create test config dir: {e}"))?;
-        let rules_path = config_dir.join("stm-rules.toml");
+        let rules_path = config_dir.join("flow-rules.toml");
         std::fs::write(&rules_path, TEST_RULES_TOML)
-            .map_err(|e| format!("failed to write test stm-rules.toml: {e}"))?;
-        eprintln!("[test] stmd config dir -> {}", config_dir.display());
+            .map_err(|e| format!("failed to write test flow-rules.toml: {e}"))?;
+        eprintln!("[test] flowd config dir -> {}", config_dir.display());
         cmd.arg("--config").arg(&config_dir);
     }
 
-    // Redirect the daemon log away from the user's real `~/.config/stm/logs/`
+    // Redirect the daemon log away from the user's real `~/.config/flow/logs/`
     // daily log (shared with any live daemon, so reading it back per-test is
     // racy). The pipe name is unique per test, so it keys a unique temp log;
     // the daemon truncates the file on each start. A caller that explicitly
     // passes its own `--log-file` in `extra_args` wins.
     let already_redirected = extra_args.contains(&"--log-file");
     if !already_redirected {
-        let log_path = std::env::temp_dir().join(format!("stmd-test-{safe}.log"));
-        eprintln!("[test] stmd log -> {}", log_path.display());
+        let log_path = std::env::temp_dir().join(format!("flowd-test-{safe}.log"));
+        eprintln!("[test] flowd log -> {}", log_path.display());
         cmd.arg("--log-file").arg(log_path);
     }
 
@@ -347,16 +347,16 @@ pub fn start_test_daemon_with_extra_args(
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn stmd: {e}"))?;
+        .map_err(|e| format!("failed to spawn flowd: {e}"))?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match child.try_wait().map_err(|e| format!("wait error: {e}"))? {
             Some(status) => {
                 if !status.success() {
-                    return Err(format!("stmd exited with {status}"));
+                    return Err(format!("flowd exited with {status}"));
                 }
-                return Err("stmd exited unexpectedly with success".into());
+                return Err("flowd exited unexpectedly with success".into());
             }
             None => {
                 if is_pipe_available(pipe) {
@@ -407,7 +407,7 @@ fn is_pipe_available(pipe: &str) -> bool {
 /// RAII guard that stops the test daemon on drop.
 ///
 /// If a test panics after starting the daemon, `stop_test_daemon` is called
-/// during unwinding, preventing orphaned `stmd.exe` processes.
+/// during unwinding, preventing orphaned `flowd.exe` processes.
 ///
 /// # Usage
 ///
@@ -439,13 +439,13 @@ impl Drop for DaemonGuard {
 
 // ── IPC helpers ─────────────────────────────────────────────────────
 
-/// Send `stm query windows` and return the JSON response.
+/// Send `flow query windows` and return the JSON response.
 ///
 /// Uses [`transport::send_message_to`] with the pipe name directly — no
 /// environment variable mutation, safe for concurrent test threads.
 pub fn query_windows(pipe: &str) -> Result<serde_json::Value, String> {
-    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
-    use scrolling_tiling_manager::ipc::transport;
+    use flow_wm::ipc::message::{SocketMessage, SocketResponse};
+    use flow_wm::ipc::transport;
 
     let response = transport::send_message_to(pipe, &SocketMessage::QueryWindowsAll)
         .map_err(|e| format!("query failed: {e}"))?;
@@ -464,8 +464,8 @@ pub fn query_windows(pipe: &str) -> Result<serde_json::Value, String> {
 /// `width_px`, and `rows` (the window IDs in column order). This is the
 /// most direct way to verify that a column swap changed the layout.
 pub fn query_layout_virtual(pipe: &str) -> Result<serde_json::Value, String> {
-    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
-    use scrolling_tiling_manager::ipc::transport;
+    use flow_wm::ipc::message::{SocketMessage, SocketResponse};
+    use flow_wm::ipc::transport;
 
     let response = transport::send_message_to(pipe, &SocketMessage::QueryLayoutVirtual)
         .map_err(|e| format!("query_layout_virtual failed: {e}"))?;
@@ -481,8 +481,8 @@ pub fn query_layout_virtual(pipe: &str) -> Result<serde_json::Value, String> {
 ///
 /// Useful for fire-and-forget commands during test setup where the command may
 /// legitimately fail (e.g. focusing left when already at the leftmost column).
-pub fn send_ipc_ignore(pipe: &str, msg: &scrolling_tiling_manager::ipc::message::SocketMessage) {
-    use scrolling_tiling_manager::ipc::transport;
+pub fn send_ipc_ignore(pipe: &str, msg: &flow_wm::ipc::message::SocketMessage) {
+    use flow_wm::ipc::transport;
     let _ = transport::send_message_to(pipe, msg);
 }
 
@@ -500,9 +500,9 @@ pub fn send_ipc_ignore(pipe: &str, msg: &scrolling_tiling_manager::ipc::message:
 /// callers can assert `Ok` directly for no-op / success cases.
 pub fn send_ipc_retry(
     pipe: &str,
-    msg: &scrolling_tiling_manager::ipc::message::SocketMessage,
-) -> Result<scrolling_tiling_manager::ipc::message::SocketResponse, String> {
-    use scrolling_tiling_manager::ipc::transport;
+    msg: &flow_wm::ipc::message::SocketMessage,
+) -> Result<flow_wm::ipc::message::SocketResponse, String> {
+    use flow_wm::ipc::transport;
 
     const ATTEMPTS: u32 = 20;
     const SLEEP: std::time::Duration = std::time::Duration::from_millis(25);
@@ -576,15 +576,15 @@ pub fn wait_until_windows_tiled(pipe: &str, expected: usize) -> Result<serde_jso
     ))
 }
 
-/// Send `stm query layout actual` and return the JSON response.
+/// Send `flow query layout actual` and return the JSON response.
 ///
 /// Returns the actual (projected) layout: pixel-level rects for each window
 /// after projection and padding. Intended for integration tests to verify that
 /// remaining windows physically shift left after a column is removed.
 #[allow(dead_code)]
 pub fn query_layout_actual(pipe: &str) -> Result<serde_json::Value, String> {
-    use scrolling_tiling_manager::ipc::message::{SocketMessage, SocketResponse};
-    use scrolling_tiling_manager::ipc::transport;
+    use flow_wm::ipc::message::{SocketMessage, SocketResponse};
+    use flow_wm::ipc::transport;
 
     let response = transport::send_message_to(pipe, &SocketMessage::QueryLayoutActual)
         .map_err(|e| format!("query layout actual failed: {e}"))?;
@@ -601,8 +601,8 @@ pub fn query_layout_actual(pipe: &str) -> Result<serde_json::Value, String> {
 /// Uses [`transport::send_message_to`] with the pipe name directly — no
 /// environment variable mutation, safe for concurrent test threads.
 pub fn stop_test_daemon(pipe: &str) {
-    use scrolling_tiling_manager::ipc::message::SocketMessage;
-    use scrolling_tiling_manager::ipc::transport;
+    use flow_wm::ipc::message::SocketMessage;
+    use flow_wm::ipc::transport;
 
     let _ = transport::send_message_to(pipe, &SocketMessage::Stop);
 }

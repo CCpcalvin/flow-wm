@@ -413,8 +413,8 @@ fn compile_rules(rules: Vec<WindowRule>) -> Vec<CompiledRule> {
 ///
 /// Evaluates rule layers in priority order (first match wins):
 ///
-/// 1. **User rules** — from `stm-rules.toml` (highest priority).
-/// 2. **Learned rules** — persisted user decisions from `set-window` (`history-stm-rules.toml`).
+/// 1. **User rules** — from `flow-rules.toml` (highest priority).
+/// 2. **Learned rules** — persisted user decisions from `set-window` (`history-flow-rules.toml`).
 /// 3. **Default rules** — bundled at compile time (lowest rule priority).
 /// 4. **Default action** — fallback when no rule matches at any layer.
 ///
@@ -447,9 +447,9 @@ impl ClassificationPipeline {
     ///
     /// # Arguments
     ///
-    /// * `user_rules` - Rules from the user's `stm-rules.toml`.
+    /// * `user_rules` - Rules from the user's `flow-rules.toml`.
     /// * `default_rules` - Bundled default rules (embedded at compile time from
-    ///   `default-stm-rules.toml`).
+    ///   `default-flow-rules.toml`).
     #[must_use]
     pub fn new(user_rules: WindowRulesConfig, default_rules: WindowRulesConfig) -> Self {
         let default_action = user_rules.default_action;
@@ -511,7 +511,7 @@ impl ClassificationPipeline {
         self.learned_rules = compile_rules(rules);
     }
 
-    /// Replace the user-rules layer (and fallback action) from `stm-rules.toml`.
+    /// Replace the user-rules layer (and fallback action) from `flow-rules.toml`.
     ///
     /// Used by hot-reload so classification picks up edited rules without
     /// restarting the daemon. Recompiles all regex patterns; invalid patterns
@@ -1421,7 +1421,7 @@ mod tests {
     /// rules don't match.
     ///
     /// This is the critical regression test for the bug fix that embedded
-    /// `default-stm-rules.toml` at compile time. Before the fix, the default
+    /// `default-flow-rules.toml` at compile time. Before the fix, the default
     /// rules layer was empty during development (file not found next to exe),
     /// so phase 3 of the pipeline matched nothing. This test:
     ///

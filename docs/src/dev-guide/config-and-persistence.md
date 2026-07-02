@@ -1,12 +1,12 @@
 # Config and Persistence
 
-How STM resolves, loads, validates, and applies user configuration -- with code as the single source of truth for all default values.
+How flow resolves, loads, validates, and applies user configuration -- with code as the single source of truth for all default values.
 
 ## Design Philosophy: Code Is the Source of Truth
 
-STM's configuration model makes a deliberate choice: **compiled Rust `Default` impls are the canonical default values, not any TOML file.** Every config struct in `src/config/types.rs` carries `#[serde(default)]` at the container level, so serde starts with a full `Default` instance and then overlays only the fields present in the user's TOML. This means a user's `stm.toml` may be partial, empty, or even nested-partial -- serde fills every gap automatically.
+flow's configuration model makes a deliberate choice: **compiled Rust `Default` impls are the canonical default values, not any TOML file.** Every config struct in `src/config/types.rs` carries `#[serde(default)]` at the container level, so serde starts with a full `Default` instance and then overlays only the fields present in the user's TOML. This means a user's `flow.toml` may be partial, empty, or even nested-partial -- serde fills every gap automatically.
 
-A previous design used a two-layer TOML merge (shipped defaults + user overlay) at the `toml::Value` level before deserialization. That model silently fell back to stale compiled-in defaults when the shipped file was absent during development -- the build never copied it next to `stmd.exe`. Moving defaults into code eliminated that failure mode entirely.
+A previous design used a two-layer TOML merge (shipped defaults + user overlay) at the `toml::Value` level before deserialization. That model silently fell back to stale compiled-in defaults when the shipped file was absent during development -- the build never copied it next to `flowd.exe`. Moving defaults into code eliminated that failure mode entirely.
 
 ```mermaid
 flowchart LR
@@ -15,9 +15,9 @@ flowchart LR
     end
 
     subgraph Runtime ["Runtime (serde)"]
-        TOML["User's stm.toml<br/>(partial / empty / full)"]
+        TOML["User's flow.toml<br/>(partial / empty / full)"]
         MERGE["serde(default)<br/>Start with Default,<br/>overlay user fields"]
-        CFG["StmConfig"]
+        CFG["FlowConfig"]
     end
 
     subgraph Example ["Example File (NOT runtime)"]
@@ -37,9 +37,9 @@ flowchart LR
 When adding or changing a config field, you must update **both**:
 
 1. The `Default` impl in `src/config/types.rs` -- this is the actual runtime default.
-2. `default-config.toml` in the repo root -- this is the human-readable example copied to users by `stm config init`.
+2. `default-config.toml` in the repo root -- this is the human-readable example copied to users by `flow config init`.
 
-The `default_config_toml_matches_compiled_defaults` test (in `src/config/types.rs`) enforces they stay in sync: it deserializes the example file and asserts it equals `StmConfig::default()`. If you change a default in code and forget the TOML, CI fails.
+The `default_config_toml_matches_compiled_defaults` test (in `src/config/types.rs`) enforces they stay in sync: it deserializes the example file and asserts it equals `FlowConfig::default()`. If you change a default in code and forget the TOML, CI fails.
 
 The example file is **never read at runtime.** It exists solely as a commented starter template so first-time users understand what fields are available. Users can trim it, add comments, or even empty it entirely -- serde will still produce a fully valid config from code defaults.
 
@@ -49,8 +49,8 @@ Configuration lives in two separate TOML files inside the config directory:
 
 | File | Struct | Purpose |
 |------|--------|---------|
-| `stm.toml` | `StmConfig` | Application settings: column sizing, padding, animation, minimize-restore behavior |
-| `stm-rules.toml` | `WindowRulesConfig` | Window classification rules and default action |
+| `flow.toml` | `FlowConfig` | Application settings: column sizing, padding, animation, minimize-restore behavior |
+| `flow-rules.toml` | `WindowRulesConfig` | Window classification rules and default action |
 
 This separation lets users edit rules frequently (adding ignore patterns for new apps) without risking their application settings, and vice-versa. Both files are documented at `src/config/types.rs`.
 
@@ -61,13 +61,13 @@ The config directory is resolved by `src/config/dirs.rs` using a three-level pri
 ```mermaid
 flowchart TD
     A["CLI --config flag"] -->|highest priority| D["Resolved config dir"]
-    B["STM_CONFIG_DIR env var"] -->|second priority| D
-    C["%USERPROFILE%\\.config\\stm\\"] -->|default| D
-    C -->|"fallback: %APPDATA%-derived"| E["<user>\\.config\\stm\\"]
-    E -->|"fallback: CWD"| F[".\\stm\\"]
+    B["FLOW_CONFIG_DIR env var"] -->|second priority| D
+    C["%USERPROFILE%\\.config\\flow\\"] -->|default| D
+    C -->|"fallback: %APPDATA%-derived"| E["<user>\\.config\\flow\\"]
+    E -->|"fallback: CWD"| F[".\\flow\\"]
 ```
 
-The default path `%USERPROFILE%\.config\stm\` follows the XDG Base Directory convention (`$XDG_CONFIG_HOME/appname/`), which is well-known to developers and increasingly expected on all platforms. The older `%APPDATA%` path was rejected because it hides configs inside a `Roaming` directory that most users never browse.
+The default path `%USERPROFILE%\.config\flow\` follows the XDG Base Directory convention (`$XDG_CONFIG_HOME/appname/`), which is well-known to developers and increasingly expected on all platforms. The older `%APPDATA%` path was rejected because it hides configs inside a `Roaming` directory that most users never browse.
 
 If `%USERPROFILE%` is unset (broken service account), the module falls back to `%APPDATA%` with the `\AppData\Roaming` suffix stripped, then ultimately to the current working directory. All fallbacks are logged. The directory is created on first resolution if it does not exist.
 
@@ -79,10 +79,10 @@ Defined in `src/config/lifecycle.rs`, the config system follows four phases:
 
 Creates the config directory and writes default files if they do not already exist:
 
-- `stm.toml` -- the fully-commented example template (`default-config.toml`), including its own `#:schema` header.
-- `stm-rules.toml` -- default `WindowRulesConfig` as TOML with a `#:schema` header prepended.
-- `schemas/stm-config.schema.json` -- JSON Schema for `StmConfig`.
-- `schemas/stm-rules.schema.json` -- JSON Schema for `WindowRulesConfig`.
+- `flow.toml` -- the fully-commented example template (`default-config.toml`), including its own `#:schema` header.
+- `flow-rules.toml` -- default `WindowRulesConfig` as TOML with a `#:schema` header prepended.
+- `schemas/flow-config.schema.json` -- JSON Schema for `FlowConfig`.
+- `schemas/flow-rules.schema.json` -- JSON Schema for `WindowRulesConfig`.
 
 **Existing files are never overwritten.** This makes `init_config_dir` safe to call on every daemon startup.
 
@@ -93,45 +93,45 @@ Reads TOML from disk and deserializes into the respective config struct. Load fu
 | Condition | Behavior |
 |-----------|----------|
 | File not found | `Ok(Default)` -- benign (fresh install), logged at `debug` |
-| Parse / I/O error | `Err(StmError::Config)` carrying `<path>: <reason>` -- caller decides policy |
-| Success | `Ok(parsed)`; for `stm.toml`, `validate()` logs warnings but still returns the config |
+| Parse / I/O error | `Err(FlowError::Config)` carrying `<path>: <reason>` -- caller decides policy |
+| Success | `Ok(parsed)`; for `flow.toml`, `validate()` logs warnings but still returns the config |
 
 A private generic core (`load_toml`) and a `ConfigLoadError { Missing, Io, Parse }` enum sit behind both loaders, so the file-backed read/parse path is shared rather than duplicated.
 
 #### Load-error policy (daemon vs. client)
 
-The two processes apply different policy because the detached daemon's stdout/stderr are discarded -- it cannot tell the user anything. So `stm start` runs a **pre-flight** check on the user's terminal *before* spawning `stmd`, and the daemon performs its own authoritative load as a backstop:
+The two processes apply different policy because the detached daemon's stdout/stderr are discarded -- it cannot tell the user anything. So `flow start` runs a **pre-flight** check on the user's terminal *before* spawning `flowd`, and the daemon performs its own authoritative load as a backstop:
 
-| | `stm.toml` failure | `stm-rules.toml` failure |
+| | `flow.toml` failure | `flow-rules.toml` failure |
 |---|---|---|
-| **`stm` client** (pre-flight, user terminal) | fatal: refuse to spawn | warning on stderr + continue |
-| **`stmd` daemon** (authoritative load) | fatal: `run()` Err -> `exit(1)` | non-fatal: warn + default rules |
+| **`flow` client** (pre-flight, user terminal) | fatal: refuse to spawn | warning on stderr + continue |
+| **`flowd` daemon** (authoritative load) | fatal: `run()` Err -> `exit(1)` | non-fatal: warn + default rules |
 
-Both call the **same compiled** `load_app_config`/`load_rules_config` (one crate), so the pre-flight verdict matches the daemon's -- no desync. Rules failures are non-fatal everywhere because rules are advisory and the daemon is usable with defaults. The daemon's fatal load catches a config edit landing in the spawn race window (the pipe is never created, so `stm` reports a startup timeout rather than silently starting on defaults).
+Both call the **same compiled** `load_app_config`/`load_rules_config` (one crate), so the pre-flight verdict matches the daemon's -- no desync. Rules failures are non-fatal everywhere because rules are advisory and the daemon is usable with defaults. The daemon's fatal load catches a config edit landing in the spawn race window (the pipe is never created, so `flow` reports a startup timeout rather than silently starting on defaults).
 
 ```mermaid
 flowchart TD
-    START["stm start"] --> PRE["preflight_config_check<br/>on user terminal"]
-    PRE -->|"stm.toml Err"| REFUSE["refuse: print why + where"]
-    PRE -->|"stm-rules.toml Err"| WARN["warn on stderr, continue"]
-    PRE -->|"stm.toml OK"| SPAWN["spawn stmd"]
+    START["flow start"] --> PRE["preflight_config_check<br/>on user terminal"]
+    PRE -->|"flow.toml Err"| REFUSE["refuse: print why + where"]
+    PRE -->|"flow-rules.toml Err"| WARN["warn on stderr, continue"]
+    PRE -->|"flow.toml OK"| SPAWN["spawn flowd"]
     WARN --> SPAWN
-    SPAWN --> AUTH["stmd authoritative load<br/>(same compiled loaders)"]
-    AUTH -->|"stm.toml OK"| RUN["daemon runs"]
-    AUTH -->|"stm.toml Err in race window"| DIE["exit 1: pipe never created"]
+    SPAWN --> AUTH["flowd authoritative load<br/>(same compiled loaders)"]
+    AUTH -->|"flow.toml OK"| RUN["daemon runs"]
+    AUTH -->|"flow.toml Err in race window"| DIE["exit 1: pipe never created"]
 ```
 
-`stm config reload` reuses these same loaders to hot-reload a running daemon (see §5 *Hot-reload* below).
+`flow config reload` reuses these same loaders to hot-reload a running daemon (see §5 *Hot-reload* below).
 
-After loading `stm.toml`, the daemon calls `StmConfig::validate()` to catch semantically invalid values (negative padding, `min_column_width_px` exceeding `column_width`). Validation failures produce warnings but do not prevent the daemon from running.
+After loading `flow.toml`, the daemon calls `FlowConfig::validate()` to catch semantically invalid values (negative padding, `min_column_width_px` exceeding `column_width`). Validation failures produce warnings but do not prevent the daemon from running.
 
 ### 3. Validate -- `check_config`
 
-Used by `stm config check` to validate config files without loading them into the daemon. Missing files are not errors -- they simply mean defaults will be used. Logs nothing (designed for pure CLI output).
+Used by `flow config check` to validate config files without loading them into the daemon. Missing files are not errors -- they simply mean defaults will be used. Logs nothing (designed for pure CLI output).
 
 ### 4. Use -- daemon subsystems
 
-The daemon extracts fields from `StmConfig` into the layout engine. The `ConfigEasing` enum is converted to the animation engine's `EasingStyle` in the `daemon/` layer (see `src/config/types.rs` for the design rationale on module dependency ordering).
+The daemon extracts fields from `FlowConfig` into the layout engine. The `ConfigEasing` enum is converted to the animation engine's `EasingStyle` in the `daemon/` layer (see `src/config/types.rs` for the design rationale on module dependency ordering).
 
 ```mermaid
 flowchart TD
@@ -140,13 +140,13 @@ flowchart TD
     LOAD --> USE["Daemon subsystems<br/>Layout engine, animation, registry"]
 ```
 
-### 5. Hot-reload -- `stm config reload`
+### 5. Hot-reload -- `flow config reload`
 
-`stm config reload` sends a `ReloadConfig` IPC message to the running daemon, which reloads `stm.toml` (and `stm-rules.toml`) from disk and applies the **live-reloadable** fields to the running daemon **without disturbing runtime window/workspace state**.
+`flow config reload` sends a `ReloadConfig` IPC message to the running daemon, which reloads `flow.toml` (and `flow-rules.toml`) from disk and applies the **live-reloadable** fields to the running daemon **without disturbing runtime window/workspace state**.
 
 #### Validate-before-apply
 
-The handler loads + validates the new config *before* touching any state. A broken file or a validation failure (e.g. `columns_per_screen = 0`) returns a `SocketResponse::Error` immediately -- the running daemon keeps its current config untouched, so there is nothing to roll back. The error message surfaces on the user's terminal via `stm`'s `send_command`.
+The handler loads + validates the new config *before* touching any state. A broken file or a validation failure (e.g. `columns_per_screen = 0`) returns a `SocketResponse::Error` immediately -- the running daemon keeps its current config untouched, so there is nothing to roll back. The error message surfaces on the user's terminal via `flow`'s `send_command`.
 
 #### Live-reloadable vs. structural fields
 
@@ -167,14 +167,14 @@ Reload touches *only* the geometry constants + borders + the animation config. T
 
 #### Rules reload is non-fatal
 
-`stm-rules.toml` (classification) is reloaded in the same operation via `registry.set_user_rules`. It affects only **new** windows, so it never disrupts existing layout. Consistent with startup policy, a rules failure is **non-fatal**: the daemon warns and keeps the current rules; `stm.toml` (if valid) still reloads. This is the per-file-independent policy chosen at design time.
+`flow-rules.toml` (classification) is reloaded in the same operation via `registry.set_user_rules`. It affects only **new** windows, so it never disrupts existing layout. Consistent with startup policy, a rules failure is **non-fatal**: the daemon warns and keeps the current rules; `flow.toml` (if valid) still reloads. This is the per-file-independent policy chosen at design time.
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant C as stm (client)
-    participant D as stmd (daemon)
-    U->>C: stm config reload
+    participant C as flow (client)
+    participant D as flowd (daemon)
+    U->>C: flow config reload
     C->>D: ReloadConfig (IPC)
     D->>D: load_app_config + validate (no state touched)
     alt load/validate Err
@@ -189,7 +189,7 @@ sequenceDiagram
 
 ## Application Config Fields
 
-All defaults are from `StmConfig::default()` in `src/config/types.rs`:
+All defaults are from `FlowConfig::default()` in `src/config/types.rs`:
 
 | Field / Group | Type | Default | Description |
 |---------------|------|---------|-------------|
@@ -210,7 +210,7 @@ The primary sizing mode uses `columns_per_screen`: the daemon computes the actua
 
 ## Window Classification Rules
 
-Rules are defined in `stm-rules.toml` and evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, `default_action` (default: `float`) is used. See [window registry](window-registry.md) for how rules feed the classification pipeline, and [classification & learned rules](classification.md) for the whitelist model and the machine-written `history-stm-rules.toml`.
+Rules are defined in `flow-rules.toml` and evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, `default_action` (default: `float`) is used. See [window registry](window-registry.md) for how rules feed the classification pipeline, and [classification & learned rules](classification.md) for the whitelist model and the machine-written `history-flow-rules.toml`.
 
 ### Match Criteria
 
@@ -234,14 +234,14 @@ The `exe` and `process_path` fields are case-insensitive because Windows paths a
 
 ### Default Rules
 
-`default-stm-rules.toml` in the project root ships sensible defaults for common Windows system windows (taskbar, Search UI, system dialogs, Task Manager, on-screen keyboard, Chromium legacy windows, etc.). This file is **embedded into the binary at compile time** via `include_str!` in `src/config/lifecycle.rs` -- it is never read from disk at runtime, so it cannot be accidentally deleted or corrupted by end users. Users override these defaults through their own `stm-rules.toml`, which the classification pipeline checks first.
+`default-flow-rules.toml` in the project root ships sensible defaults for common Windows system windows (taskbar, Search UI, system dialogs, Task Manager, on-screen keyboard, Chromium legacy windows, etc.). This file is **embedded into the binary at compile time** via `include_str!` in `src/config/lifecycle.rs` -- it is never read from disk at runtime, so it cannot be accidentally deleted or corrupted by end users. Users override these defaults through their own `flow-rules.toml`, which the classification pipeline checks first.
 
 ## JSON Schema Generation
 
 `src/config/schema.rs` generates JSON Schemas from the Rust type definitions using the `schemars` crate. Two schemas are produced:
 
-- `schemas/stm-config.schema.json` -- for `StmConfig`
-- `schemas/stm-rules.schema.json` -- for `WindowRulesConfig`
+- `schemas/flow-config.schema.json` -- for `FlowConfig`
+- `schemas/flow-rules.schema.json` -- for `WindowRulesConfig`
 
 These are written into a `schemas/` subdirectory inside the config directory during `init_config_dir`. Each TOML config file carries a `#:schema` comment header pointing to its schema, enabling autocomplete and validation in editors that support the taplo TOML language server (VS Code, Neovim).
 

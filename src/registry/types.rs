@@ -3,7 +3,7 @@
 //! The vocabulary types used throughout the window registry, representing the
 //! complete lifecycle of a managed window: initial classification → state
 //! transitions → removal. Every tracked window exists in exactly one
-//! [`WindowState`] at any time, which determines how stm interacts with it.
+//! [`WindowState`] at any time, which determines how flow interacts with it.
 //!
 //! # Send safety
 //!
@@ -90,8 +90,8 @@ mod hwnd_serde {
 ///   [`WindowRegistry`](super::core::WindowRegistry) methods on each hook event.
 ///   See [module-level docs](super) for the state machine diagram.
 ///
-/// - **`pre_manage_rect`** — The window's position and size when stm first
-///   saw it. Used by `stm restore` to return windows to their pre-managed
+/// - **`pre_manage_rect`** — The window's position and size when flow first
+///   saw it. Used by `flow restore` to return windows to their pre-managed
 ///   positions if the daemon exits or is stopped.
 ///
 /// - **`last_natural_size`** — The window's preferred size, updated on
@@ -106,7 +106,7 @@ mod hwnd_serde {
 /// - **`tiled_rect`** — The window's current tiled position as computed by
 ///   the layout engine's projection layer. Updated after every mutation.
 ///   `None` if the window has never been positioned by the layout engine.
-///   This is distinct from `pre_manage_rect` (the position *before* stm
+///   This is distinct from `pre_manage_rect` (the position *before* flow
 ///   managed the window) — `tiled_rect` is always the *current* position.
 ///
 /// - **`border`** — The optional overlay border drawn around this window.
@@ -141,9 +141,9 @@ pub struct Window {
     /// Current lifecycle state (tiling, floating, or ignored).
     pub state: WindowState,
 
-    /// Position and size of the window before stm ever touched it.
+    /// Position and size of the window before flow ever touched it.
     ///
-    /// Used by `stm restore` to return windows to their pre-managed positions
+    /// Used by `flow restore` to return windows to their pre-managed positions
     /// if the daemon dies.
     pub pre_manage_rect: Rect,
 
@@ -158,7 +158,7 @@ pub struct Window {
     /// Updated after every layout mutation. `None` if the window has never
     /// been positioned by the layout engine (e.g., it was just classified).
     /// This is the *live* position — distinct from `pre_manage_rect` which
-    /// is the snapshot from *before* stm managed the window.
+    /// is the snapshot from *before* flow managed the window.
     pub tiled_rect: Option<Rect>,
 
     /// Invisible border sizes for this window.
@@ -208,7 +208,7 @@ impl Window {
     /// * `title` — Window title bar text.
     /// * `class` — Win32 window class name.
     /// * `process_path` — Full path to the executable.
-    /// * `pre_manage_rect` — Window's position/size before stm manages it.
+    /// * `pre_manage_rect` — Window's position/size before flow manages it.
     /// * `initial_state` — Classified lifecycle state.
     /// * `invisible_bounds` — Per-edge invisible border sizes, measured by
     ///   comparing `GetWindowRect` against DWM extended frame bounds.
@@ -271,7 +271,7 @@ impl Window {
 /// | `Floating(Active)` | `EVENT_OBJECT_HIDE` | `Floating(Hidden)` |
 /// | `Floating(Hidden)` | `EVENT_OBJECT_SHOW` | `Floating(Active)` with `pre_manage_rect` |
 ///
-/// Note: tile ↔ float transitions are implemented via `stm dispatch set-window`
+/// Note: tile ↔ float transitions are implemented via `flow dispatch set-window`
 /// (see `docs/src/dev-guide/floating-space.md`). The remaining unimplemented
 /// directions are user-driven tiling ↔ `Ignored(Maximized|Fullscreen)` (e.g.,
 /// maximizing a tiled window); only the OS-driven recovery direction works —
@@ -283,7 +283,7 @@ pub enum WindowState {
     Tiling(TilingState),
     /// Window is floating (user-dragged or rule-assigned).
     Floating(FloatingState),
-    /// Window is ignored by stm (maximized, fullscreen, or explicit rule).
+    /// Window is ignored by flow (maximized, fullscreen, or explicit rule).
     Ignored(IgnoredReason),
 }
 
@@ -328,7 +328,7 @@ pub enum TilingState {
 
 /// Sub-state for floating (non-tiled) windows.
 ///
-/// Floating windows are positioned freely by the user. stm does not manage
+/// Floating windows are positioned freely by the user. flow does not manage
 /// their position — it only tracks whether they are active (visible) or
 /// minimized. When restored from minimize, the window returns to its
 /// `pre_manage_rect` position.
@@ -355,7 +355,7 @@ pub enum FloatingState {
 
 // ── IgnoredReason ──────────────────────────────────────────────────
 
-/// Reason why a window is ignored by stm.
+/// Reason why a window is ignored by flow.
 ///
 /// Ignored windows are excluded from all layout operations. The reason is
 /// tracked for diagnostic purposes (e.g., `cargo doc` queries can show *why*
@@ -444,7 +444,7 @@ pub enum VisibilityChange {
 ///
 /// The daemon must distinguish several "no-op" cases from a genuine recovery:
 ///
-/// - `Untracked` — the `STATECHANGE` was for a window stm does not manage
+/// - `Untracked` — the `STATECHANGE` was for a window flow does not manage
 ///   (let `NAMECHANGE`/`CREATE` handle it). Cheap HashMap miss; do nothing.
 /// - `NotApplicable` — the window is tracked but not in an OS-ignored state
 ///   (e.g. it is already tiling, or ignored by an explicit rule). Do nothing.
@@ -458,7 +458,7 @@ pub enum VisibilityChange {
 /// no-op cases) and explicit (no spurious layout churn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReclassifyResult {
-    /// The window is not tracked by stm. No action.
+    /// The window is not tracked by flow. No action.
     Untracked,
     /// The window is tracked but was not ignored due to an OS state
     /// (maximized/fullscreen) — e.g. it is already tiling, floating, or

@@ -26,9 +26,9 @@ use crate::registry::types::{FloatingState, ReclassifyResult, VisibilityChange, 
 use crate::registry::win32 as registry_win32;
 use windows::Win32::Foundation::HWND;
 
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Handle a window creation event.
     ///
     /// Pipeline:
@@ -473,11 +473,11 @@ impl ScrollTilingManager {
     /// title arrives *after* `EVENT_OBJECT_CREATE`.
     ///
     /// Some applications — most notably Windows Terminal — set their window
-    /// title asynchronously, long after `CREATE` fired and after stm's
+    /// title asynchronously, long after `CREATE` fired and after flow's
     /// pending-creations retry budget has been exhausted. Such windows are
     /// never registered and silently fall outside the tiling layout.
     ///
-    /// `NAMECHANGE` fires the moment the title lands. This handler gives stm a
+    /// `NAMECHANGE` fires the moment the title lands. This handler gives flow a
     /// second chance: if the window is **not already tracked**, it re-attempts
     /// the full creation pipeline via
     /// [`on_window_created`](Self::on_window_created).

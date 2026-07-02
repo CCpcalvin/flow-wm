@@ -1,6 +1,6 @@
-# ScrollingTilingManager
+# FlowWM
 
-`stm` (ScrollingTilingManager) is a tiling window manager for Windows 10/11
+`flow` (FlowWM) is a tiling window manager for Windows 10/11
 built around a **scrolling, infinite-horizontal-canvas** layout model. Unlike
 grid-based managers such as glazeWM or komorebi, windows occupy columns on a
 virtual canvas that can extend wider than any single monitor. The viewport
@@ -10,13 +10,13 @@ The project ships as three binaries inside a single Cargo package:
 
 | Binary | Role |
 |--------|------|
-| `stmd` | The daemon process. Runs in the background and owns all state. |
-| `stm` | The CLI client. Sends commands to the daemon, queries state, edits config. |
-| `stm-watchdog` | The crash-recovery helper. Restores windows if the daemon dies. |
+| `flowd` | The daemon process. Runs in the background and owns all state. |
+| `flow` | The CLI client. Sends commands to the daemon, queries state, edits config. |
+| `flow-watchdog` | The crash-recovery helper. Restores windows if the daemon dies. |
 
 ## How to Use This Book
 
-- **[User Guide](./user-guide/README.md)** — for people who want to *run* `stm`.
+- **[User Guide](./user-guide/README.md)** — for people who want to *run* `flow`.
   Currently a stub: features are still being finalised.
 - **[Developer Guide](./dev-guide/README.md)** — for contributors and anyone who
   wants to understand how the system works inside. Covers architecture, the
@@ -33,7 +33,7 @@ The project ships as three binaries inside a single Cargo package:
 
 ## Building From Source
 
-`stm` is built natively on Windows with the MSVC toolchain.
+`flow` is built natively on Windows with the MSVC toolchain.
 
 **Prerequisites**
 

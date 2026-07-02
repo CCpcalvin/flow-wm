@@ -1,11 +1,11 @@
-//! ScrollTilingManager constructor — performs all startup work.
+//! FlowWM constructor — performs all startup work.
 //!
-//! This module contains the [`ScrollTilingManager::new`] method which:
+//! This module contains the [`FlowWM::new`] method which:
 //!
 //! 1. Creates [`WindowRegistry`] from user and default rules.
 //! 2. Scans existing windows (populates registry before hooks start).
 //! 3. Queries monitor work area via Win32.
-//! 4. Derives layout parameters from the [`StmConfig`].
+//! 4. Derives layout parameters from the [`FlowConfig`].
 //! 5. Creates [`ScrollingSpace`] with those parameters.
 //! 6. Batch-initializes layout from existing tiling windows (sorted by x
 //!    coordinate for deterministic column assignment; viewport centered
@@ -18,9 +18,9 @@
 //!
 //! # Config Model
 //!
-//! The `app_config` parameter is already a fully-resolved [`StmConfig`]:
+//! The `app_config` parameter is already a fully-resolved [`FlowConfig`]:
 //! serde defaults (see [`config::defaults`]) fill in any fields absent from
-//! the user's `stm.toml`. No further merging is needed here.
+//! the user's `flow.toml`. No further merging is needed here.
 use std::time::Duration;
 
 use crate::animation::WindowAnimator;
@@ -28,7 +28,7 @@ use crate::animation::backend::win32::Win32Backend;
 use crate::common::{Rect, WindowId};
 use crate::config::dirs::history_rules_path_in;
 use crate::config::history::HistoryStore;
-use crate::config::types::{StmConfig, WindowRulesConfig};
+use crate::config::types::{FlowConfig, WindowRulesConfig};
 use crate::ipc::transport::PipeServer;
 use crate::layout::types::MonitorInfo;
 use crate::registry::types::{FloatingState, WindowState};
@@ -38,9 +38,9 @@ use windows::Win32::Foundation::HWND;
 
 use super::animation::animate_layout_raw;
 use super::config_derive;
-use super::types::ScrollTilingManager;
+use super::types::FlowWM;
 
-impl ScrollTilingManager {
+impl FlowWM {
     /// Construct and initialize the daemon.
     ///
     /// Performs all startup work in sequence. See the [module documentation](self)
@@ -49,7 +49,7 @@ impl ScrollTilingManager {
     /// # Arguments
     ///
     /// * `app_config` - Application settings (serde defaults + user overrides).
-    /// * `user_rules` - User-defined window rules from `stm-rules.toml`.
+    /// * `user_rules` - User-defined window rules from `flow-rules.toml`.
     /// * `default_rules` - Bundled default rules.
     /// * `config_dir` - Path to the configuration directory.
     /// * `desktop_name` - Optional test desktop name (debug builds only).
@@ -62,7 +62,7 @@ impl ScrollTilingManager {
     /// - Hook thread start failure.
     /// - Named pipe creation failure (likely another daemon running).
     pub fn new(
-        app_config: StmConfig,
+        app_config: FlowConfig,
         user_rules: WindowRulesConfig,
         default_rules: WindowRulesConfig,
         config_dir: std::path::PathBuf,
@@ -82,10 +82,10 @@ impl ScrollTilingManager {
         // 1. Create registry from rules.
         let mut registry = WindowRegistry::new(&user_rules, &default_rules);
 
-        // Load learned rules from `history-stm-rules.toml` and push them into
+        // Load learned rules from `history-flow-rules.toml` and push them into
         // the registry's classification pipeline BEFORE scanning existing
         // windows, so previously-recorded decisions apply to windows that
-        // were already open when stmd started.
+        // were already open when flowd started.
         let history = HistoryStore::load(&history_rules_path_in(&config_dir));
         if !history.is_empty() {
             log::info!("loaded {} learned rules from history", history.len());
@@ -120,7 +120,7 @@ impl ScrollTilingManager {
         // 6. Batch-initialize layout from existing tiling windows.
         //    Sort by x-coordinate so column assignment is deterministic and
         //    windows travel the shortest distance to their tiling positions.
-        //    Collect each window's pre-STM width for width-aware init.
+        //    Collect each window's pre-flow width for width-aware init.
         let (tiling_ids, widths): (Vec<WindowId>, Vec<u32>) = registry
             .tiling_window_ids_with_widths_sorted_by_x()
             .into_iter()
@@ -213,7 +213,7 @@ impl ScrollTilingManager {
         let server = PipeServer::create()
             .map_err(|e| format!("failed to create pipe (is another daemon running?): {e}"))?;
 
-        log::info!("stmd: daemon initialized successfully");
+        log::info!("flowd: daemon initialized successfully");
 
         // ---- Build the workspace stack -------------------------------------
         //
@@ -227,7 +227,7 @@ impl ScrollTilingManager {
         //
         // The count is hard-coded rather than read from config because the
         // spec fixes it at 10 for now. If this ever becomes configurable,
-        // the natural home is a `[workspaces]` table in `stm.toml` with a
+        // the natural home is a `[workspaces]` table in `flow.toml` with a
         // default of 10 (and `default-config.toml` must then be updated in
         // lockstep — see AGENTS.md).
         const WORKSPACE_COUNT: u32 = 10;
@@ -292,7 +292,7 @@ impl ScrollTilingManager {
     /// Adopt every pre-existing float-classified window into the active
     /// workspace's [`FloatingSpace`](crate::workspace::FloatingSpace).
     ///
-    /// Mirrors the float setup that [`on_window_created`](super::ScrollTilingManager::on_window_created)
+    /// Mirrors the float setup that [`on_window_created`](super::FlowWM::on_window_created)
     /// performs for a freshly-classified float, but for windows that were
     /// already open when the daemon launched. Each float is registered at its
     /// **current on-screen position** (via [`current_visible_rect`], falling

@@ -13,7 +13,7 @@
 //! windows would appear on the user's actual desktop, interfere with their work,
 //! and potentially break their layout. Switching to a dedicated test desktop
 //! keeps all test window operations invisible to the user. The typical flow:
-//! test code creates a desktop and sets the test thread onto it, spawns `stmd`
+//! test code creates a desktop and sets the test thread onto it, spawns `flowd`
 //! (which calls [`switch_to_desktop`], scans existing windows, and starts the
 //! hook thread on that desktop), runs the tests, then restores the original
 //! desktop and closes the test one.

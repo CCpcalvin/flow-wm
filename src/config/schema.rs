@@ -1,35 +1,35 @@
 //! JSON Schema generation for config editor autocomplete.
 //!
-//! Generates JSON Schemas from both [`super::types::StmConfig`] (app settings)
+//! Generates JSON Schemas from both [`super::types::FlowConfig`] (app settings)
 //! and [`super::types::WindowRulesConfig`] (window rules) via `schemars`.
 //!
 //! These schemas are used by the **taplo** TOML language server for IDE
 //! autocomplete and validation. They are written to a `schemas/` subdirectory
 //! inside the config directory when [`super::lifecycle::init_config_dir`] runs.
 
-use crate::common::{StmError, StmResult};
+use crate::common::{FlowError, FlowResult};
 use schemars::schema_for;
 
-use super::types::{StmConfig, WindowRulesConfig};
+use super::types::{FlowConfig, WindowRulesConfig};
 
-/// Generate the JSON Schema for [`StmConfig`] (app settings).
+/// Generate the JSON Schema for [`FlowConfig`] (app settings).
 ///
-/// The schema can be written to `%APPDATA%\stm\schemas\stm-config.schema.json`
+/// The schema can be written to `%APPDATA%\flow\schemas\flow-config.schema.json`
 /// for editor autocomplete support (VS Code, Neovim with taplo LSP).
-pub fn generate_config_schema() -> StmResult<String> {
-    let schema = schema_for!(StmConfig);
+pub fn generate_config_schema() -> FlowResult<String> {
+    let schema = schema_for!(FlowConfig);
     serde_json::to_string_pretty(&schema)
-        .map_err(|e| StmError::Config(format!("schema generation failed: {e}")))
+        .map_err(|e| FlowError::Config(format!("schema generation failed: {e}")))
 }
 
 /// Generate the JSON Schema for [`WindowRulesConfig`] (window rules).
 ///
-/// The schema can be written to `%APPDATA%\stm\schemas\stm-rules.schema.json`
+/// The schema can be written to `%APPDATA%\flow\schemas\flow-rules.schema.json`
 /// for editor autocomplete support on the rules file.
-pub fn generate_rules_schema() -> StmResult<String> {
+pub fn generate_rules_schema() -> FlowResult<String> {
     let schema = schema_for!(WindowRulesConfig);
     serde_json::to_string_pretty(&schema)
-        .map_err(|e| StmError::Config(format!("rules schema generation failed: {e}")))
+        .map_err(|e| FlowError::Config(format!("rules schema generation failed: {e}")))
 }
 
 #[cfg(test)]
@@ -48,7 +48,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_references_stm_config() {
+    fn schema_references_flow_config() {
         let json = generate_config_schema().expect("schema gen");
         assert!(json.contains("column_width"));
         assert!(json.contains("padding"));
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn schema_references_all_top_level_properties() {
-        // Positive: schema must enumerate every field of StmConfig
+        // Positive: schema must enumerate every field of FlowConfig
         let json = generate_config_schema().expect("schema gen");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
         let props = parsed

@@ -1,8 +1,8 @@
 # Event Pipelines
 
-Every layout change in `stm` is driven by one of two flows: a Win32 hook event
+Every layout change in `flow` is driven by one of two flows: a Win32 hook event
 (from the OS reacting to window lifecycle changes) or an IPC command (from the
-`stm` CLI). Both flows converge on the same three-stage pipeline: mutate the
+`flow` CLI). Both flows converge on the same three-stage pipeline: mutate the
 virtual layout, project to actual pixel coordinates, and animate the result.
 This chapter traces each flow end-to-end and documents the per-event behavior
 of the hook handlers.
@@ -17,28 +17,28 @@ sequenceDiagram
     participant OS as Windows OS
     participant Hook as Hook Thread
     participant Chan as mpsc Channel
-    participant STM as ScrollTilingManager
+    participant flow as FlowWM
     participant Reg as WindowRegistry
     participant Layout as ScrollingSpace
     participant Anim as WindowAnimator
 
     OS->>Hook: EVENT_OBJECT_CREATE
     Hook->>Chan: HookEvent::Created { hwnd }
-    Hook->>STM: SetEvent(hook_signal)
-    STM->>Chan: try_recv() drain
-    STM->>STM: on_window_created(hwnd)
-    STM->>Reg: handle_created(hwnd)
-    Reg-->>STM: Some(WindowId) or None
+    Hook->>flow: SetEvent(hook_signal)
+    flow->>Chan: try_recv() drain
+    flow->>flow: on_window_created(hwnd)
+    flow->>Reg: handle_created(hwnd)
+    Reg-->>flow: Some(WindowId) or None
     alt Classified as tiling
-        STM->>Layout: insert_window(window_id)
-        Layout-->>STM: AppliedLayout
-        STM->>Anim: animate_layout(applied)
+        flow->>Layout: insert_window(window_id)
+        Layout-->>flow: AppliedLayout
+        flow->>Anim: animate_layout(applied)
     else Classified as floating
-        STM->>FS: register_float(focused, centered_rect)
-        FS-->>STM: ActualLayout (floats)
-        STM->>Anim: animate_workspaces([(float_actual, 0)])
+        flow->>FS: register_float(focused, centered_rect)
+        FS-->>flow: ActualLayout (floats)
+        flow->>Anim: animate_workspaces([(float_actual, 0)])
     else Ignored / Not ready
-        Note over STM: No layout action
+        Note over flow: No layout action
     end
 ```
 
@@ -69,30 +69,30 @@ the retry budget is exhausted.
 
 ## The IPC Command Pipeline
 
-The `stm` CLI connects to the daemon's named pipe, sends a JSON command, and
+The `flow` CLI connects to the daemon's named pipe, sends a JSON command, and
 reads the response.
 
 ```mermaid
 sequenceDiagram
-    participant CLI as stm CLI
+    participant CLI as flow CLI
     participant Pipe as PipeServer
-    participant STM as ScrollTilingManager
+    participant flow as FlowWM
     participant Layout as ScrollingSpace
     participant Reg as WindowRegistry
     participant Anim as WindowAnimator
     participant Win32 as Win32 API
 
     CLI->>Pipe: ConnectNamedPipe (background thread)
-    Pipe->>STM: SetEvent(connected_event)
-    STM->>Pipe: read_message()
+    Pipe->>flow: SetEvent(connected_event)
+    flow->>Pipe: read_message()
     Note over CLI,Pipe: SocketMessage e.g. FocusLeft
-    STM->>STM: dispatch(msg)
-    STM->>Layout: active_scrolling_mut().focus(Left)
-    Layout-->>STM: Some((WindowId, Option<LayoutDiff>))
-    STM->>Win32: SetForegroundWindow(hwnd)
-    STM->>Reg: set_focused(hwnd)
-    STM->>Anim: animate_layout(diff)
-    STM->>Pipe: write_response(Ok)
+    flow->>flow: dispatch(msg)
+    flow->>Layout: active_scrolling_mut().focus(Left)
+    Layout-->>flow: Some((WindowId, Option<LayoutDiff>))
+    flow->>Win32: SetForegroundWindow(hwnd)
+    flow->>Reg: set_focused(hwnd)
+    flow->>Anim: animate_layout(diff)
+    flow->>Pipe: write_response(Ok)
     Pipe->>CLI: SocketResponse
     CLI->>Pipe: disconnect
 ```

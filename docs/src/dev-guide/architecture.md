@@ -1,43 +1,43 @@
 # Architecture
 
-ScrollingTilingManager (`stm`) is a tiling window manager for Windows built around an
+FlowWM (`flow`) is a tiling window manager for Windows built around an
 infinite-horizontal-canvas layout model. Windows occupy columns on a virtual canvas
 wider than any single monitor; the viewport slides left and right to bring them into
 view. The entire system is a single Cargo package containing three binaries that share
 one library crate, coordinated by a top-level orchestrator struct called
-`ScrollTilingManager`.
+`FlowWM`.
 
 ## Binaries
 
 | Binary | Role |
 |--------|------|
-| `stmd` | Background daemon — owns all state, manages windows, accepts IPC commands |
-| `stm` | CLI client — sends commands to the daemon over a named pipe |
-| `stm-watchdog` | Crash-recovery helper — restores windows if the daemon dies unexpectedly |
+| `flowd` | Background daemon — owns all state, manages windows, accepts IPC commands |
+| `flow` | CLI client — sends commands to the daemon over a named pipe |
+| `flow-watchdog` | Crash-recovery helper — restores windows if the daemon dies unexpectedly |
 
 All three binaries share the library crate rooted at [`src/lib.rs`](../../src/lib.rs).
 The daemon entry point is [`src/main.rs`](../../src/main.rs); the other two live in
-[`src/bin/stm.rs`](../../src/bin/stm.rs) and
-[`src/bin/stm-watchdog.rs`](../../src/bin/stm-watchdog.rs).
+[`src/bin/flow.rs`](../../src/bin/flow.rs) and
+[`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs).
 
 ## Subsystem Map
 
-Everything runs inside the `stmd` process. Two **inputs** feed events into one
-**orchestrator** — the `ScrollTilingManager` main loop — which routes each event to
+Everything runs inside the `flowd` process. Two **inputs** feed events into one
+**orchestrator** — the `FlowWM` main loop — which routes each event to
 the right **subsystem**. No subsystem knows about any other; the orchestrator is the
-only glue. The `stm` CLI and `stm-watchdog` are external binaries that share the
+only glue. The `flow` CLI and `flow-watchdog` are external binaries that share the
 library's IPC types but hold no application state.
 
 ```mermaid
 flowchart TB
     subgraph inputs["Inputs — where events enter the daemon"]
-        IPC["IPC Server<br/>stm CLI → Windows named pipe<br/>src/ipc"]
+        IPC["IPC Server<br/>flow CLI → Windows named pipe<br/>src/ipc"]
         Hook["Win32 Hook Thread<br/>background thread:<br/>SetWinEventHook → HookEvent<br/>src/registry/hooks.rs"]
     end
 
-    Daemon["ScrollTilingManager (orchestrator)<br/>main loop routes every event<br/>src/daemon"]
+    Daemon["FlowWM (orchestrator)<br/>main loop routes every event<br/>src/daemon"]
 
-    subgraph core["Subsystems — all owned by ScrollTilingManager"]
+    subgraph core["Subsystems — all owned by FlowWM"]
         Registry["WindowRegistry<br/>window state"]
         Workspace["Workspace Hierarchy<br/>Monitor → Workspace →<br/>ScrollingSpace + FloatingSpace"]
         Layout["Layout Math (pure)<br/>mutation + projection"]
@@ -63,7 +63,7 @@ the resulting `AppliedLayout` becomes the animator's move targets.
 
 ### Inputs
 
-- **IPC Server** (`src/ipc`) — accepts commands from the `stm` CLI over a Windows
+- **IPC Server** (`src/ipc`) — accepts commands from the `flow` CLI over a Windows
   named pipe, parses each `SocketMessage` frame, and hands it to the orchestrator's
   `dispatch()`.
 - **Win32 Hook Thread** (`src/registry/hooks.rs`) — a background thread that
@@ -96,32 +96,32 @@ the resulting `AppliedLayout` becomes the animator's move targets.
 
 ### Supporting subsystems
 
-- **Config** (`src/config`) — loads `stm.toml` into [`StmConfig`](../../src/config/types.rs),
+- **Config** (`src/config`) — loads `flow.toml` into [`FlowConfig`](../../src/config/types.rs),
   applies defaults (code is the single source of truth), and derives layout
   parameters at startup. See [Config & Persistence](./config-and-persistence.md).
 - **HistoryStore** (`src/config/history.rs`) — persists the user's explicit
-  `set-window` decisions (learned rules) to `history-stm-rules.toml` so the next
+  `set-window` decisions (learned rules) to `history-flow-rules.toml` so the next
   window of the same app is classified automatically. See
   [Classification & Learned Rules](./classification.md). (The recovery-snapshot
-  persistence planned for `stm-watchdog` is not yet implemented — there is no
+  persistence planned for `flow-watchdog` is not yet implemented — there is no
   separate `persist` module today.)
 
 ## Ownership Model
 
-[ScrollTilingManager](../../src/daemon/types.rs) owns every subsystem and routes
+[FlowWM](../../src/daemon/types.rs) owns every subsystem and routes
 events between them. This is the most important structural invariant in the codebase:
 **no subsystem knows about any other subsystem**. They only expose methods that take
 inputs and return outputs. The daemon is the glue.
 
 ```mermaid
 classDiagram
-    class ScrollTilingManager {
+    class FlowWM {
         +registry: WindowRegistry
         +monitors: Vec~Monitor~
         +active_monitor: usize
         +animator: WindowAnimator
         +server: PipeServer
-        +config: StmConfig
+        +config: FlowConfig
         +hook_receiver: Receiver~HookEvent~
         +shutting_down: bool
         +active_scrolling() ScrollingSpace
@@ -153,12 +153,12 @@ classDiagram
         +animate(layout)
     }
 
-    ScrollTilingManager "1" --> "1..*" Monitor
+    FlowWM "1" --> "1..*" Monitor
     Monitor "1" --> "1..*" Workspace
     Workspace "1" --> "1" ScrollingSpace
     Workspace "1" --> "1" FloatingSpace
-    ScrollTilingManager "1" --> "1" WindowRegistry
-    ScrollTilingManager "1" --> "1" WindowAnimator
+    FlowWM "1" --> "1" WindowRegistry
+    FlowWM "1" --> "1" WindowAnimator
 ```
 
 The daemon accesses the active scrolling space through accessor chains:
@@ -205,6 +205,6 @@ The two big ideas to internalise before reading any source file:
 1. **The layout pipeline is pure.** `src/layout/` has zero Win32 dependencies and is
    fully unit-testable on any platform. `src/workspace/scrolling_space.rs` is the
    orchestrator that consumes it.
-2. **The daemon is the single coordinator.** `ScrollTilingManager` owns every
+2. **The daemon is the single coordinator.** `FlowWM` owns every
    subsystem and routes events between them. No subsystem knows about any other
    subsystem.

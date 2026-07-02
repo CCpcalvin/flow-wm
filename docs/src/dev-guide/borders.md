@@ -1,6 +1,6 @@
 # Borders
 
-STM draws komorebi/Hyprland-style colored borders around managed windows using
+flow draws komorebi/Hyprland-style colored borders around managed windows using
 **click-through, layered overlay windows**. Each border is seated *just above
 its target window* in z-order (not globally topmost), so overlapping windows —
 floats and ignored windows — correctly cover it. Each managed window can own a
@@ -41,7 +41,7 @@ rect includes invisible borders — see [Coordinate Spaces](#coordinate-spaces))
 ### Why Not a Private Hook?
 
 The previous design gave `BorderManager` its own background thread
-(`stm-borders-hook`) that subscribed to `EVENT_OBJECT_LOCATIONCHANGE` for *all*
+(`flow-borders-hook`) that subscribed to `EVENT_OBJECT_LOCATIONCHANGE` for *all*
 desktop windows. Three problems motivated its removal:
 
 1. **Wasted work.** Two `SetWinEventHook` registrations for the same event in
@@ -403,7 +403,7 @@ attribute can't be read. Microsoft does not document the exact pixel radii;
 
 ## Configuration
 
-Borders are configured under the `[borders]` section in `stm.toml`:
+Borders are configured under the `[borders]` section in `flow.toml`:
 
 ```toml
 [borders]

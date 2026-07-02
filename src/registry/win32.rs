@@ -168,7 +168,7 @@ pub fn get_class_name(hwnd: HWND) -> Result<String, String> {
 
 /// Retrieves the window's screen rectangle as a [`Rect`].
 ///
-/// Converts from Win32's `RECT` (left, top, right, bottom) to stm's
+/// Converts from Win32's `RECT` (left, top, right, bottom) to flow's
 /// `Rect` (x, y, width, height).
 ///
 /// # Arguments
@@ -226,7 +226,7 @@ pub fn get_window_rect(hwnd: HWND) -> Result<Rect, String> {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::get_extended_frame_bounds;
+/// use flow_wm::registry::win32::get_extended_frame_bounds;
 /// use windows::Win32::Foundation::HWND;
 /// use windows::core::PCWSTR;
 /// // hwnd would come from EnumWindows or a hook event
@@ -331,11 +331,11 @@ pub fn get_window_corner_preference(hwnd: HWND) -> Option<CornerPreference> {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::get_invisible_bounds;
+/// use flow_wm::registry::win32::get_invisible_bounds;
 /// use windows::Win32::Foundation::HWND;
 /// let bounds = get_invisible_bounds(HWND(std::ptr::null_mut()));
 /// // For an invalid HWND, returns zero bounds (fail-open)
-/// assert_eq!(bounds, scrolling_tiling_manager::common::InvisibleBounds::zero());
+/// assert_eq!(bounds, flow_wm::common::InvisibleBounds::zero());
 /// ```
 #[must_use]
 pub fn get_invisible_bounds(hwnd: HWND) -> InvisibleBounds {
@@ -482,7 +482,7 @@ pub fn get_foreground_window() -> Option<isize> {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::set_foreground_window;
+/// use flow_wm::registry::win32::set_foreground_window;
 /// // Assume we have a window handle from registry
 /// let success = set_foreground_window(0x12345678);
 /// if success {
@@ -565,7 +565,7 @@ pub fn set_foreground_window(hwnd_val: isize) -> bool {
 /// This function returns as soon as the message is *queued*; it does **not**
 /// wait for the window to actually disappear. When the application eventually
 /// destroys the window in response to `WM_CLOSE`, Win32 fires
-/// `EVENT_OBJECT_DESTROY`, which stm's WinEvent hook turns into a
+/// `EVENT_OBJECT_DESTROY`, which flow's WinEvent hook turns into a
 /// [`Destroyed`](crate::registry::hooks::HookEvent::Destroyed) event. The
 /// daemon's event loop then removes the window from the registry and the
 /// layout engine automatically (and animates the gap closing). Callers must
@@ -588,7 +588,7 @@ pub fn set_foreground_window(hwnd_val: isize) -> bool {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::close_window;
+/// use flow_wm::registry::win32::close_window;
 /// // Ask the currently focused window to close (gentle, like clicking ✕).
 /// let queued = close_window(0x000C_1234);
 /// if queued {
@@ -656,7 +656,7 @@ pub fn close_window(hwnd_val: isize) -> bool {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::set_window_rect;
+/// use flow_wm::registry::win32::set_window_rect;
 /// // Instantly snap a window to (0, -1084) — the parking slot of a workspace
 /// // parked one unit above a 1080-tall monitor.
 /// let ok = set_window_rect(0x000C_1234, 0, -1084, 960, 1080);
@@ -1085,7 +1085,7 @@ pub struct MonitorGeometry {
 /// # Example
 ///
 /// ```no_run
-/// use scrolling_tiling_manager::registry::win32::get_primary_monitor_info;
+/// use flow_wm::registry::win32::get_primary_monitor_info;
 /// let geo = get_primary_monitor_info().expect("monitor info");
 /// println!(
 ///     "Physical {}x{}, work area {}x{}",

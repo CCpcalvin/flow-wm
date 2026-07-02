@@ -1,6 +1,6 @@
 # Developer Guide
 
-This guide is the canonical narrative reference for `stm`. It explains *why*
+This guide is the canonical narrative reference for `flow`. It explains *why*
 the system is shaped the way it is, *how* the pieces fit together, and *where*
 to look in the source for each concern.
 
@@ -21,12 +21,12 @@ context exists.
 
 1. **[Architecture](./architecture.md)** — the subsystem map and the
    single-orchestrator model. Start here.
-2. **[Threading Model](./threading-model.md)** — why `stm` uses no
+2. **[Threading Model](./threading-model.md)** — why `flow` uses no
    `Arc<Mutex>` and how the hook thread talks to the IPC thread.
 3. **[Event Pipelines](./event-pipelines.md)** — the two flows that drive every
    layout change: Win32 hooks and IPC commands.
 4. **[Layout Overview](./layout/overview.md)** — the infinite canvas, the
-   camera model, and the Virtual → Actual split. The heart of `stm`.
+   camera model, and the Virtual → Actual split. The heart of `flow`.
 5. **[Mutation Pipeline](./layout/pipeline.md)** — how every command flows
    through `mutate → project → animate`.
 6. The rest in any order: [Workspace](./workspace.md),
@@ -45,19 +45,19 @@ context exists.
 ## Repository Layout
 
 ```text
-stm/
+flow/
 ├── Cargo.toml
 ├── build.rs
 ├── default-config.toml              # hand-written EXAMPLE (not read at runtime)
-├── default-stm-rules.toml           # bundled default window rules (include_str!)
+├── default-flow-rules.toml           # bundled default window rules (include_str!)
 ├── docs/                            # this mdBook
 ├── schemas/                         # generated JSON schemas for config/rules
 ├── src/
-│   ├── main.rs                      # stmd entry point
+│   ├── main.rs                      # flowd entry point
 │   ├── lib.rs                       # shared library
 │   ├── bin/
-│   │   ├── stm.rs                   # CLI client
-│   │   └── stm-watchdog.rs          # crash-recovery helper
+│   │   ├── flow.rs                   # CLI client
+│   │   └── flow-watchdog.rs          # crash-recovery helper
 │   ├── common/                      # shared types: Rect, WindowId, Direction, errors
 │   ├── config/                      # TOML loading, schema gen, dirs, lifecycle
 │   ├── registry/                    # WindowRegistry: OS sync, classification, hooks
@@ -65,7 +65,7 @@ stm/
 │   ├── workspace/                   # Monitor → Workspace → Scrolling/Floating spaces
 │   ├── animation/                   # embedded window-animation crate
 │   ├── ipc/                         # named-pipe transport + SocketMessage types
-│   └── daemon/                      # ScrollTilingManager orchestrator + submodules
+│   └── daemon/                      # FlowWM orchestrator + submodules
 └── tests/                           # integration tests
 ```
 
@@ -76,6 +76,6 @@ The two big ideas to internalise before reading any source file:
    orchestrates `mutate → project → animate` and is the only thing that touches
    all three layers.
 2. **The daemon is the single coordinator.**
-   [`ScrollTilingManager`](../../src/daemon/types.rs) owns every subsystem and
+   [`FlowWM`](../../src/daemon/types.rs) owns every subsystem and
    routes events between them. No subsystem knows about any other subsystem —
    they only expose methods that take inputs and return outputs.
