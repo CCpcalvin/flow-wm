@@ -211,12 +211,14 @@ impl ScrollTilingManager {
         }
     }
 
-    /// Close the currently focused window.
+    /// Close the OS-foreground window.
     ///
-    /// Resolves the focused [`WindowId`](crate::common::WindowId) from the
-    /// layout engine and asks Win32 to close that window gently via
-    /// `WM_CLOSE` (see [`registry_win32::close_window`] for why this is
-    /// preferred over `DestroyWindow`).
+    /// Resolves the target from the registry's OS-focus tracker
+    /// (`registry.focused()`), the same authority used by `set-window`, so a
+    /// floating foreground window is closed rather than the stale per-space
+    /// tiling cursor. Asks Win32 to close it gently via `WM_CLOSE` (see
+    /// [`registry_win32::close_window`] for why this is preferred over
+    /// `DestroyWindow`). See (`docs/src/dev-guide/floating-space.md`).
     ///
     /// # Why No Layout Mutation Here?
     ///
@@ -237,7 +239,7 @@ impl ScrollTilingManager {
     /// - `WM_CLOSE` could not be queued (the window vanished mid-call,
     ///   etc.) → error.
     fn dispatch_close_window(&mut self) -> SocketResponse {
-        let Some(focused) = self.active_scrolling().last_focused_window() else {
+        let Some(focused) = self.registry.focused() else {
             return SocketResponse::Error {
                 message: "no focused window to close".into(),
             };
