@@ -23,12 +23,30 @@ match = { class = "Shell_TrayWnd" }
 action = "ignore"
 
 # WinUI / XAML Islands desktop content bridge — an invisible helper window
-# (title "DesktopWindowXamlSource") created by WinUI 3 / XAML Islands hosts.
-# The Windows 11 Start Menu surface is one of these, hosted by explorer.exe.
-# It passes stm's visibility/Alt+Tab/owner gates but is never a real app
-# window the user would want tiled, so ignore it by class (race-free).
+# (title "DesktopWindowXamlSource") created by WinUI 3 / XAML Islands hosts
+# (Settings, Photos, the Run box, …). It passes stm's visibility/Alt+Tab/owner
+# gates but is never a real app window the user would want tiled, so ignore it
+# by class (race-free).
 [[rules]]
 match = { class = "Windows.UI.Composition.DesktopWindowContentBridge" }
+action = "ignore"
+
+# Windows 11 Start Menu host. The actual start menu runs in
+# StartMenuExperienceHost.exe (NOT ShellExperienceHost.exe below, which hosts
+# the older shell surfaces). Its popup surface is a top-level
+# `Xaml_WindowedPopupClass` window titled "PopupHost" that passes every gate,
+# so without this rule it is classified Floating and gets a border drawn around
+# the start menu.
+[[rules]]
+match = { exe = "StartMenuExperienceHost.exe" }
+action = "ignore"
+
+# XAML windowed-popups — the class used by the Start Menu popup, Action Center
+# flyouts, jump lists, and other OS-level XAML popups. All are transient system
+# surfaces, never app windows. Ignored by class (race-free) so any host gets
+# covered regardless of its exe name.
+[[rules]]
+match = { class = "Xaml_WindowedPopupClass" }
 action = "ignore"
 
 # Windows Search overlay
@@ -36,7 +54,8 @@ action = "ignore"
 match = { exe = "SearchUI.exe" }
 action = "ignore"
 
-# Start Menu
+# Older shell-experience host (Action Center / Cortana surfaces). The modern
+# Start Menu is hosted by StartMenuExperienceHost.exe, handled above.
 [[rules]]
 match = { exe = "ShellExperienceHost.exe" }
 action = "ignore"
@@ -102,9 +121,34 @@ action = "ignore"
 
 # ── Task Manager ────────────────────────────────────────────────────
 
+# Task Manager's main window — the real top-level surface the user interacts
+# with. Float it so it stays where the user places it instead of entering the
+# tiling layout. Scoped to its class so the auxiliary helper windows below do
+# not also match this rule.
 [[rules]]
-match = { exe = "Taskmgr.exe" }
+match = { exe = "Taskmgr.exe", class = "TaskManagerWindow" }
 action = "float"
+
+# Task Manager auxiliary helper windows. The WinUI Task Manager (Taskmgr.exe)
+# creates several internal surfaces besides its main window: an acrylic
+# backdrop ("Glass Window", class GlassWindow), a "Filter Control Glass
+# Window", and a "TaskManagerMain" native HWND host (class NativeHWNDHost).
+# Each passes stm's visibility/Alt+Tab/owner gates — they are top-level,
+# titled, and owner-less — yet none is a window the user would want floated or
+# tiled. Without these rules every helper registers as Floating and gets its
+# own border overlay + a 180ms animation when Task Manager opens. Scoped to exe
+# so a legitimate app reusing one of these classes is unaffected.
+[[rules]]
+match = { exe = "Taskmgr.exe", class = "GlassWindow" }
+action = "ignore"
+
+[[rules]]
+match = { exe = "Taskmgr.exe", class = "FilterControlGlassWindow" }
+action = "ignore"
+
+[[rules]]
+match = { exe = "Taskmgr.exe", class = "NativeHWNDHost" }
+action = "ignore"
 
 # ── Accessibility ───────────────────────────────────────────────────
 
