@@ -32,6 +32,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 use flow_wm::common::Direction;
 use flow_wm::config;
@@ -670,13 +671,36 @@ fn cmd_dispatch_set_window(mode: WindowMode) -> Result<(), String> {
     send_command(msg, &format!("window set to {label}"))
 }
 
+/// Grant the daemon one-shot foreground-activation permission via
+/// `AllowSetForegroundWindow(ASFW_ANY)`, so its next `SetForegroundWindow`
+/// isn't refused by the foreground lock. Must be re-granted per command (the
+/// grant is consumed by the next foreground change or auto-expires after a few
+/// seconds; there is no unset API).
+///
+/// Failures are intentionally ignored (`let _ =`): a failed grant still leaves
+/// the daemon's `AttachThreadInput` fallback (in
+/// `registry::win32::set_foreground_window`) available, and erroring here
+/// would break the user's hotkey flow for a non-fatal permission.
+///
+/// See (`docs/src/dev-guide/ipc-and-watchdog.md`) for the foreground-lock
+/// diagnosis and why this is the documented PowerToys pattern.
+fn grant_foreground_permission() {
+    // ASFW_ANY == (DWORD)-1 == 0xFFFFFFFF — any thread may take the foreground.
+    let _ = unsafe { AllowSetForegroundWindow(u32::MAX) };
+}
+
 /// Send a command to the daemon and print a success message on Ok.
 ///
-/// A shared helper used by `cmd_stop` and `cmd_config_reload` (and other
-/// fire-and-forget IPC commands). Handles the three response variants:
+/// A shared helper used by `cmd_stop`, `cmd_config_reload`, and every
+/// dispatch command. Before sending, it grants the daemon one-shot foreground
+/// activation permission (see [`grant_foreground_permission`]) so the
+/// daemon's `SetForegroundWindow` calls aren't blocked by the Windows
+/// foreground lock. Handles the three response variants:
 /// [`SocketResponse::Ok`], [`SocketResponse::Error`], and
 /// [`SocketResponse::Data`].
 fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
+    grant_foreground_permission();
+
     let response =
         transport::send_message(&msg).map_err(|e| format!("failed to send command: {e}"))?;
 
@@ -811,6 +835,19 @@ mod tests {
     use super::*;
 
     use clap::Parser;
+
+    // --- Win32 foreground-permission helper ---
+
+    #[test]
+    fn grant_foreground_permission_does_not_panic() {
+        // Smoke test: the helper wraps an unsafe Win32 call that returns a
+        // result code and never panics. End-to-end effectiveness (the daemon's
+        // `SetForegroundWindow` now succeeds) is validated manually by
+        // dispatching focus with the daemon running. This test guards against
+        // future changes that alter the call path or the ASFW_ANY constant in a
+        // way that breaks compilation of this path.
+        grant_foreground_permission();
+    }
 
     // --- Positive: each subcommand parses correctly ---
 
