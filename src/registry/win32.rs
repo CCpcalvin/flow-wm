@@ -33,7 +33,7 @@ use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
     DWMWA_WINDOW_CORNER_PREFERENCE, DwmGetWindowAttribute,
@@ -493,38 +493,79 @@ pub fn get_foreground_window() -> Option<isize> {
 pub fn set_foreground_window(hwnd_val: isize) -> bool {
     let target_hwnd = HWND(hwnd_val as *mut _);
 
-    // Get the current foreground window
+    // Get the current foreground window.
     let foreground_hwnd = unsafe { GetForegroundWindow() };
 
-    // If there's no foreground window, try SetForegroundWindow directly
-    // (may succeed if no foreground lock exists)
+    // No foreground window means no foreground lock to defeat — try the
+    // direct call. Benign (happens at startup or with no app focused),
+    // so no log here.
     if foreground_hwnd.0.is_null() {
         let result = unsafe { SetForegroundWindow(target_hwnd) };
         return result.as_bool();
     }
 
-    // Get the thread IDs for the foreground window and our thread
-    let mut foreground_thread_id: u32 = 0;
-    unsafe { GetWindowThreadProcessId(foreground_hwnd, Some(&mut foreground_thread_id)) };
+    // GetWindowThreadProcessId's RETURN value is the THREAD ID of the
+    // foreground window's GUI thread; the out-parameter receives the PID.
+    // AttachThreadInput takes thread IDs in BOTH arguments — passing the
+    // PID as `idAttachTo` fails with ERROR_INVALID_THREAD_ID, which
+    // silently defeated the attach and left SetForegroundWindow at the
+    // mercy of the foreground lock (the previous bug).
+    let mut foreground_pid: u32 = 0;
+    let foreground_thread_id =
+        unsafe { GetWindowThreadProcessId(foreground_hwnd, Some(&mut foreground_pid)) };
     if foreground_thread_id == 0 {
-        // Failed to get foreground thread ID — try direct SetForegroundWindow
+        log::warn!(
+            "set_foreground_window: GetWindowThreadProcessId returned thread_id 0 for foreground hwnd {:?} (Win32 error {:#x}); falling back to direct SetForegroundWindow",
+            foreground_hwnd,
+            unsafe { GetLastError() }.0
+        );
         let result = unsafe { SetForegroundWindow(target_hwnd) };
         return result.as_bool();
     }
 
     let our_thread_id = unsafe { GetCurrentThreadId() };
 
-    // Attach our thread to the foreground thread
-    let _ = unsafe { AttachThreadInput(our_thread_id, foreground_thread_id, true) };
+    // Attach our input queue to the foreground thread's so that
+    // SetForegroundWindow is permitted under the foreground lock. Without
+    // this attach the call only succeeds when AllowSetForegroundWindow
+    // granted the daemon one-shot permission (the CLI requests it before
+    // every IPC dispatch — see src/bin/flow.rs).
+    let attach_ok =
+        unsafe { AttachThreadInput(our_thread_id, foreground_thread_id, true) }.as_bool();
+    if !attach_ok {
+        log::warn!(
+            "set_foreground_window: AttachThreadInput(true) failed for our_thread={our_thread_id} fg_thread={foreground_thread_id} fg_pid={foreground_pid} (Win32 error {:#x})",
+            unsafe { GetLastError() }.0
+        );
+    }
 
-    // Compute success first, then detach in all paths
+    // Compute success first, then detach in all paths.
     let success = unsafe { SetForegroundWindow(target_hwnd) }.as_bool();
+    if !success {
+        log::warn!(
+            "set_foreground_window: SetForegroundWindow failed for hwnd {hwnd_val} (Win32 error {:#x})",
+            unsafe { GetLastError() }.0
+        );
+    }
 
-    // Also bring the window to top of Z-order
+    // Bring the window to the top of the Z-order. Failure here is
+    // non-fatal — the window still receives focus if SetForegroundWindow
+    // succeeded, so we don't log.
     let _ = unsafe { BringWindowToTop(target_hwnd) };
 
-    // Always detach, even if SetForegroundWindow failed
-    let _ = unsafe { AttachThreadInput(our_thread_id, foreground_thread_id, false) };
+    // Always detach when we attached, even if SetForegroundWindow failed.
+    // Detach failure would leak the attach — rare enough that a warn log
+    // is sufficient.
+    if attach_ok {
+        let detach_ok =
+            unsafe { AttachThreadInput(our_thread_id, foreground_thread_id, false) }.as_bool();
+        if !detach_ok {
+            log::warn!(
+                "set_foreground_window: AttachThreadInput(false) cleanup failed for our_thread={our_thread_id} fg_thread={foreground_thread_id} (Win32 error {:#x})",
+                unsafe { GetLastError() }.0
+            );
+        }
+    }
 
     success
 }
