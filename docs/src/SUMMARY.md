@@ -11,6 +11,7 @@
 # Developer Guide
 
 - [How to Read This Book](./dev-guide/README.md)
+- [Building from Source](./dev-guide/building-from-source.md)
 - [Architecture](./dev-guide/architecture.md)
 - [Threading Model](./dev-guide/threading-model.md)
 - [Event Pipelines](./dev-guide/event-pipelines.md)

@@ -19,6 +19,8 @@ context exists.
 
 ## Suggested Reading Order
 
+If you haven't built FlowWM yet, start with [Building from Source](./building-from-source.md).
+
 1. **[Architecture](./architecture.md)** — the subsystem map and the
    single-orchestrator model. Start here.
 2. **[Threading Model](./threading-model.md)** — why `flow` uses no

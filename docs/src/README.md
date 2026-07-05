@@ -33,23 +33,8 @@ The project ships as three binaries inside a single Cargo package:
 
 ## Building From Source
 
-`flow` is built natively on Windows with the MSVC toolchain.
-
-**Prerequisites**
-
-1. **Rust** (stable, MSVC target) — install via [rustup](https://rustup.rs/):
-   ```powershell
-   rustup default stable-x86_64-pc-windows-msvc
-   ```
-2. **Visual Studio Build Tools** — "Desktop development with C++" workload.
-
-**Build**
-
-```powershell
-cargo build                                   # debug
-cargo build --release                         # optimised
-cargo test                                    # tests
-cargo clippy -- -D warnings                   # lint
-cargo doc --no-deps --open                    # API docs
-mdbook build docs                             # this book
-```
+For the full build walkthrough — prerequisites, MSVC setup, cloning, and the
+contributor gates (`cargo test` / `clippy` / `fmt`, `mdbook build`,
+`cargo doc`) — see the dedicated
+[Building from Source](./dev-guide/building-from-source.md) page in the
+Developer Guide.
