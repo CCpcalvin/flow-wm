@@ -705,12 +705,24 @@ impl FlowWM {
     /// (`on_focus_changed`) calls [`switch_workspace_layout`] directly — it
     /// must not re-push foreground because the OS already chose the window.
     ///
-    /// Like `dispatch_focus`, this does **not** call `set_focused`: the
-    /// `EVENT_SYSTEM_FOREGROUND` fired by `set_foreground_window` is consumed
-    /// by `on_focus_changed` (the single sink), which updates the registry
-    /// focus and recolors the prev/new borders. Setting focus eagerly here
-    /// would poison `on_focus_changed`'s previous-focus capture and leave the
-    /// old workspace's focused border stuck on the Focused color.
+    /// Like `dispatch_focus`, the non-empty path does **not** call
+    /// `set_focused`: the `EVENT_SYSTEM_FOREGROUND` fired by
+    /// `set_foreground_window` is consumed by `on_focus_changed` (the single
+    /// sink), which updates the registry focus and recolors the prev/new
+    /// borders. Setting focus eagerly here would poison `on_focus_changed`'s
+    /// previous-focus capture and leave the old workspace's focused border
+    /// stuck on the Focused color.
+    ///
+    /// # Empty destination
+    ///
+    /// When the destination has no windows (`last_focused_window()` is
+    /// `None`), there is nothing to foreground. Pushing the OS foreground to
+    /// the desktop ("Progman") window — the Win32 idiom for clicking empty
+    /// desktop space — ensures keystrokes no longer reach the previous
+    /// workspace's window. The desktop is untracked, so `on_focus_changed`'s
+    /// `set_focused` ignores it and would leave the registry's `focused`
+    /// field (and the old window's border) stale; this path therefore calls
+    /// `clear_focused` and recolors the previous border explicitly.
     fn switch_active_workspace(
         &mut self,
         target_id: WorkspaceId,
@@ -729,6 +741,22 @@ impl FlowWM {
             if !registry_win32::set_foreground_window(target_hwnd) {
                 log::warn!(
                     "switch_active_workspace: SetForegroundWindow failed for hwnd {target_hwnd}"
+                );
+            }
+        } else {
+            // Empty destination: no window to foreground. Capture the previous
+            // focus BEFORE clearing so its border can be recolored to unfocused.
+            let prev_focus = self.registry.focused().map(|id| id.0);
+            self.registry.clear_focused();
+            if let Some(prev) = prev_focus {
+                self.refresh_border_for(prev);
+            }
+            // Push OS foreground to the desktop so keystrokes don't keep going
+            // to the previous workspace's window. The desktop is untracked, so
+            // on_focus_changed will early-return and cannot do this for us.
+            if !registry_win32::clear_foreground_window() {
+                log::warn!(
+                    "switch_active_workspace: clear_foreground_window failed (could not focus desktop)"
                 );
             }
         }

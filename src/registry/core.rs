@@ -349,6 +349,20 @@ impl WindowRegistry {
         self.focused.map(crate::common::WindowId)
     }
 
+    /// Clears the tracked OS-focus to `None`.
+    ///
+    /// Unlike [`set_focused`](Self::set_focused), which only accepts tracked
+    /// windows, this unconditionally drops the focus so the border subsystem
+    /// renders no window as focused. Used when switching to an empty workspace:
+    /// the OS foreground is pushed to the desktop (untracked), so `set_focused`
+    /// would otherwise leave a stale focus behind and keep the previous
+    /// window's border colored as focused.
+    pub fn clear_focused(&mut self) {
+        if self.focused.take().is_some() {
+            log::debug!("focus cleared");
+        }
+    }
+
     /// Replace the classification pipeline's learned-rules layer.
     ///
     /// See (`docs/src/dev-guide/classification.md`).
@@ -1755,6 +1769,59 @@ mod tests {
 
         reg.remove_window(42);
         assert!(reg.focused().is_none());
+    }
+
+    // ── clear_focused tests ──────────────────────────────────────────
+    //
+    // clear_focused is the explicit-focus-clear primitive used when switching
+    // to an empty workspace: the OS foreground is pushed to the (untracked)
+    // desktop, so set_focused cannot clear the registry focus for us. Like
+    // set_focused it is pure registry state — no Win32 — so it is fully
+    // unit-testable using the same insert_test_window helper.
+
+    #[test]
+    fn clear_focused_drops_tracked_focus() {
+        // Positive: after focusing a tracked window, clear_focused must make
+        // focused() return None. This is the registry-side half of the
+        // empty-workspace focus-clear (the OS half is clear_foreground_window).
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+        insert_test_window(
+            &mut reg,
+            42,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        reg.set_focused(42);
+        assert_eq!(reg.focused(), Some(crate::common::WindowId(42)));
+
+        reg.clear_focused();
+        assert!(reg.focused.is_none(), "private field must be cleared");
+        assert!(reg.focused().is_none(), "public getter must report None");
+    }
+
+    #[test]
+    fn clear_focused_is_safe_noop_when_already_none() {
+        // Negative: clearing focus when no window is focused must be a safe
+        // no-op (no panic, focus stays None). This is the empty-destination
+        // edge case when switching between two empty workspaces.
+        let (user, default) = default_rules();
+        let mut reg = WindowRegistry::new(&user, &default);
+
+        // Empty registry — focus is already None.
+        assert!(reg.focused.is_none());
+        reg.clear_focused();
+        assert!(reg.focused.is_none());
+        assert!(reg.focused().is_none());
+
+        // Also safe on a non-empty registry with no focus set (e.g. right
+        // after init scan, before any FOREGROUND event arrives).
+        insert_test_window(
+            &mut reg,
+            7,
+            WindowState::Tiling(TilingState::Active { col: 0, row: 0 }),
+        );
+        reg.clear_focused();
+        assert!(reg.focused.is_none());
     }
 
     // ── get_window_mut tests ─────────────────────────────────────────

@@ -43,11 +43,11 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
-    GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-    SWP_NOZORDER, SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetShellWindow,
+    GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN,
+    SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -428,6 +428,25 @@ pub fn get_foreground_window() -> Option<isize> {
     }
 }
 
+/// Returns the shell (desktop / "Progman") window handle, or `None`.
+///
+/// Wraps `GetShellWindow()`. The shell window is the "defocus" target —
+/// foregrounding it is the Win32 idiom for clicking empty desktop space (no
+/// app receives keystrokes). See [`clear_foreground_window`].
+///
+/// # Returns
+///
+/// `Some(isize)` — the shell window handle, or `None` if the handle is null.
+#[must_use]
+pub fn get_shell_window() -> Option<isize> {
+    let hwnd = unsafe { GetShellWindow() };
+    if hwnd.0.is_null() {
+        None
+    } else {
+        Some(hwnd.0 as isize)
+    }
+}
+
 /// Forcefully set a window as the foreground (active) window.
 ///
 /// Windows restricts `SetForegroundWindow` to the process that currently owns
@@ -568,6 +587,31 @@ pub fn set_foreground_window(hwnd_val: isize) -> bool {
     }
 
     success
+}
+
+/// Remove the current foreground window by foregrounding the desktop.
+///
+/// Windows has no "clear foreground" API; foregrounding the shell (Progman)
+/// window is the standard idiom for "click empty desktop" — no application
+/// receives keyboard input. Used when switching to an empty workspace so
+/// keystrokes do not leak to the previously focused window.
+///
+/// Resolves the shell window via [`get_shell_window`] and pushes it to the
+/// foreground via [`set_foreground_window`] (reusing its `AttachThreadInput`
+/// foreground-lock bypass).
+///
+/// # Returns
+///
+/// `true` if the shell window was resolved and `SetForegroundWindow`
+/// succeeded, `false` otherwise (no shell window, or the call was defeated
+/// by the foreground lock).
+#[must_use]
+pub fn clear_foreground_window() -> bool {
+    let Some(shell_hwnd) = get_shell_window() else {
+        log::warn!("clear_foreground_window: GetShellWindow returned null");
+        return false;
+    };
+    set_foreground_window(shell_hwnd)
 }
 
 /// Politely ask a window to close itself by posting `WM_CLOSE` to it.
@@ -1259,6 +1303,32 @@ mod tests {
     fn set_foreground_window_has_bool_return_type() {
         let fn_ptr: fn(isize) -> bool = set_foreground_window;
         let _ = fn_ptr; // Ensure the function pointer is not null (compilation check).
+    }
+
+    /// Positive: verify that `get_shell_window` has the `fn() -> Option<isize>`
+    /// signature, mirroring [`get_foreground_window`].
+    ///
+    /// We cannot exercise the desktop HWND dependency without a real Windows
+    /// desktop session (GetShellWindow returns the Progman window), so this
+    /// is a compile-time signature check matching the pattern used by
+    /// [`set_foreground_window`](super::set_foreground_window).
+    #[test]
+    fn get_shell_window_has_option_isize_return_type() {
+        let fn_ptr: fn() -> Option<isize> = get_shell_window;
+        let _ = fn_ptr; // Compile-time signature check.
+    }
+
+    /// Positive: verify that `clear_foreground_window` has the `fn() -> bool`
+    /// signature, mirroring [`set_foreground_window`]'s bool return contract
+    /// (true = success, false = no shell window or SetForegroundWindow failed).
+    ///
+    /// We cannot exercise the desktop HWND dependency without a real Windows
+    /// desktop session, so this is a compile-time signature check matching
+    /// the pattern used by the other Win32 foreground wrappers.
+    #[test]
+    fn clear_foreground_window_has_bool_return_type() {
+        let fn_ptr: fn() -> bool = clear_foreground_window;
+        let _ = fn_ptr; // Compile-time signature check.
     }
 
     // --- close_window tests ---
