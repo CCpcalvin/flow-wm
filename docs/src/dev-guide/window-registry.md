@@ -155,7 +155,9 @@ flowchart TB
         F -- Yes --> SKIP
         F -- No --> G{"Has owner?<br/>(GW_OWNER != null)"}
         G -- Yes --> SKIP
-        G -- No --> H["get_window_info()"]
+        G -- No --> G2{"WS_CHILD?<br/>(style bit)"}
+        G2 -- Yes --> SKIP
+        G2 -- No --> H["get_window_info()"]
     end
 ```
 
@@ -182,7 +184,26 @@ Each filter exists for a specific reason:
    rendered on screen.
 
 5. **No owner** (`GetWindow(GW_OWNER)`) — owned windows are dialogs or popups
-   that belong to their parent. They should not be independently tiled.
+   that belong to their owner. They should not be independently tiled.
+6. **Not a child window** (`WS_CHILD` style bit via `GetWindowLongW(GWL_STYLE)`) —
+   child windows are embedded controls (buttons, labels, the Inno Setup `TNew*`
+   family, the Win32 `Button`/`Static` controls) that live inside another
+   window's client area. They have no independent frame and cannot be tiled.
+   This check catches them structurally, without needing per-class rules in
+   `default-flow-rules.toml`.
+
+   The check is deliberately narrow: it does not catch reparented popups
+   (`WS_POPUP` + `SetParent`) or owned top-level windows, both of which may be
+   legitimate tiling candidates (e.g. a DAW's MIDI editor). Reparented popups
+   are rare and better handled by `WS_EX_TOOLWINDOW` (via `is_alt_tab_visible`)
+   or explicit rules.
+
+   Why not `GetAncestor(GA_PARENT)`? That API returns the **desktop** window
+   handle for top-level windows, not null — so a naive "parent != null" check
+   would flag every window. Comparing against `GetDesktopWindow()` works but is
+   strictly broader than the `WS_CHILD` bit: it also catches reparented popups,
+   which risks false positives on legitimate application windows. The
+   `WS_CHILD` style bit is the precise Win32 definition of "child window."
 
 ### Phase 2: Rule Pipeline
 
