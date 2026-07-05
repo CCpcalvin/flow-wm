@@ -17,9 +17,20 @@ default_action = "float"
 
 # ── Windows Shell ────────────────────────────────────────────────────
 
-# Windows taskbar
+# Windows taskbar — primary monitor.
 [[rules]]
 match = { class = "Shell_TrayWnd" }
+action = "ignore"
+
+# Windows taskbar — secondary monitors. On multi-monitor setups explorer creates
+# one taskbar window per additional monitor under a distinct class
+# (`Shell_SecondaryTrayWnd`, NOT `Shell_TrayWnd`). It is a top-level, visible,
+# titled, non-cloaked, ownerless shell surface, so it passes every pre-filter
+# gate exactly like the primary taskbar above — without this rule the secondary
+# taskbar registers as Floating and gets a border overlay drawn around it.
+# Class-only match: same race-free rationale as the primary taskbar rule.
+[[rules]]
+match = { class = "Shell_SecondaryTrayWnd" }
 action = "ignore"
 
 # WinUI / XAML Islands desktop content bridge — an invisible helper window
@@ -49,9 +60,18 @@ action = "ignore"
 match = { class = "Xaml_WindowedPopupClass" }
 action = "ignore"
 
-# Windows Search overlay
+# Windows Search overlay — Windows 10 (`SearchUI.exe`).
 [[rules]]
 match = { exe = "SearchUI.exe" }
+action = "ignore"
+
+# Windows Search overlay — Windows 11 22H2+ (`SearchHost.exe`). Win11 split the
+# search UI out of `SearchUI.exe` into `SearchHost.exe`, so the Win10 rule above
+# no longer catches it. The surface is a top-level, titled, non-cloaked-while-
+# open, ownerless popup that passes every gate, so without this rule it gets
+# floated and bordered whenever the user opens Search.
+[[rules]]
+match = { exe = "SearchHost.exe" }
 action = "ignore"
 
 # Older shell-experience host (Action Center / Cortana surfaces). The modern
@@ -217,6 +237,21 @@ action = "ignore"
 [[rules]]
 match = { exe = "chrome.exe", title = "Picture in picture" }
 action = "float"
+
+# Chrome auxiliary toolbar window. chrome.exe creates a top-level window titled
+# "ToolbarWindow32" — the name of the predefined Win32 comctl32 toolbar control
+# class. It passes every pre-filter gate (visible, titled, Alt+Tab visible, no
+# owner, not minimized) yet is an invisible helper, not a browser surface, so
+# without this rule it registers as Floating and gets a border overlay.
+#
+# Why scope to `exe`? `ToolbarWindow32` is a universal control class name: any
+# legacy Win32 app using a standard comctl32 toolbar produces a window whose
+# text/class is "ToolbarWindow32". Matching on the title alone would catch
+# legitimate toolbar controls in other apps, so the rule is confined to
+# chrome.exe to target only Chrome's helper and leave other apps untouched.
+[[rules]]
+match = { exe = "chrome.exe", title = "ToolbarWindow32" }
+action = "ignore"
 
 # ── WindowsTerminal.exe ──────
 
