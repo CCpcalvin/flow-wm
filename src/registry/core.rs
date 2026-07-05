@@ -53,7 +53,9 @@
 use std::collections::HashMap;
 
 use windows::Win32::Foundation::{HWND, LPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GW_OWNER, GetWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GW_OWNER, GWL_STYLE, GetWindow, GetWindowLongW, WINDOW_STYLE, WS_CHILD,
+};
 
 use crate::common::{InvisibleBounds, Rect};
 use crate::config::types::{WindowRule, WindowRulesConfig};
@@ -144,7 +146,11 @@ impl WindowRegistry {
     ///    (checks `WS_EX_TOOLWINDOW` / `WS_EX_APPWINDOW` extended styles).
     ///    This automatically excludes background helper windows, tray icons,
     ///    and tool windows that the user never interacts with directly.
-    /// 4. **No owner** — `GetWindow(hwnd, GW_OWNER)` returns null (top-level only).
+    /// 4. **No owner and no parent** — `GetWindow(hwnd, GW_OWNER)` returns null
+    ///    (not an owned dialog/popup) AND `has_parent(hwnd)` returns false
+    ///    (not a `WS_CHILD` control). The owner check filters owned dialogs;
+    ///    the parent check filters `WS_CHILD` controls (buttons, labels, Inno
+    ///    Setup `TNew*`) embedded inside a dialog.
     ///
     /// These filters exclude dialogs, popups, tool windows, invisible
     /// containers (like the Windows desktop window), and background helper
@@ -157,7 +163,9 @@ impl WindowRegistry {
     /// 2. Title length (`GetWindowTextLengthW`) — single Win32 call, no string alloc.
     /// 3. Alt+Tab visibility (`GetWindowLongW(GWL_EXSTYLE)`) — single Win32 call.
     /// 4. Owner check (`GetWindow(GW_OWNER)`) — single Win32 call.
-    /// 5. Full `get_window_info()` — multiple Win32 calls (expensive).
+    /// 5. Parent check (`WS_CHILD` style bit via `GetWindowLongW(GWL_STYLE)`) —
+    ///    single Win32 call.
+    /// 6. Full `get_window_info()` — multiple Win32 calls (expensive).
     ///
     /// Early termination on cheap filters avoids expensive process queries
     /// for windows that would be discarded anyway.
@@ -197,8 +205,9 @@ impl WindowRegistry {
                         continue;
                     }
 
-                    // Skip owned windows (dialogs, popups).
-                    if has_owner(hwnd) {
+                    // Skip owned windows (dialogs, popups) and child windows (controls inside
+                    // a dialog — e.g. buttons, labels). See has_owner and has_parent.
+                    if has_owner(hwnd) || has_parent(hwnd) {
                         continue;
                     }
 
@@ -1100,9 +1109,12 @@ impl WindowRegistry {
             return None;
         }
 
-        // Skip windows with an owner (dialogs, popups).
-        if has_owner(hwnd) {
-            log::debug!("handle_created: skipping {hwnd:?} — has owner (dialog/popup)");
+        // Skip windows with an owner (dialogs, popups) or a parent (child controls
+        // inside a dialog — e.g. buttons, labels, Inno Setup TNew* controls).
+        if has_owner(hwnd) || has_parent(hwnd) {
+            log::debug!(
+                "handle_created: skipping {hwnd:?} — has owner or parent (dialog/popup/child)"
+            );
             return None;
         }
 
@@ -1187,20 +1199,32 @@ fn state_to_json(state: &WindowState) -> serde_json::Value {
     }
 }
 
-/// Checks if a window has an owner (i.e., is not top-level).
+/// Checks if a window has an owner (i.e., is an owned dialog or popup).
 ///
-/// Many Win32 windows are actually child windows or owned dialogs. We only
-/// track top-level windows (those without an owner) because:
-/// - Owned windows (dialogs, popups) have their position managed by their owner.
-/// - Including them would double-count application windows.
+/// Uses `GetWindow(hwnd, GW_OWNER)`. Owned windows are dialogs or popups whose
+/// position is managed by their owner. This does NOT catch child windows
+/// (those with a parent via [`has_parent`]) — see [`has_parent`].
 ///
-/// `GetWindow(hwnd, GW_OWNER)` may return `Ok(HWND(null))` for ownerless
-/// windows, so we must check the handle value, not just `is_ok()`.
+/// See the Window Registry chapter (`docs/src/dev-guide/window-registry.md`).
 fn has_owner(hwnd: HWND) -> bool {
     match unsafe { GetWindow(hwnd, GW_OWNER) } {
         Ok(owner) => !owner.is_invalid(),
         Err(_) => false,
     }
+}
+
+/// Checks if a window has a parent (i.e., is a `WS_CHILD` control, not
+/// top-level), via `GetWindowLongW(hwnd, GWL_STYLE)`. Identifies embedded
+/// controls (buttons, labels, Inno Setup `TNew*`) that cannot be tiled.
+///
+/// Deliberately narrow: catches `WS_CHILD` only, not reparented popups or
+/// owned top-level windows. Distinct from [`has_owner`] (owner relation).
+///
+/// See the Window Registry chapter (`docs/src/dev-guide/window-registry.md`).
+fn has_parent(hwnd: HWND) -> bool {
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+    let style = WINDOW_STYLE(style as u32);
+    style & WS_CHILD != WINDOW_STYLE(0)
 }
 
 /// Enumerates all top-level windows using `EnumWindows`.
@@ -3170,6 +3194,208 @@ mod tests {
             reg.pipeline.classify(&other),
             WindowAction::Float,
             "registry.set_user_rules must refresh default_action via delegation"
+        );
+    }
+
+    // ── has_parent / has_owner pre-filter predicates ──────────────────
+    //
+    // `has_parent` and `has_owner` are private predicates that call real
+    // Win32 APIs (`GetWindowLongW(GWL_STYLE)` / `GetWindow(GW_OWNER)`) with no
+    // test seam — the same shape as the rest of the `win32::` helpers. The
+    // pure-data `insert_test_window` pattern used above cannot reach them,
+    // because it bypasses the pre-filter by inserting straight into the
+    // HashMap.
+    //
+    // The integration tests in `tests/cli/` exercise the ACCEPT path
+    // (top-level windows pass the filter and get tiled) but they are too
+    // slow and racy to anchor a REJECT-path regression guard — 13 of them
+    // carry `#[ignore = "...startup hook race"]`. The REJECT path (a
+    // `WS_CHILD` control being filtered out) had NO automated coverage at
+    // all before these tests.
+    //
+    // These tests close that gap deterministically: they spin up two real
+    // Win32 windows (a top-level parent + a `WS_CHILD` child) in the test
+    // process itself, call the predicate directly, and tear them down — no
+    // daemon, no IPC, no hooks, no race. Window creation happens on
+    // whatever desktop the test process owns; if the host has no interactive
+    // desktop (headless CI without a session), `CreateWindowExW` fails and
+    // the test skips itself rather than falsely failing.
+    use has_parent_test_helpers::*;
+
+    /// Private helper module holding the Win32 imports and the window-proc
+    /// / RAII plumbing needed by the `has_parent` tests below.
+    ///
+    /// Sequestered into a sub-module so the (many) `windows::` imports
+    /// don't leak into the rest of the test module's namespace.
+    mod has_parent_test_helpers {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::Graphics::Gdi::HBRUSH;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, HCURSOR, HICON,
+            RegisterClassExW, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CHILD, WS_OVERLAPPEDWINDOW,
+        };
+        use windows::core::PCWSTR;
+
+        /// Minimal window procedure — just delegates to `DefWindowProcW`.
+        /// Required so `CreateWindowExW` has a valid `lpfnWndProc`.
+        pub unsafe extern "system" fn test_wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        /// Convert a Rust string to a null-terminated UTF-16 `Vec<u16>`.
+        pub fn wide(s: &str) -> Vec<u16> {
+            OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+
+        /// RAII guard that registers a private window class (idempotent
+        /// across tests) and creates two windows against it: an invisible
+        /// top-level `WS_OVERLAPPEDWINDOW` parent and a `WS_CHILD` child
+        /// whose parent is that top-level window. Both are destroyed on drop.
+        ///
+        /// Returns `None` if window creation fails — callers should skip
+        /// the test (headless CI without an interactive desktop).
+        pub struct RealTestWindows {
+            pub parent: HWND,
+            pub child: HWND,
+        }
+
+        impl RealTestWindows {
+            pub fn create() -> Option<Self> {
+                let class_name = wide("FlowHasParentTestClass");
+                let wnd_class = WNDCLASSEXW {
+                    cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                    style: CS_HREDRAW | CS_VREDRAW,
+                    lpfnWndProc: Some(test_wnd_proc),
+                    cbClsExtra: 0,
+                    cbWndExtra: 0,
+                    hInstance: HINSTANCE::default(),
+                    hIcon: HICON::default(),
+                    hCursor: HCURSOR::default(),
+                    hbrBackground: HBRUSH::default(),
+                    lpszMenuName: PCWSTR::null(),
+                    lpszClassName: PCWSTR(class_name.as_ptr()),
+                    hIconSm: HICON::default(),
+                };
+                // Idempotent: returns 0 if already registered (parallel
+                // tests), which is harmless — the class is process-global.
+                unsafe {
+                    let _ = RegisterClassExW(&wnd_class);
+                }
+
+                // Top-level parent: no hWndParent → parent is the desktop
+                // window. Created WITHOUT WS_VISIBLE so the user's desktop
+                // is not disturbed.
+                let parent = unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        PCWSTR(class_name.as_ptr()),
+                        PCWSTR(wide("FlowHasParentTopLevel").as_ptr()),
+                        WS_OVERLAPPEDWINDOW,
+                        0,
+                        0,
+                        100,
+                        100,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .ok()?;
+
+                // Child control: WS_CHILD with hWndParent = `parent`. This
+                // is the exact shape of the Inno Setup TNew* / Win32
+                // Button/Static controls that the pre-filter rejects.
+                let child = unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        PCWSTR(class_name.as_ptr()),
+                        PCWSTR(wide("FlowHasParentChild").as_ptr()),
+                        WS_CHILD,
+                        0,
+                        0,
+                        50,
+                        50,
+                        Some(parent),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .ok()?;
+
+                Some(Self { parent, child })
+            }
+        }
+
+        impl Drop for RealTestWindows {
+            fn drop(&mut self) {
+                // Destroy child first so the parent's child list is
+                // consistent during teardown. Errors are ignored: by drop
+                // time the test has already captured its result, and a
+                // failed destroy would leak only transient invisible
+                // windows in the test process.
+                unsafe {
+                    let _ = DestroyWindow(self.child);
+                    let _ = DestroyWindow(self.parent);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn has_parent_returns_false_for_toplevel_window() {
+        // Positive: a top-level window (WS_OVERLAPPEDWINDOW, no WS_CHILD style)
+        // is not a child control. `has_parent` must return `false`, allowing
+        // the window through the pre-filter so it can be tiled.
+        let windows = match RealTestWindows::create() {
+            Some(w) => w,
+            None => {
+                eprintln!("skipping: real window creation failed (headless test environment?)");
+                return;
+            }
+        };
+        assert!(
+            !has_parent(windows.parent),
+            "top-level window should not be flagged as WS_CHILD"
+        );
+    }
+
+    #[test]
+    fn has_parent_returns_true_for_child_window() {
+        // Negative: a WS_CHILD window must be flagged by `has_parent`,
+        // blocking it at the pre-filter. This is the regression guard for
+        // the Inno Setup TNew* leak and the now-removed `Button` / `Static`
+        // / `ComboBox` rules in default-flow-rules.toml: if `has_parent`
+        // regresses, those controls would once again slip into the tiling
+        // pipeline and draw border overlays over dialog buttons.
+        let windows = match RealTestWindows::create() {
+            Some(w) => w,
+            None => {
+                eprintln!("skipping: real window creation failed (headless test environment?)");
+                return;
+            }
+        };
+        assert!(
+            has_parent(windows.child),
+            "WS_CHILD window should be flagged as having a parent"
+        );
+        // Lock in the root cause: WS_CHILD controls have NO owner, so has_owner
+        // alone cannot catch them — this is exactly the gap has_parent fills.
+        assert!(
+            !has_owner(windows.child),
+            "WS_CHILD controls should have no GW_OWNER — that's why has_parent exists"
         );
     }
 }

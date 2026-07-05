@@ -92,32 +92,6 @@ action = "ignore"
 match = { class = "#32770" }
 action = "ignore"
 
-# Predefined Win32 child controls inside a `#32770` dialog — its buttons
-# (`Button`) and text labels (`Static`).
-#
-# These leak flow's pre-filter: a child control is attached to its dialog via a
-# *parent* (WS_CHILD) link, not an *owner* (GW_OWNER) link, so the `has_owner`
-# gate returns false and the control passes every check. Without these rules
-# each control is classified as a separate floating window and gets a border
-# overlay drawn over it — the "dialog buttons disappear" bug.
-#
-# Class-only match: these are universal predefined control classes (no real
-# top-level window uses them) and the class is assigned at creation, so it is
-# race-free. A general WS_CHILD check in the pre-filter would subsume these;
-# they are the targeted stopgap for the controls dialogs actually use.
-[[rules]]
-match = { class = "Button" }
-action = "ignore"
-
-[[rules]]
-match = { class = "Static" }
-action = "ignore"
-
-# Run dialog
-[[rules]]
-match = { class = "ComboBox", exe = "Explorer.exe" }
-action = "ignore"
-
 # ── Explorer ────────────────────────────────────────────────────────
 
 # Windows Explorer file open/save dialogs
