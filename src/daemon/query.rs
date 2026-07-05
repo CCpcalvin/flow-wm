@@ -102,16 +102,13 @@ mod tests {
         // The actual behavior is tested via integration tests.
 
         // query_windows_all returns SocketResponse
-        let _type_check: fn(&FlowWM) -> SocketResponse =
-            FlowWM::query_windows_all;
+        let _type_check: fn(&FlowWM) -> SocketResponse = FlowWM::query_windows_all;
 
         // query_layout_virtual returns SocketResponse
-        let _type_check: fn(&FlowWM) -> SocketResponse =
-            FlowWM::query_layout_virtual;
+        let _type_check: fn(&FlowWM) -> SocketResponse = FlowWM::query_layout_virtual;
 
         // query_layout_actual returns SocketResponse
-        let _type_check: fn(&FlowWM) -> SocketResponse =
-            FlowWM::query_layout_actual;
+        let _type_check: fn(&FlowWM) -> SocketResponse = FlowWM::query_layout_actual;
     }
 
     /// Positive: verify that SocketResponse::Data is constructible with JSON.

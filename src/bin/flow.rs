@@ -8,7 +8,7 @@
 //! | Lifecycle | `start`, `stop` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
 //! | Query | `query all` |
-//! | Dispatch | `dispatch focus\|swap-column\|move-window\|expand-column\|shrink-column\|close-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
+//! | Dispatch | `dispatch focus\|swap-column\|move-window\|merge-column\|promote\|expand-column\|shrink-column\|center\|close-window\|set-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
 //!
 //! See the developer guide's *IPC & Watchdog* chapter
 //! (`docs/src/dev-guide/ipc-and-watchdog.md`) for the full command reference.
@@ -99,7 +99,17 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
     /// Initialize config directory with default files.
-    Init,
+    ///
+    /// Pass `--ahk` to also write `flow.ahk`, a ready-to-use AutoHotkey v2
+    /// keybinding script that drives FlowWM via the `flow` CLI. See the
+    /// developer guide's *IPC & Watchdog* chapter
+    /// (`docs/src/dev-guide/ipc-and-watchdog.md`) for the command reference.
+    Init {
+        /// Also write `flow.ahk` (a bundled AutoHotkey v2 keybinding script)
+        /// into the config directory. Existing files are never overwritten.
+        #[arg(long)]
+        ahk: bool,
+    },
     /// Reload daemon configuration from disk.
     Reload,
     /// Open config directory in the system editor.
@@ -415,7 +425,7 @@ fn cmd_stop() -> Result<(), String> {
 /// sends an IPC message to the running daemon.
 fn cmd_config(command: ConfigCommands) -> Result<(), String> {
     match command {
-        ConfigCommands::Init => cmd_config_init(),
+        ConfigCommands::Init { ahk } => cmd_config_init(ahk),
         ConfigCommands::Reload => cmd_config_reload(),
         ConfigCommands::Edit => cmd_config_edit(),
         ConfigCommands::Path => cmd_config_path(),
@@ -430,13 +440,28 @@ fn cmd_config(command: ConfigCommands) -> Result<(), String> {
 /// (`flow.toml`, `flow-rules.toml`) and JSON Schemas. Existing files are never
 /// overwritten.
 ///
+/// When `ahk` is set, also writes `flow.ahk` — a bundled AutoHotkey v2
+/// keybinding script — via [`config::write_ahk_template`]. This is a
+/// convenience for users who want to drive FlowWM via AutoHotkey without
+/// authoring their own script.
+///
 /// # Errors
 ///
 /// Returns an error string if directory creation or file writing fails.
-fn cmd_config_init() -> Result<(), String> {
+fn cmd_config_init(ahk: bool) -> Result<(), String> {
     let dir = config::dirs::config_dir();
     config::init_config_dir(&dir)?;
     println!("flow: config initialized at {}", dir.display());
+    if ahk {
+        let ahk_path = dir.join("flow.ahk");
+        match config::write_ahk_template(&dir)? {
+            true => println!("flow: wrote flow.ahk at {}", ahk_path.display()),
+            false => println!(
+                "flow: flow.ahk already exists at {} (left untouched)",
+                ahk_path.display()
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -935,9 +960,25 @@ mod tests {
         let cli = Cli::try_parse_from(["flow", "config", "init"]).unwrap();
         match cli.command {
             Commands::Config {
-                command: ConfigCommands::Init,
-            } => {}
+                command: ConfigCommands::Init { ahk },
+            } => {
+                // --ahk defaults to false when omitted.
+                assert!(!ahk, "--ahk should default to false");
+            }
             other => panic!("expected Config::Init, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_config_init_ahk() {
+        let cli = Cli::try_parse_from(["flow", "config", "init", "--ahk"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                command: ConfigCommands::Init { ahk },
+            } => {
+                assert!(ahk, "--ahk should set ahk to true");
+            }
+            other => panic!("expected Config::Init {{ ahk: true }}, got: {other:?}"),
         }
     }
 

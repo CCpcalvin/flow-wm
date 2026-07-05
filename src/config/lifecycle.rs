@@ -85,6 +85,17 @@ pub const DEFAULT_CONFIG_EXAMPLE: &str = include_str!("../../default-config.toml
 /// content parses cleanly as [`WindowRulesConfig`].
 pub const DEFAULT_RULES_TOML: &str = include_str!("../../default-flow-rules.toml");
 
+/// The bundled AutoHotkey v2 keybinding template, embedded at compile time.
+///
+/// This is the content of `flow.ahk` from the project root, baked into the
+/// binary via [`include_str!`]. It is copied verbatim into a user's config
+/// directory by [`write_ahk_template`] when they run `flow config init --ahk`.
+/// FlowWM does not parse or execute this file — it is a convenience starter
+/// for users who want to drive FlowWM via AutoHotkey without authoring a
+/// script from scratch. Existing copies are never overwritten (see
+/// [`write_ahk_template`]).
+pub const DEFAULT_AHK_TEMPLATE: &str = include_str!("../../flow.ahk");
+
 /// Schema header for `flow-rules.toml` files (taplo LSP autocomplete).
 ///
 /// Prepended to the TOML content when [`init_config_dir`] writes the default
@@ -416,6 +427,57 @@ pub fn init_config_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Write the bundled AutoHotkey keybinding template into a config directory.
+///
+/// Copies [`DEFAULT_AHK_TEMPLATE`] to `dir/flow.ahk`, but only if that file
+/// does not already exist — so re-running `flow config init --ahk` never
+/// clobbers user edits.
+///
+/// CLI-only: invoked by `flow config init --ahk`; the daemon never calls this.
+///
+/// # Arguments
+///
+/// * `dir` - Path to the config directory. Missing parent directories are
+///   created as needed.
+///
+/// # Returns
+///
+/// `Ok(true)` if `flow.ahk` was newly written. `Ok(false)` if it already
+/// existed (untouched). Callers use this to report accurate feedback.
+///
+/// # Errors
+///
+/// Returns `Err` if writing `flow.ahk` fails.
+///
+/// # Example
+///
+/// ```no_run
+/// use flow_wm::config::write_ahk_template;
+/// use std::path::Path;
+///
+/// if let Err(e) = write_ahk_template(Path::new("~/.config/flow")) {
+///     eprintln!("failed to write flow.ahk: {e}");
+/// }
+/// ```
+#[must_use = "initialization errors must be handled"]
+pub fn write_ahk_template(dir: &Path) -> Result<bool, String> {
+    let ahk_path = dir.join("flow.ahk");
+    match write_default_config_file(&ahk_path, DEFAULT_AHK_TEMPLATE) {
+        Ok(true) => {
+            log::info!("wrote AutoHotkey template to {:?}", ahk_path);
+            Ok(true)
+        }
+        Ok(false) => {
+            log::debug!("flow.ahk already exists, skipping {:?}", ahk_path);
+            Ok(false)
+        }
+        Err(e) => Err(format!(
+            "failed to write AutoHotkey template {:?}: {e}",
+            ahk_path
+        )),
+    }
+}
+
 // ── Check function ─────────────────────────────────────────────────────
 
 /// Validate config files in a directory without loading them into the daemon.
@@ -721,7 +783,10 @@ strategy = "original_slot"
         );
 
         // Default files should exist.
-        assert!(dir.join("flow.toml").exists(), "flow.toml should be created");
+        assert!(
+            dir.join("flow.toml").exists(),
+            "flow.toml should be created"
+        );
         assert!(
             dir.join("flow-rules.toml").exists(),
             "flow-rules.toml should be created"
@@ -787,6 +852,49 @@ strategy = "original_slot"
         let contents = std::fs::read_to_string(dir.join("flow.toml")).unwrap();
         assert_eq!(contents, custom_content);
         assert!(contents.contains("column_width = 9999"));
+    }
+
+    // ── write_ahk_template tests ─────────────────────────────────────────
+
+    /// Positive: `write_ahk_template` creates `flow.ahk` with the bundled content.
+    #[test]
+    fn write_ahk_template_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let result = write_ahk_template(dir);
+        assert_eq!(result, Ok(true), "should report newly written");
+
+        let ahk = dir.join("flow.ahk");
+        assert!(ahk.exists(), "flow.ahk should be created");
+
+        // Content must match the embedded template verbatim.
+        let contents = std::fs::read_to_string(&ahk).unwrap();
+        assert_eq!(contents, DEFAULT_AHK_TEMPLATE);
+        // Sanity: the template is a real AHK v2 script, not an empty stub.
+        assert!(
+            contents.contains("#Requires AutoHotkey v2.0.2"),
+            "flow.ahk should be the AutoHotkey v2 template"
+        );
+    }
+
+    /// Negative: `write_ahk_template` does not overwrite an existing file.
+    #[test]
+    fn write_ahk_template_does_not_overwrite_existing() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        // Pre-create flow.ahk with custom content.
+        let custom = "# custom user script\n";
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("flow.ahk"), custom).unwrap();
+
+        let result = write_ahk_template(dir);
+        assert_eq!(result, Ok(false), "should report already-existed");
+
+        // The user's content must survive.
+        let contents = std::fs::read_to_string(dir.join("flow.ahk")).unwrap();
+        assert_eq!(contents, custom);
     }
 
     // ── check_config tests ──────────────────────────────────────────────
@@ -867,7 +975,11 @@ strategy = "original_slot"
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        std::fs::write(dir.join("flow.toml"), b"this is = not = valid = toml = [[[[").unwrap();
+        std::fs::write(
+            dir.join("flow.toml"),
+            b"this is = not = valid = toml = [[[[",
+        )
+        .unwrap();
 
         let result = check_config(dir);
         assert!(
@@ -1130,6 +1242,33 @@ initial_width_px = 960
         assert_eq!(
             DEFAULT_RULES_TOML, disk_content,
             "DEFAULT_RULES_TOML (include_str!) has drifted from the on-disk file; \
+             update one to match the other"
+        );
+    }
+
+    /// The `DEFAULT_AHK_TEMPLATE` constant (embedded via `include_str!`) must
+    /// contain the same content as the on-disk `flow.ahk` file.
+    ///
+    /// Guards against the `include_str!` path going stale after edits to the
+    /// on-disk template. Mirrors [`embedded_rules_toml_matches_disk_file`] for
+    /// the sibling `flow.ahk` embed.
+    #[test]
+    fn embedded_ahk_template_matches_disk_file() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR should be set during tests");
+        let disk_path = std::path::PathBuf::from(manifest_dir).join("flow.ahk");
+
+        if !disk_path.exists() {
+            eprintln!("skipping: flow.ahk not found at {disk_path:?}");
+            return;
+        }
+
+        let disk_content = std::fs::read_to_string(&disk_path)
+            .unwrap_or_else(|e| panic!("failed to read {disk_path:?}: {e}"));
+
+        assert_eq!(
+            DEFAULT_AHK_TEMPLATE, disk_content,
+            "DEFAULT_AHK_TEMPLATE (include_str!) has drifted from the on-disk file; \
              update one to match the other"
         );
     }
