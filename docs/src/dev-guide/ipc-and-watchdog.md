@@ -140,14 +140,36 @@ a command arrives.
 
 | Command | Action |
 |---------|--------|
-| `flow start [--config <dir>] [--log-file <path>]` | Spawn `flowd.exe` detached, poll until pipe is ready |
-| `flow stop` | Send `Stop` via named pipe |
+| `flow start [--config <dir>] [--log-file <path>] [--ahk]` | Spawn `flowd.exe` detached, poll until pipe is ready; with `--ahk`, also launch `flow.ahk` via its shell association |
+| `flow stop [--ahk]` | Send `Stop` via named pipe; with `--ahk`, also terminate the AutoHotkey process launched by `start --ahk` |
 
 `flow start` locates `flowd.exe` next to the current executable, spawns it with
 `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` (falling back to plain `spawn()`
 under WSL interop), then polls the pipe at 200 ms intervals for up to 5 seconds.
 The `--config` flag sets `FLOW_CONFIG_DIR` in the current process before spawning
 so the child inherits it; the `--log-file` flag is forwarded as a CLI argument.
+
+The `--ahk` flag launches the user's `flow.ahk` **after** the daemon is ready, so
+the first hotkey always reaches a listening daemon. AutoHotkey is resolved via
+`ShellExecuteExW` on the `.ahk` file (Windows' shell association handles
+interpreter lookup); the launched PID is written to `flow.ahk.pid` in the config
+directory so `flow stop --ahk` can terminate exactly that process. `stop --ahk`
+runs **after** the daemon has stopped, so a live daemon never loses its
+keybindings mid-dispatch.
+
+### Autostart
+
+| Command | Action |
+|---------|--------|
+| `flow enable-autostart [--ahk]` | Create a single `flow.lnk` in `shell:startup` that runs `flow.exe start [--ahk]` |
+| `flow disable-autostart` | Remove the `flow.lnk` shortcut (idempotent) |
+
+The autostart shortcut targets `flow.exe start [--ahk]` rather than `flowd.exe`
+directly, so login reuses the interactive startup path's pre-flight config check
+and double-start guard -- there is no parallel startup code path. The `.lnk` uses
+`SW_HIDE` to suppress the brief console window `flow.exe` allocates before it
+spawns the detached daemon and exits. `disable-autostart` takes no `--ahk` flag
+because there is only ever one shortcut.
 
 ### Config
 

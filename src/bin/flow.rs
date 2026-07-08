@@ -5,7 +5,7 @@
 //!
 //! | Group | Commands |
 //! |-------|----------|
-//! | Lifecycle | `start`, `stop` |
+//! | Lifecycle | `start`, `stop`, `enable-autostart`, `disable-autostart` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
 //! | Query | `query all` |
 //! | Dispatch | `dispatch focus\|swap-column\|move-window\|merge-column\|promote\|expand-column\|shrink-column\|center\|close-window\|set-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
@@ -34,6 +34,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
+use flow_wm::autostart;
 use flow_wm::common::Direction;
 use flow_wm::config;
 use flow_wm::ipc::message::SocketMessage;
@@ -69,9 +70,18 @@ enum Commands {
         /// level is still controlled by the `RUST_LOG` environment variable.
         #[arg(long, value_name = "PATH")]
         log_file: Option<String>,
+        /// Also launch the user's `flow.ahk` keybinding script once the daemon
+        /// is ready. The script is launched via its `.ahk` shell association
+        /// and its PID is tracked so `flow stop --ahk` can terminate it.
+        #[arg(long)]
+        ahk: bool,
     },
     /// Stop the running flowd daemon.
-    Stop,
+    Stop {
+        /// Also stop the AutoHotkey script launched by `flow start --ahk`.
+        #[arg(long)]
+        ahk: bool,
+    },
     /// Manage configuration files.
     Config {
         #[command(subcommand)]
@@ -90,6 +100,15 @@ enum Commands {
         #[command(subcommand)]
         command: DispatchCommands,
     },
+    /// Create the login autostart shortcut in `shell:startup`.
+    EnableAutostart {
+        /// Bake `--ahk` into the shortcut's args so login also launches
+        /// `flow.ahk` alongside the daemon.
+        #[arg(long)]
+        ahk: bool,
+    },
+    /// Remove the login autostart shortcut from `shell:startup`.
+    DisableAutostart,
 }
 
 /// Configuration management subcommands.
@@ -318,11 +337,17 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Start { config, log_file } => cmd_start(config, log_file),
-        Commands::Stop => cmd_stop(),
+        Commands::Start {
+            config,
+            log_file,
+            ahk,
+        } => cmd_start(config, log_file, ahk),
+        Commands::Stop { ahk } => cmd_stop(ahk),
         Commands::Config { command } => cmd_config(command),
         Commands::Query { command } => cmd_query(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
+        Commands::EnableAutostart { ahk } => cmd_enable_autostart(ahk),
+        Commands::DisableAutostart => cmd_disable_autostart(),
     };
 
     if let Err(e) = result {
@@ -343,6 +368,10 @@ fn main() {
 /// `--config`, this is passed explicitly on the command line rather than via
 /// an environment variable.
 ///
+/// When `ahk` is true, the user's `flow.ahk` is launched via
+/// [`autostart::spawn_ahk_script`] after the daemon is ready, so the daemon
+/// is already listening when the first hotkey fires.
+///
 /// # Design Decision
 ///
 /// We use [`std::env::set_var`] rather than `Command::env()` because the
@@ -358,9 +387,11 @@ fn main() {
 /// - The daemon binary cannot be found.
 /// - The daemon fails to spawn.
 /// - The daemon does not become ready within [`DAEMON_START_TIMEOUT`].
+/// - `ahk` is true and `flow.ahk` cannot be launched.
 fn cmd_start(
     config_override: Option<String>,
     log_file_override: Option<String>,
+    ahk: bool,
 ) -> Result<(), String> {
     // Set env var before any daemon interaction so the spawned child inherits it.
     if let Some(ref dir) = config_override {
@@ -385,6 +416,13 @@ fn cmd_start(
     wait_for_daemon()?;
 
     println!("flow: daemon started");
+
+    if ahk {
+        // Launch AHK after the daemon is listening so the first hotkey lands.
+        let pid = autostart::spawn_ahk_script()?;
+        println!("flow: launched flow.ahk (pid {pid})");
+    }
+
     Ok(())
 }
 
@@ -415,8 +453,58 @@ fn preflight_config_check(config_dir: &Path) -> Result<(), String> {
 }
 
 /// Send a Stop message to the daemon.
-fn cmd_stop() -> Result<(), String> {
-    send_command(SocketMessage::Stop, "daemon stopped")
+///
+/// When `ahk` is true, the AutoHotkey script launched by `flow start --ahk`
+/// is terminated via [`autostart::stop_ahk_script`] **after** the daemon has
+/// stopped, so a live daemon never loses its keybindings mid-dispatch.
+///
+/// # Errors
+///
+/// Returns an error string if the daemon cannot be reached, or if `ahk` is
+/// true and terminating the AHK process fails.
+fn cmd_stop(ahk: bool) -> Result<(), String> {
+    send_command(SocketMessage::Stop, "daemon stopped")?;
+    if ahk {
+        let stopped = autostart::stop_ahk_script()?;
+        if stopped {
+            println!("flow: stopped flow.ahk");
+        } else {
+            println!("flow: no tracked flow.ahk to stop");
+        }
+    }
+    Ok(())
+}
+
+/// Create the login autostart shortcut in `shell:startup`.
+///
+/// When `ahk` is true, the shortcut's args become `start --ahk` so login also
+/// launches `flow.ahk`.
+///
+/// # Errors
+///
+/// Returns an error string on shortcut-creation failure (see
+/// [`autostart::enable_autostart`]).
+fn cmd_enable_autostart(ahk: bool) -> Result<(), String> {
+    let report = autostart::enable_autostart(ahk)?;
+    println!(
+        "flow: autostart {} at {}",
+        if ahk { "enabled (--ahk)" } else { "enabled" },
+        report.shortcut.display()
+    );
+    Ok(())
+}
+
+/// Remove the login autostart shortcut from `shell:startup`.
+///
+/// Idempotent: silently succeeds if no shortcut exists.
+///
+/// # Errors
+///
+/// Returns an error string only on filesystem errors other than `NotFound`.
+fn cmd_disable_autostart() -> Result<(), String> {
+    let report = autostart::disable_autostart()?;
+    println!("flow: autostart disabled ({})", report.shortcut.display());
+    Ok(())
 }
 
 /// Dispatch a configuration subcommand.
@@ -883,7 +971,8 @@ mod tests {
             cli.command,
             Commands::Start {
                 config: None,
-                log_file: None
+                log_file: None,
+                ahk: false
             }
         ));
     }
@@ -941,6 +1030,7 @@ mod tests {
             Commands::Start {
                 config: Some(ref c),
                 log_file: Some(ref p),
+                ahk: false,
             } => {
                 assert_eq!(c, "C:\\custom\\flow");
                 assert_eq!(p, "C:\\tmp\\debug.log");
@@ -950,9 +1040,128 @@ mod tests {
     }
 
     #[test]
+    fn parse_start_with_ahk_config_and_log_file_combined() {
+        // Composition lock: all three Start flags must coexist on one command
+        // line without ordering sensitivity. Each flag is independently tested
+        // above; this pins that the parser does not reject the combination.
+        let cli = Cli::try_parse_from([
+            "flow",
+            "start",
+            "--ahk",
+            "--config",
+            "C:\\custom\\flow",
+            "--log-file",
+            "C:\\tmp\\debug.log",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Start {
+                ahk: true,
+                config: Some(ref c),
+                log_file: Some(ref p),
+            } => {
+                assert_eq!(c, "C:\\custom\\flow");
+                assert_eq!(p, "C:\\tmp\\debug.log");
+            }
+            other => panic!("expected Start with all three flags, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_stop() {
         let cli = Cli::try_parse_from(["flow", "stop"]).unwrap();
-        assert!(matches!(cli.command, Commands::Stop));
+        assert!(matches!(cli.command, Commands::Stop { ahk: false }));
+    }
+
+    #[test]
+    fn parse_start_with_ahk_flag() {
+        let cli = Cli::try_parse_from(["flow", "start", "--ahk"]).unwrap();
+        match cli.command {
+            Commands::Start {
+                ahk: true,
+                config: None,
+                log_file: None,
+            } => {}
+            other => panic!("expected Start {{ ahk: true, .. }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stop_with_ahk_flag() {
+        let cli = Cli::try_parse_from(["flow", "stop", "--ahk"]).unwrap();
+        assert!(matches!(cli.command, Commands::Stop { ahk: true }));
+    }
+
+    #[test]
+    fn parse_start_positional_arg_fails() {
+        // Negative: `start` takes no positional args (only --config/--log-file/--ahk).
+        let result = Cli::try_parse_from(["flow", "start", "unexpected"]);
+        assert!(
+            result.is_err(),
+            "'flow start' with a positional arg should fail"
+        );
+    }
+
+    #[test]
+    fn parse_enable_autostart() {
+        let cli = Cli::try_parse_from(["flow", "enable-autostart"]).unwrap();
+        match cli.command {
+            Commands::EnableAutostart { ahk: false } => {}
+            other => panic!("expected EnableAutostart {{ ahk: false }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_enable_autostart_ahk() {
+        let cli = Cli::try_parse_from(["flow", "enable-autostart", "--ahk"]).unwrap();
+        match cli.command {
+            Commands::EnableAutostart { ahk: true } => {}
+            other => panic!("expected EnableAutostart {{ ahk: true }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_enable_autostart_extra_arg_fails() {
+        // Negative: enable-autostart takes only --ahk, no positionals.
+        let result = Cli::try_parse_from(["flow", "enable-autostart", "bogus"]);
+        assert!(
+            result.is_err(),
+            "'flow enable-autostart' with a positional arg should fail"
+        );
+    }
+
+    #[test]
+    fn parse_enable_autostart_unknown_flag_fails() {
+        // Negative: only --ahk is accepted.
+        let result = Cli::try_parse_from(["flow", "enable-autostart", "--bogus"]);
+        assert!(result.is_err(), "unknown flag should fail");
+    }
+
+    #[test]
+    fn parse_disable_autostart() {
+        let cli = Cli::try_parse_from(["flow", "disable-autostart"]).unwrap();
+        assert!(matches!(cli.command, Commands::DisableAutostart));
+    }
+
+    #[test]
+    fn parse_disable_autostart_ahk_flag_fails() {
+        // Negative: disable-autostart takes no flags (single shortcut — see
+        // option (a) design). This pins that --ahk is NOT accepted here.
+        let result = Cli::try_parse_from(["flow", "disable-autostart", "--ahk"]);
+        assert!(
+            result.is_err(),
+            "'flow disable-autostart --ahk' should fail (no --ahk flag)"
+        );
+    }
+
+    #[test]
+    fn parse_disable_autostart_extra_arg_fails() {
+        // Negative: disable-autostart takes no arguments at all.
+        let result = Cli::try_parse_from(["flow", "disable-autostart", "bogus"]);
+        assert!(
+            result.is_err(),
+            "'flow disable-autostart' with a positional arg should fail"
+        );
     }
 
     #[test]

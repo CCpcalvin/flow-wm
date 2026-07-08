@@ -62,8 +62,8 @@ the `FLOW_CONFIG_DIR` environment variable. See
 [Config & Persistence](./config-and-persistence.md) for the full resolution
 chain.
 
-Once the daemon is running, start your hotkey daemon (double-click the
-generated `flow.ahk`, or drop it in `shell:startup`) and you're tiling.
+Once the daemon is running, start your hotkey daemon (`flow start --ahk`, or
+`flow enable-autostart --ahk` to auto-launch both at login) and you're tiling.
 See the [`README.md`](../../../README.md) for usage.
 
 ## Contributor Gates

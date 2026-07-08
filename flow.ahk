@@ -23,7 +23,8 @@
 ;                 "CapsLock", or "!^" (Alt+Ctrl). Key list:
 ;                 https://www.autohotkey.com/docs/v2/KeyList.htm
 ;
-; Run at login:  Win+R -> shell:startup -> drop this file (or a shortcut) in.
+; Run at login:  `flow enable-autostart --ahk` (creates a single shell:startup
+;                shortcut that runs `flow.exe start --ahk`; idempotent).
 ; Full dispatch: run `flow dispatch --help` for every available command.
 ;
 ; Layout (hold modifier + key):
