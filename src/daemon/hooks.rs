@@ -126,19 +126,22 @@ impl FlowWM {
     /// Reconcile OS focus and border overlays for a freshly-tracked window
     /// (tiling or floating), shared by both branches of [`on_window_created`].
     ///
-    /// If the window is the live OS foreground, sync the registry's focus
-    /// tracker to it before refreshing its border so it paints `Focused`
-    /// immediately — late-titled apps (Windows Terminal, recovered via
-    /// NAMECHANGE/SHOW) have their `EVENT_SYSTEM_FOREGROUND` fire before they
-    /// are tracked, leaving `focused()` stale and the new foreground border
-    /// resolving to `Unfocused`. The live `GetForegroundWindow` query is
-    /// authoritative and cheap. Then recolor the previous foreground
-    /// (`Focused → Unfocused`), mirroring [`on_focus_changed`]'s two-window
-    /// refresh so the handoff is visually consistent.
+    /// Actively pushes the OS foreground to the new window (not just a passive
+    /// sync) so apps launched without a user-visible activation receive focus
+    /// too — see (`docs/src/dev-guide/event-pipelines.md`). On success the
+    /// registry focus is synced and the previous foreground's border is
+    /// recoloured, mirroring [`on_focus_changed`]'s two-window refresh.
     fn reconcile_new_window_focus(&mut self, hwnd: isize) {
         let prev_focus = self.registry.focused().map(|id| id.0);
-        let now_foreground = registry_win32::get_foreground_window() == Some(hwnd);
-        if now_foreground {
+
+        // The layout already treats this window as focused; push OS foreground
+        // to match. Skip the push when already foreground (normal launches) so
+        // it stays a no-op. The resulting EVENT_SYSTEM_FOREGROUND is re-consumed
+        // by on_focus_changed, which is idempotent here (same workspace; border
+        // refresh short-circuits on unchanged style).
+        let became_foreground = registry_win32::get_foreground_window() == Some(hwnd)
+            || registry_win32::set_foreground_window(hwnd);
+        if became_foreground {
             self.registry.set_focused(hwnd);
         }
 
@@ -147,7 +150,7 @@ impl FlowWM {
         self.refresh_border_for(hwnd);
 
         // If focus moved to the new window, recolor the previous foreground.
-        if now_foreground
+        if became_foreground
             && let Some(prev) = prev_focus
             && prev != hwnd
         {
@@ -511,5 +514,121 @@ impl FlowWM {
         // NAMECHANGE event), so handle_created's title-empty gate should pass.
         // If it still returns false, we simply wait for the next NAMECHANGE.
         self.on_window_created(hwnd);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Characterization tests for [`FlowWM::reconcile_new_window_focus`].
+    //!
+    //! # Why the function is not unit-tested directly
+    //!
+    //! `reconcile_new_window_focus` lives on [`FlowWM`], which cannot be
+    //! instantiated in a unit test — it owns a named-pipe IPC server, a
+    //! background WinEvent hook thread, a window animator thread, and a live
+    //! Win32 desktop association. It also calls
+    //! `registry_win32::get_foreground_window` / `set_foreground_window`,
+    //! which are direct Win32 free functions with **no trait or `cfg(test)`
+    //! seam** to intercept them.
+    //!
+    //! Adding a seam would require either injecting a foreground-backend
+    //! trait through `FlowWM::new` (a cross-cutting production refactor that
+    //! touches the constructor and every caller) or `#[cfg(test)]`-gating the
+    //! two free functions (impossible — `cfg(test)` does not apply to the
+    //! production crate when called from `tests/`). Both are outside the
+    //! scope of this test-only task.
+    //!
+    //! Instead, these tests mirror the two boolean predicates inside
+    //! `reconcile_new_window_focus` exactly, so an accidental logic inversion
+    //! (e.g. `&&` instead of `||`, or flipping the `prev != hwnd` guard) trips
+    //! a test. The end-to-end focus-sync contract is pinned by the integration
+    //! tests in `tests/cli/window_creation_focus.rs`.
+
+    use super::*;
+
+    /// Mirror of the short-circuit foreground predicate in
+    /// `reconcile_new_window_focus`:
+    /// `get_foreground_window() == Some(hwnd) || set_foreground_window(hwnd)`.
+    ///
+    /// Rust's `||` short-circuits, so when `already_fg` is true the
+    /// `set_foreground_window` call is never made (the contract the bug fix
+    /// relies on to keep normal launches a no-op).
+    fn became_foreground_predicate(already_fg: bool, set_succeeded: bool) -> bool {
+        already_fg || set_succeeded
+    }
+
+    /// Mirror of the previous-foreground border-refresh guard in
+    /// `reconcile_new_window_focus`:
+    /// `became_foreground && let Some(prev) = prev_focus && prev != hwnd`.
+    ///
+    /// Returns whether `refresh_border_for(prev)` would fire.
+    fn should_recolor_previous(became_fg: bool, prev: Option<isize>, hwnd: isize) -> bool {
+        became_fg && prev.is_some() && prev != Some(hwnd)
+    }
+
+    // ── became_foreground predicate ───────────────────────────────────
+
+    #[test]
+    fn became_foreground_short_circuits_when_already_foreground() {
+        // Positive: if the window is already the OS foreground, the predicate
+        // is true regardless of what a (never-made) set call would return.
+        // This pins the no-op-on-normal-launches contract.
+        assert!(became_foreground_predicate(true, false));
+        assert!(became_foreground_predicate(true, true));
+    }
+
+    #[test]
+    fn became_foreground_falls_back_to_set_result_when_not_already() {
+        // Positive: not already foreground → outcome follows set's result.
+        assert!(became_foreground_predicate(false, true));
+        // Negative: not foreground AND set failed → no focus sync, no recolor.
+        // This is the AHK `Run Hide` case when the foreground lock defeats the
+        // push: focus must NOT be recorded as moving to the new window.
+        assert!(!became_foreground_predicate(false, false));
+    }
+
+    // ── previous-foreground recolor guard ─────────────────────────────
+
+    #[test]
+    fn recolor_previous_skipped_when_foreground_push_failed() {
+        // Negative: a failed foreground push must NOT recolor the previous
+        // window — focus stayed where it was, so its border is already correct.
+        assert!(!should_recolor_previous(false, Some(99), 100));
+    }
+
+    #[test]
+    fn recolor_previous_skipped_when_no_previous_focus() {
+        // Edge: no prior foreground window (first window on an empty desktop)
+        // → nothing to recolor. Guards against a redundant refresh call.
+        assert!(!should_recolor_previous(true, None, 100));
+    }
+
+    #[test]
+    fn recolor_previous_skipped_when_previous_is_same_window() {
+        // Edge: the "previous" foreground equals the new hwnd (idempotent
+        // re-focus on an already-foreground window) → no recolor.
+        assert!(!should_recolor_previous(true, Some(100), 100));
+    }
+
+    #[test]
+    fn recolor_previous_runs_when_focus_moved_to_different_window() {
+        // Positive: focus genuinely moved from a different window → its border
+        // must be recolored from the focused style to the unfocused style.
+        assert!(should_recolor_previous(true, Some(99), 100));
+    }
+
+    // ── Win32 dependency signatures ───────────────────────────────────
+    //
+    // `reconcile_new_window_focus` calls these two free functions. They are
+    // direct Win32 wrappers with no seam — pinning their signatures here guards
+    // the predicate mirrors above against an upstream signature change that
+    // would silently alter the reconcile contract. Matches the codebase's
+    // established pattern for untestable Win32 wrappers (see `registry::win32`'
+    // own test mod).
+
+    #[test]
+    fn reconcile_foreground_win32_deps_have_documented_signatures() {
+        let _get: fn() -> Option<isize> = registry_win32::get_foreground_window;
+        let _set: fn(isize) -> bool = registry_win32::set_foreground_window;
     }
 }

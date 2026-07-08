@@ -62,10 +62,39 @@ The full pipeline for a created window:
    [Floating Space](./floating-space.md).
 5. `animate_layout()` / `animate_workspaces()` convert the result into animation
    targets and submit them to the `WindowAnimator`.
+6. `reconcile_new_window_focus()` pushes the OS foreground to the new window,
+   syncs the registry focus, and refreshes borders (see *Foreground on
+   creation* below).
 
 If classification fails (window not yet visible or titled), the hwnd is added to
 `pending_creations` and retried on subsequent loop iterations until it passes or
 the retry budget is exhausted.
+
+### Foreground on creation
+
+The layout engine has already moved focus to the new window by step 3, but that
+is flow-internal — the **OS foreground** (the window that receives keyboard
+input) is a separate quantity owned by Windows. `reconcile_new_window_focus()`
+pushes the two back into agreement.
+
+For a normally-launched app the OS has already foregrounded it (a launch is a
+user activation, which grants foreground permission), so the push is a no-op: a
+cheap `GetForegroundWindow` check sees the window is already foreground and
+skips the `SetForegroundWindow` call. The registry focus is then synced from
+that authoritative query, which is what fixes the late-titled-app case (Windows
+Terminal, recovered via NAMECHANGE/SHOW) where `EVENT_SYSTEM_FOREGROUND` fired
+before the window was tracked.
+
+The push matters for apps launched **without** a user-visible activation — the
+canonical case being an AutoHotkey launcher such as `Run("chrome.exe …", ,
+"Hide")`. The `Hide` option starts the process with a hidden window, so the OS
+never grants Chrome foreground permission; when Chrome later shows itself its
+own `SetForegroundWindow` is denied by the foreground lock, and it appears with
+a border but no keyboard focus. `set_foreground_window()` defeats the lock via
+the `AttachThreadInput` trick, making the new window the real foreground
+regardless of how it was launched. The resulting `EVENT_SYSTEM_FOREGROUND` is
+re-consumed by `on_focus_changed()`, which is idempotent on this path (same
+workspace, and the border refresh short-circuits on an unchanged style).
 
 ## The IPC Command Pipeline
 
@@ -153,6 +182,11 @@ animation if the columns are the same width.
 | Matches an ignore rule (maximized, fullscreen, explicit) | Register as `Ignored`, no layout |
 | Classified as floating | Register as `Floating`, add to active `FloatingSpace` (centered), animate, attach border |
 | Classified as tiling | Register as `Tiling::Active`, `insert_window()` next to focused, animate |
+
+After either managed branch, `reconcile_new_window_focus()` actively pushes the
+OS foreground to the new window (no-op when the OS already foregrounded it) and
+syncs the registry focus. See [Foreground on creation](#foreground-on-creation)
+above.
 
 ### Destroyed (`EVENT_OBJECT_DESTROY`)
 
