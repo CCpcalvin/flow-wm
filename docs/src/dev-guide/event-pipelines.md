@@ -96,6 +96,38 @@ regardless of how it was launched. The resulting `EVENT_SYSTEM_FOREGROUND` is
 re-consumed by `on_focus_changed()`, which is idempotent on this path (same
 workspace, and the border refresh short-circuits on an unchanged style).
 
+### Foreground reconciliation (echo backstop)
+
+`EVENT_SYSTEM_FOREGROUND` is a **best-effort** stream, not a complete ledger.
+Microsoft guarantees in-order delivery but explicitly warns that events "fired
+very rapidly" can be dropped or degraded — exactly what happens during a close
+cascade (e.g. a browser tearing down multiple tabs). The OS can settle the
+foreground onto its final window **without** emitting the final
+`EVENT_SYSTEM_FOREGROUND`, leaving flow's tracked focus (border + layout cursor)
+stranded on the previously-echoed window while the real keyboard foreground has
+already moved on. The visible symptom: the border sits on a sibling window while
+keystrokes land elsewhere.
+
+Rather than fight the OS, flow treats the foreground query as the tie-breaker.
+The main loop folds a third deadline —
+`last_foreground_sync + config.focus.foreground_sync_interval_ms` (default
+250 ms) — into its `MsgWaitForMultipleObjects` timeout, so it never sleeps past
+the next reconciliation pass. On every wake, `reconcile_foreground()`:
+
+1. Queries the authoritative `GetForegroundWindow()` (a single microsecond-scale
+   read).
+2. **No-ops** when the tracked focus already matches reality — the common case.
+3. Otherwise, if the real foreground is a tracked window **in the active
+   workspace**, re-runs the `on_focus_changed()` path to correct the border +
+   layout cursor.
+
+The active-workspace restriction is deliberate: a background poll should never
+trigger a workspace switch. A genuine cross-workspace focus change still arrives
+promptly via `EVENT_SYSTEM_FOREGROUND`, which remains the primary driver; the
+poll is only a backstop for the cases where that event is dropped. The interval
+is hot-reloadable via `flow.toml`'s `[focus]` section — lower values catch drift
+sooner at the cost of more wakeups, higher values the reverse.
+
 ## The IPC Command Pipeline
 
 The `flow` CLI connects to the daemon's named pipe, sends a JSON command, and
@@ -229,6 +261,11 @@ restoring saved virtual slots for all cases (minimize + destroy interleaving).
 
 Focus changes do not produce an `AppliedLayout` — they only update internal focus
 tracking. The next layout mutation uses the correct focus.
+
+Because `EVENT_SYSTEM_FOREGROUND` is a best-effort stream that can drop the final
+settle event under rapid churn, this handler is backstopped by the periodic
+`reconcile_foreground()` poll — see [Foreground reconciliation (echo backstop)](#foreground-reconciliation-echo-backstop)
+above.
 
 ### Hidden / Shown (`EVENT_OBJECT_HIDE` / `EVENT_OBJECT_SHOW`)
 

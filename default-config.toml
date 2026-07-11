@@ -86,3 +86,16 @@ floating_color = "#AA00FF"
 [floating]
 # default_width = 1200    # (optional) explicit default float width in pixels
 # default_height = 800    # (optional) explicit default float height in pixels
+
+# Focus reconciliation settings.
+#
+# EVENT_SYSTEM_FOREGROUND is a best-effort stream: under rapid window churn
+# (e.g. a browser closing multiple tabs), the OS can settle the foreground
+# without emitting the final event, leaving flow's internal focus stuck on a
+# stale window. The daemon closes that gap by periodically reconciling its
+# tracked focus against the authoritative GetForegroundWindow() query.
+#
+# - foreground_sync_interval_ms: interval between reconciliation passes (ms).
+#   The common (in-sync) pass is a single microsecond-scale read that no-ops.
+[focus]
+foreground_sync_interval_ms = 250

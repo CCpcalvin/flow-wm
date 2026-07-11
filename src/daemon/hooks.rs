@@ -440,6 +440,55 @@ impl FlowWM {
         }
     }
 
+    /// Reconcile internal focus against the authoritative `GetForegroundWindow()`.
+    ///
+    /// `EVENT_SYSTEM_FOREGROUND` is a best-effort stream: under rapid window
+    /// churn (e.g. a browser tearing down tabs on close) the OS can settle the
+    /// foreground without emitting the final event, leaving flow's tracked focus
+    /// stranded on a stale window while the real foreground moved. This poll —
+    /// driven by the `foreground_sync_interval_ms` deadline folded into the main
+    /// loop's wait timeout — closes that gap by querying the source of truth
+    /// directly and re-running the focus-change path when drift is detected.
+    ///
+    /// Conservative scope: only corrects drift onto a tracked window **in the
+    /// active workspace**. Untracked HWNDs (taskbar, tray, popups) are ignored,
+    /// and a foreground that landed on another workspace is left to the normal
+    /// `EVENT_SYSTEM_FOREGROUND` path so a background poll never triggers an
+    /// unintended workspace switch. The common (in-sync) path is a
+    /// microsecond-scale guard clause.
+    pub(super) fn reconcile_foreground(&mut self) {
+        self.last_foreground_sync = std::time::Instant::now();
+
+        let Some(true_fg) = registry_win32::get_foreground_window() else {
+            return;
+        };
+
+        // Common case: tracked focus already matches reality → no-op.
+        if self.registry.focused().map(|id| id.0) == Some(true_fg) {
+            return;
+        }
+
+        // Ignore untracked foregrounds (taskbar, tray, popups, foreign apps).
+        if !self.registry.is_tracked(true_fg) {
+            return;
+        }
+
+        // Restrict to the active workspace: a background poll should not switch
+        // workspaces. A genuine cross-workspace focus change still arrives via
+        // EVENT_SYSTEM_FOREGROUND, which is the intended driver for switches.
+        let active_id = self.active_monitor().active_workspace_id();
+        if self
+            .active_monitor()
+            .find_workspace_containing(WindowId(true_fg))
+            != Some(active_id)
+        {
+            return;
+        }
+
+        log::debug!("reconcile_foreground: correcting drift to {true_fg}");
+        self.on_focus_changed(true_fg);
+    }
+
     /// Handle `EVENT_OBJECT_STATECHANGE` — Option D recovery for windows that
     /// launched maximized or fullscreen.
     ///

@@ -139,6 +139,9 @@ pub struct FlowConfig {
 
     /// Floating window default-size configuration.
     pub floating: FloatingConfig,
+
+    /// Focus reconciliation configuration.
+    pub focus: FocusConfig,
 }
 
 fn default_window_action() -> WindowAction {
@@ -157,6 +160,7 @@ impl Default for FlowConfig {
             minimize_restore: MinimizeRestore::default(),
             borders: BorderConfig::default(),
             floating: FloatingConfig::default(),
+            focus: FocusConfig::default(),
         }
     }
 }
@@ -690,6 +694,34 @@ impl BorderConfig {
     }
 }
 
+/// Focus reconciliation configuration.
+///
+/// `EVENT_SYSTEM_FOREGROUND` is a best-effort stream: under rapid window churn
+/// (e.g. a browser tearing down tabs on close) the OS may settle the foreground
+/// without emitting the final foreground event, leaving flow's internal focus
+/// stranded on a stale window. To close that gap, the daemon periodically
+/// reconciles its tracked focus against the authoritative `GetForegroundWindow()`
+/// query on the main loop. (`docs/src/dev-guide/event-pipelines.md`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FocusConfig {
+    /// Interval between foreground-reconciliation passes, in milliseconds.
+    ///
+    /// Lower values catch drift sooner at the cost of more wakeups; the
+    /// per-pass work is a single `GetForegroundWindow()` read (~microseconds)
+    /// that no-ops when the tracked focus already matches reality. Tunable at
+    /// runtime via config hot-reload.
+    pub foreground_sync_interval_ms: u64,
+}
+
+impl Default for FocusConfig {
+    fn default() -> Self {
+        Self {
+            foreground_sync_interval_ms: 250,
+        }
+    }
+}
+
 /// Floating window size configuration.
 ///
 /// Both fields are optional explicit pixel sizes. When a field is `None`, the
@@ -842,6 +874,21 @@ strategy = "original_slot"
         );
     }
 
+    /// Positive: `FocusConfig::default()` ships `foreground_sync_interval_ms = 250`
+    /// — the tuned ~4 Hz foreground-reconciliation cadence that balances
+    /// focus-drift detection latency against wakeup cost.
+    ///
+    /// A regression to a much larger value would let the post-close-cascade
+    /// settle window slip past the next poll (visible focus desync), while a
+    /// much smaller value burns wakeups on a microsecond-scale no-op. The
+    /// `default-config.toml` sync test catches this only if the example file is
+    /// also updated; this focused check guards the compiled `Default` impl
+    /// independently, mirroring `border_config_default_overlap_is_one`.
+    #[test]
+    fn focus_config_default_interval_is_250ms() {
+        assert_eq!(FocusConfig::default().foreground_sync_interval_ms, 250);
+    }
+
     // --- Integration: Full field preservation through round-trip ---
 
     #[test]
@@ -877,6 +924,9 @@ strategy = "original_slot"
                 default_width: Some(1200),
                 default_height: Some(800),
             },
+            focus: FocusConfig {
+                foreground_sync_interval_ms: 400,
+            },
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
@@ -904,6 +954,7 @@ strategy = "original_slot"
         assert_eq!(parsed.borders.floating_color, Color::rgb(0x70, 0x80, 0x90));
         assert_eq!(parsed.floating.default_width, Some(1200));
         assert_eq!(parsed.floating.default_height, Some(800));
+        assert_eq!(parsed.focus.foreground_sync_interval_ms, 400);
     }
 
     #[test]

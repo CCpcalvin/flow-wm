@@ -1,13 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "FlowConfig",
-  "description": "Top-level application configuration structure.\n\nLoaded from `%USERPROFILE%\\.config\\flow\\flow.yml` (see [`config::dirs`](crate::config::dirs) for the full resolution chain including `--config` flag and `FLOW_CONFIG_DIR` env var overrides). Every field has a default, so even an empty YAML file `{}` produces a valid config.\n\nThis struct contains **application settings only** — hotkeys, padding, animation, etc. Window classification rules live in a separate file ([`WindowRulesConfig`]) to allow independent editing.\n\n# Example\n\n```yaml super_key: VK_F24 column_width: 960 min_column_width_px: 320 padding: window: 4 up: 0 down: 0 hotkeys: focus_left: Super+H focus_right: Super+L animation: enabled: true duration_ms: 180 easing: ease-out-expo ```\n\nSee `docs/spec/04-config-and-persistence.md` for the full schema.",
+  "description": "Top-level application configuration structure.\n\nLoaded from `%USERPROFILE%\\.config\\flow\\flow.toml` (see [`config::dirs`](crate::config::dirs) for the full resolution chain including `--config` flag and `FLOW_CONFIG_DIR` env var overrides). The struct carries `#[serde(default)]`, so the file may be partial or even empty — serde fills missing fields from the [`Default`] impl.\n\nThe canonical default values live in the `Default` impl below. The `default-config.toml` file is a hand-written **example** copied to users by `flow config init` — it is not read at runtime.\n\nThis struct contains **application settings only** — padding, animation, etc. Window classification rules live in a separate file ([`WindowRulesConfig`]) to allow independent editing.\n\n# Column Sizing\n\nThe primary column sizing mode is [`columns_per_screen`](FlowConfig::columns_per_screen): the user specifies how many columns fit on one monitor, and the daemon computes the actual pixel width at runtime from the monitor resolution and [`window_gap`](Padding::window_gap).\n\nPower users can override this by setting [`column_width`](FlowConfig::column_width) to a fixed pixel value. When `column_width` is `Some`, it takes priority over `columns_per_screen` — the auto-computation is skipped entirely.\n\n# Example\n\n```toml columns_per_screen = 4 min_column_width_px = 640\n\n[padding] window_gap = 16 up = 16 down = 16\n\n[animation] enabled = true duration_ms = 240 easing = \"ease-out-expo\" ```\n\nSee `docs/spec/04-config-and-persistence.md` for the full schema.",
   "type": "object",
   "properties": {
     "animation": {
       "description": "Animation settings.",
       "default": {
-        "duration_ms": 180,
+        "duration_ms": 240,
         "easing": "ease-out-expo",
         "enabled": true
       },
@@ -17,39 +17,68 @@
         }
       ]
     },
+    "borders": {
+      "description": "Window border overlay configuration.",
+      "default": {
+        "enabled": true,
+        "floating_color": "#AA00FF",
+        "focused_color": "#00AAFF",
+        "overlap": 1,
+        "thickness": 3,
+        "unfocused_color": "#555555"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/BorderConfig"
+        }
+      ]
+    },
     "column_width": {
-      "description": "Default column width in pixels. Default: 960.",
-      "default": 960,
+      "description": "Fixed column width in pixels — power-user override.\n\nWhen `Some`, this overrides the auto-computation from [`columns_per_screen`](FlowConfig::columns_per_screen). When `None`, the daemon computes the width from the monitor resolution, `columns_per_screen`, and `window_gap`.\n\nThis field is **optional** in TOML — most users should rely on `columns_per_screen`. A missing `Option` field deserializes to `None` automatically.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "columns_per_screen": {
+      "description": "Number of columns that fit side-by-side on one monitor screen.\n\nThe daemon computes the actual pixel width at startup: `base_content_width = (monitor_width - (N+1) * window_gap) / N` where `N = columns_per_screen`.\n\nIf [`column_width`](FlowConfig::column_width) is also set, that value takes priority and this field is ignored.",
+      "default": 4,
       "type": "integer",
       "format": "uint32",
       "minimum": 0.0
     },
-    "hotkeys": {
-      "description": "Hotkey bindings.",
+    "floating": {
+      "description": "Floating window default-size configuration.",
+      "default": {},
+      "allOf": [
+        {
+          "$ref": "#/definitions/FloatingConfig"
+        }
+      ]
+    },
+    "focus": {
+      "description": "Focus reconciliation configuration.",
       "default": {
-        "close_window": "",
-        "focus_down": "",
-        "focus_left": "",
-        "focus_right": "",
-        "focus_up": "",
-        "place_above": "",
-        "reload_config": "",
-        "scroll_left": "",
-        "scroll_right": "",
-        "swap_left": "",
-        "swap_right": "",
-        "toggle_float": "",
-        "toggle_monocle": ""
+        "foreground_sync_interval_ms": 250
       },
       "allOf": [
         {
-          "$ref": "#/definitions/Hotkeys"
+          "$ref": "#/definitions/FocusConfig"
         }
       ]
     },
     "min_column_width_px": {
-      "description": "Minimum column width in pixels. Columns cannot be resized below this. Default: 320.",
-      "default": 320,
+      "description": "Minimum column width in pixels. Columns cannot be resized below this.",
+      "default": 640,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "min_window_height_px": {
+      "description": "Minimum row height in pixels — the floor for any single window's allocated height inside a column.\n\nThis bounds the maximum number of rows (windows) that can stack inside one column: a column cannot grow rows beyond `available_height / min_window_height_px`. It is also the lower clamp for future drag-resize / IPC continuous-height adjustment of individual rows.\n\nSee (`docs/src/dev-guide/layout/mutations.md`) for the height- distribution formula and the `merge-column` / `promote` operations.",
+      "default": 100,
       "type": "integer",
       "format": "uint32",
       "minimum": 0.0
@@ -70,36 +99,35 @@
       "default": {
         "down": 0,
         "up": 0,
-        "window": 4
+        "window_gap": 16
       },
       "allOf": [
         {
           "$ref": "#/definitions/Padding"
         }
       ]
-    },
-    "super_key": {
-      "description": "The virtual key code treated as the Super/modifier key.",
-      "default": "VK_F24",
-      "type": "string"
     }
   },
   "definitions": {
     "AnimationConfig": {
-      "description": "Animation configuration for layout transitions.\n\nWhen disabled, all [`WindowMove`](crate::layout::WindowMove)s are applied instantly (hint set to [`Restore`](crate::layout::AnimationHint::Restore)).",
+      "description": "Animation configuration for layout transitions.\n\nWhen disabled, all window position changes are applied instantly without animation.",
       "type": "object",
       "properties": {
         "duration_ms": {
           "description": "Animation duration in milliseconds.",
-          "default": 180,
+          "default": 240,
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
         },
         "easing": {
-          "description": "Easing function name (e.g., `\"ease-out-expo\"`).",
+          "description": "Easing curve applied to window position channels (x, y).\n\nSee [`ConfigEasing`] for the full list of supported curves. Defaults to [`ConfigEasing::EaseOutExpo`].",
           "default": "ease-out-expo",
-          "type": "string"
+          "allOf": [
+            {
+              "$ref": "#/definitions/ConfigEasing"
+            }
+          ]
         },
         "enabled": {
           "description": "Whether layout transitions are animated.",
@@ -108,74 +136,306 @@
         }
       }
     },
-    "Hotkeys": {
-      "description": "All hotkey bindings (13 total).\n\nDefault keybinds use Vim-style `Super+H/J/K/L` for focus. All defaults are generated via a `default_hotkey!` macro to avoid repetition.",
+    "BorderConfig": {
+      "description": "Window border overlay configuration.\n\nThe border crate draws a thin colored ring around each managed window as a separate layered overlay window that follows the target HWND's geometry (driven by `EVENT_OBJECT_LOCATIONCHANGE`). The daemon shrinks the actual window rect by `(thickness - overlap)` pixels on each side so the colored ring sits in the surrounding gap and overlaps the visible content by `overlap` px (closing the DWM hairline gap). See `docs/src/dev-guide/borders.md` for the full coordinate-space model.\n\n# Example\n\n```toml [borders] enabled = true thickness = 3 overlap = 1 focused_color = \"#00AAFF\" unfocused_color = \"#555555\" floating_color = \"#AA00FF\" ```",
       "type": "object",
       "properties": {
-        "close_window": {
-          "description": "Close focused window: default `Super+Q`.",
-          "default": "Super+Q",
-          "type": "string"
+        "enabled": {
+          "description": "Master switch. When `false`, no overlay windows are created and any existing overlays are detached.",
+          "default": true,
+          "type": "boolean"
         },
-        "focus_down": {
-          "description": "Focus down: default `Super+J`.",
-          "default": "Super+J",
-          "type": "string"
+        "floating_color": {
+          "description": "Border color for floating windows.",
+          "default": "#AA00FF",
+          "type": "string",
+          "format": "hex-color",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
         },
-        "focus_left": {
-          "description": "Focus left: default `Super+H`.",
-          "default": "Super+H",
-          "type": "string"
+        "focused_color": {
+          "description": "Border color for the focused/active window.",
+          "default": "#00AAFF",
+          "type": "string",
+          "format": "hex-color",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
         },
-        "focus_right": {
-          "description": "Focus right: default `Super+L`.",
-          "default": "Super+L",
-          "type": "string"
+        "overlap": {
+          "description": "How many pixels the border ring overlaps the window's visible content.\n\nKomorebi-style overlap. `0` keeps the ring entirely in the reserved gap (window shrinks by the full `thickness`); higher values pull the content edge outward until, at `overlap == thickness`, the content fills the whole layout slot and the ring sits fully on top of it. The default of `1` closes the 1px DWM-client-edge hairline that otherwise shows between an unfocused ring and the window content. Capped at `thickness` by [`BorderConfig::validate`]. (`docs/src/dev-guide/borders.md`)",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
-        "focus_up": {
-          "description": "Focus up: default `Super+K`.",
-          "default": "Super+K",
-          "type": "string"
+        "thickness": {
+          "description": "Border ring thickness in pixels, applied uniformly on all four sides.\n\nThe ring is drawn in the outer `thickness` px of each window's layout slot. The visible window content shrinks by `(thickness - overlap)` px per edge (see `overlap`), so the ring overlaps the content by `overlap` px rather than leaving a gap. (`docs/src/dev-guide/borders.md`)",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
-        "place_above": {
-          "description": "Place window above others in column: default `Super+A`.",
-          "default": "Super+A",
-          "type": "string"
+        "unfocused_color": {
+          "description": "Border color for tiled-but-not-focused windows.",
+          "default": "#555555",
+          "type": "string",
+          "format": "hex-color",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        }
+      }
+    },
+    "ConfigEasing": {
+      "description": "Named easing curves available in user configuration.\n\nEach variant corresponds to an easing function implemented in [`crate::animation::easing::EasingStyle`]. The variant names use CSS-like kebab-case when serialized to TOML (e.g. `EaseOutExpo` → `\"ease-out-expo\"`).\n\nThe full set mirrors the 31 named curves in the animation engine. `CubicBezier` is excluded because it requires four `f64` parameters that cannot be expressed as a simple serde enum variant.\n\n# Design Decision\n\nThis enum lives in the `config/` layer (not `animation/`) to honour the module dependency hierarchy: `config/` may only import from `common/`, never from `animation/`. The conversion from `ConfigEasing` → `EasingStyle` is performed in the `daemon/` layer (see [`crate::daemon::config_derive`]).\n\n# Example\n\n```toml [animation] easing = \"ease-in-out-cubic\" ```",
+      "oneOf": [
+        {
+          "description": "Constant-velocity linear interpolation.",
+          "type": "string",
+          "enum": [
+            "linear"
+          ]
         },
-        "reload_config": {
-          "description": "Reload config from disk: default `Super+Shift+R`.",
-          "default": "Super+Shift+R",
-          "type": "string"
+        {
+          "description": "Accelerating sine curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-sine"
+          ]
         },
-        "scroll_left": {
-          "description": "Scroll left: default `Super+Left`.",
-          "default": "Super+Left",
-          "type": "string"
+        {
+          "description": "Decelerating sine curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-sine"
+          ]
         },
-        "scroll_right": {
-          "description": "Scroll right: default `Super+Right`.",
-          "default": "Super+Right",
-          "type": "string"
+        {
+          "description": "Symmetric sine ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-sine"
+          ]
         },
-        "swap_left": {
-          "description": "Swap left: default `Super+Shift+H`.",
-          "default": "Super+Shift+H",
-          "type": "string"
+        {
+          "description": "Accelerating quadratic curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-quad"
+          ]
         },
-        "swap_right": {
-          "description": "Swap right: default `Super+Shift+L`.",
-          "default": "Super+Shift+L",
-          "type": "string"
+        {
+          "description": "Decelerating quadratic curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-quad"
+          ]
         },
-        "toggle_float": {
-          "description": "Toggle float/tiling: default `Super+Space`.",
-          "default": "Super+Space",
-          "type": "string"
+        {
+          "description": "Symmetric quadratic ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-quad"
+          ]
         },
-        "toggle_monocle": {
-          "description": "Toggle monocle mode: default `Super+M`.",
-          "default": "Super+M",
-          "type": "string"
+        {
+          "description": "Accelerating cubic curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-cubic"
+          ]
+        },
+        {
+          "description": "Decelerating cubic curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-cubic"
+          ]
+        },
+        {
+          "description": "Symmetric cubic ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-cubic"
+          ]
+        },
+        {
+          "description": "Accelerating quartic curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-quart"
+          ]
+        },
+        {
+          "description": "Decelerating quartic curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-quart"
+          ]
+        },
+        {
+          "description": "Symmetric quartic ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-quart"
+          ]
+        },
+        {
+          "description": "Accelerating quintic curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-quint"
+          ]
+        },
+        {
+          "description": "Decelerating quintic curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-quint"
+          ]
+        },
+        {
+          "description": "Symmetric quintic ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-quint"
+          ]
+        },
+        {
+          "description": "Accelerating exponential curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-expo"
+          ]
+        },
+        {
+          "description": "Decelerating exponential curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-expo"
+          ]
+        },
+        {
+          "description": "Symmetric exponential ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-expo"
+          ]
+        },
+        {
+          "description": "Accelerating circular curve.",
+          "type": "string",
+          "enum": [
+            "ease-in-circ"
+          ]
+        },
+        {
+          "description": "Decelerating circular curve.",
+          "type": "string",
+          "enum": [
+            "ease-out-circ"
+          ]
+        },
+        {
+          "description": "Symmetric circular ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-circ"
+          ]
+        },
+        {
+          "description": "Slight pull-back before departure.",
+          "type": "string",
+          "enum": [
+            "ease-in-back"
+          ]
+        },
+        {
+          "description": "Slight overshoot past the target.",
+          "type": "string",
+          "enum": [
+            "ease-out-back"
+          ]
+        },
+        {
+          "description": "Symmetric back ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-back"
+          ]
+        },
+        {
+          "description": "Elastic oscillation on departure.",
+          "type": "string",
+          "enum": [
+            "ease-in-elastic"
+          ]
+        },
+        {
+          "description": "Elastic oscillation on arrival.",
+          "type": "string",
+          "enum": [
+            "ease-out-elastic"
+          ]
+        },
+        {
+          "description": "Symmetric elastic ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-elastic"
+          ]
+        },
+        {
+          "description": "Bounce on departure.",
+          "type": "string",
+          "enum": [
+            "ease-in-bounce"
+          ]
+        },
+        {
+          "description": "Bounce on arrival.",
+          "type": "string",
+          "enum": [
+            "ease-out-bounce"
+          ]
+        },
+        {
+          "description": "Symmetric bounce ease-in-out.",
+          "type": "string",
+          "enum": [
+            "ease-in-out-bounce"
+          ]
+        }
+      ]
+    },
+    "FloatingConfig": {
+      "description": "Floating window size configuration.\n\nBoth fields are optional explicit pixel sizes. When a field is `None`, the daemon falls back to a built-in policy: 60% × 80% of the monitor work area, capped so ultrawide / 4K monitors don't produce absurdly large popups. The fallback constants live in `src/daemon/dispatch.rs` (the sole consumer).\n\nAn explicit pixel value is always respected as-is — the cap applies only to the fallback path.",
+      "type": "object",
+      "properties": {
+        "default_height": {
+          "description": "Explicit default float height in pixels. `None` → built-in fallback.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "default_width": {
+          "description": "Explicit default float width in pixels. `None` → built-in fallback.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      }
+    },
+    "FocusConfig": {
+      "description": "Focus reconciliation configuration.\n\n`EVENT_SYSTEM_FOREGROUND` is a best-effort stream: under rapid window churn (e.g. a browser tearing down tabs on close) the OS may settle the foreground without emitting the final foreground event, leaving flow's internal focus stranded on a stale window. To close that gap, the daemon periodically reconciles its tracked focus against the authoritative `GetForegroundWindow()` query on the main loop. (`docs/src/dev-guide/event-pipelines.md`)",
+      "type": "object",
+      "properties": {
+        "foreground_sync_interval_ms": {
+          "description": "Interval between foreground-reconciliation passes, in milliseconds.\n\nLower values catch drift sooner at the cost of more wakeups; the per-pass work is a single `GetForegroundWindow()` read (~microseconds) that no-ops when the tracked focus already matches reality. Tunable at runtime via config hot-reload.",
+          "default": 250,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       }
     },
@@ -221,24 +481,24 @@
       ]
     },
     "Padding": {
-      "description": "Padding configuration in pixels.\n\nPadding is applied during the projection step (see [`projection`](crate::layout::projection)), not stored inside window structs. This means [`ActualEntry`](crate::layout::ActualEntry) rects are the **final HWND rects** — they can be passed directly to `SetWindowPos`.\n\n- `window`: inset around each window within its container cell (visual gap) - `up`: top screen margin so windows don't touch the top edge - `down`: bottom screen margin (e.g., for taskbar clearance)\n\n```text ┌─────────────────── monitor work area ───────────────────┐ │ ↑ padding.up                                            │ │ ┌──────── column cell ────────┐ ┌── next column cell ──┐ │ │ │ ↑ padding.window            │ │                       │ │ │ │ ┌──── window (HWND) ────┐   │ │                       │ │ │ │ │                       │   │ │                       │ │ │ │ └───────────────────────┘   │ │                       │ │ │ │ ↓ padding.window            │ │                       │ │ │ └─────────────────────────────┘ └───────────────────────┘ │ │ ↓ padding.down                                          │ └──────────────────────────────────────────────────────────┘ ```",
+      "description": "Gap and margin configuration in pixels.\n\nGap is applied during the projection step (see [`projection`](crate::layout::projection)), not stored inside window structs. This means [`ActualEntry`](crate::layout::ActualEntry) rects are the **final HWND rects** — they can be passed directly to `SetWindowPos`.\n\n# Uniform Gap Model\n\n`window_gap` creates **uniform spacing** everywhere:\n\n```text Edge | window_gap | [Window 1] | window_gap | [Window 2] | window_gap | Edge ```\n\n- `window_gap`: uniform gap between all elements (windows, screen edges) - `up`: top screen margin (reserved space above tiling area) - `down`: bottom screen margin (reserved space below tiling area, e.g., taskbar)\n\nThe slot-based canvas model ensures that expanding a column consumes the inter-column gap so the layout always fills the screen.\n\n```text ┌─────────────────── monitor work area ────────────────────┐ │ ↑ padding.up                                             │ │ ↑ window_gap                                             │ │ ┌──── window (HWND) ────┐   ┌──── window (HWND) ────┐    │ │ │                       │   │                       │    │ │ └───────────────────────┘   └───────────────────────┘    │ │ ↓ window_gap                                             │ │ ↓ padding.down                                           │ └──────────────────────────────────────────────────────────┘ ```",
       "type": "object",
       "properties": {
         "down": {
-          "description": "Bottom screen margin (e.g., for taskbar clearance).",
+          "description": "Bottom screen margin — reserved space below the tiling area (e.g., taskbar).",
           "default": 0,
           "type": "integer",
           "format": "int32"
         },
         "up": {
-          "description": "Top screen margin so windows don't touch the top edge.",
+          "description": "Top screen margin — reserved space above the tiling area.",
           "default": 0,
           "type": "integer",
           "format": "int32"
         },
-        "window": {
-          "description": "Inset around each window within its container cell (visual gap).",
-          "default": 4,
+        "window_gap": {
+          "description": "Uniform gap between all elements (windows and screen edges), in pixels.\n\nThis single value controls horizontal (inter-column), vertical (inter-row), and edge-to-window spacing. Setting `window_gap = 16` means every gap everywhere is 16 pixels.",
+          "default": 16,
           "type": "integer",
           "format": "int32"
         }

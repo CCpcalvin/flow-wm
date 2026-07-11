@@ -182,6 +182,17 @@ pub struct FlowWM {
     /// [`arm_float_tracking_suppression`](super::FlowWM::arm_float_tracking_suppression)
     /// and cleared by the resume poll in the main loop.
     pub(super) float_resume_deadline: Option<std::time::Instant>,
+
+    /// Timestamp of the most recent foreground-reconciliation pass.
+    ///
+    /// The main loop folds `last_foreground_sync + foreground_sync_interval_ms`
+    /// into its `MsgWaitForMultipleObjects` timeout so it never sleeps past the
+    /// next reconciliation deadline. On each wake,
+    /// [`reconcile_foreground`](super::FlowWM::reconcile_foreground) stamps this
+    /// field to `now` and re-checks `GetForegroundWindow()` against the tracked
+    /// focus — closing the gap when `EVENT_SYSTEM_FOREGROUND` is dropped under
+    /// rapid window churn. (`docs/src/dev-guide/event-pipelines.md`)
+    pub(super) last_foreground_sync: std::time::Instant,
 }
 
 impl FlowWM {

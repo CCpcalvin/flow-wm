@@ -110,7 +110,9 @@ impl FlowWM {
     /// start_accept()                          // Spawn background accept thread
     /// loop {
     ///     resume float tracking if its deadline arrived
-    ///     timeout = soonest(pending_creations?100ms, float_resume_deadline, INFINITE)
+    ///     reconcile foreground against GetForegroundWindow()
+    ///     timeout = soonest(pending_creations?100ms, float_resume_deadline,
+    ///                       foreground_sync_interval, INFINITE)
     ///     MsgWaitForMultipleObjects(          // Sleep until something happens
     ///         [hook_signal, connected_event],
     ///         timeout,
@@ -200,6 +202,14 @@ impl FlowWM {
             // Runs before computing the timeout so a due deadline is handled
             // now instead of scheduling a 1 ms re-wake.
             self.maybe_resume_float_tracking();
+
+            // Reconcile internal focus against GetForegroundWindow(). This runs
+            // on every wake, but no-ops in ~1 µs when tracked focus already
+            // matches reality. The `foreground_sync_interval_ms` timeout folded
+            // into `compute_wait_timeout` is what guarantees this runs at least
+            // that often even with no hook/IPC activity; running it on every
+            // wake adds only a microsecond-scale guard clause.
+            self.reconcile_foreground();
 
             // Block until a hook event, an IPC client connection, OR a Win32
             // window message arrives. When there are pending window creations
@@ -361,9 +371,20 @@ impl FlowWM {
     /// using the manager's current pending-creations state and resume
     /// deadline. See that function for the deadline-selection rules.
     fn compute_wait_timeout(&self) -> u32 {
+        // Fold the next foreground-reconciliation deadline into the wait so the
+        // loop never sleeps past the configured sync interval. `None` only when
+        // the interval is disabled (0); otherwise always Some.
+        let next_foreground_sync =
+            (self.config.focus.foreground_sync_interval_ms != 0).then(|| {
+                self.last_foreground_sync
+                    + std::time::Duration::from_millis(
+                        self.config.focus.foreground_sync_interval_ms,
+                    )
+            });
         compute_wait_timeout_inner(
             !self.pending_creations.is_empty(),
             self.float_resume_deadline,
+            next_foreground_sync,
             std::time::Instant::now(),
         )
     }
@@ -475,24 +496,35 @@ impl FlowWM {
 /// - `float_resume_deadline` → milliseconds remaining until it's due (floored
 ///   to 1 so a due deadline re-wakes the loop instead of busy-looping on 0).
 ///
-/// Returns `u32::MAX` (`INFINITE`) when neither source is active. Extracted
+/// Returns `u32::MAX` (`INFINITE`) when no source is active. Extracted
 /// to a free function so the branching is unit-testable without constructing
 /// a full [`FlowWM`] (which needs Win32 + a hook thread).
+///
+/// Three finite-deadline sources fold into the result via `min`:
+/// 1. `has_pending_creations` → fixed `PENDING_RETRY_TIMEOUT_MS` cadence.
+/// 2. `float_resume_deadline` → remaining ms until float tracking resumes.
+/// 3. `next_foreground_sync` → remaining ms until the foreground is reconciled
+///    against `GetForegroundWindow()` (closes the gap when
+///    `EVENT_SYSTEM_FOREGROUND` is dropped under rapid window churn).
 fn compute_wait_timeout_inner(
     has_pending_creations: bool,
     float_resume_deadline: Option<std::time::Instant>,
+    next_foreground_sync: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> u32 {
     let mut best: Option<u32> = None;
     if has_pending_creations {
         best = Some(PENDING_RETRY_TIMEOUT_MS);
     }
-    if let Some(deadline) = float_resume_deadline {
+    // Fold two optional deadlines through the same min-reduce. A due (past)
+    // deadline floors at 1 ms so the loop re-wakes and runs the handler instead
+    // of busy-spinning; the top-of-loop handlers clear due deadlines first.
+    for deadline in float_resume_deadline
+        .into_iter()
+        .chain(next_foreground_sync)
+    {
         let remaining = deadline.saturating_duration_since(now);
         let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
-        // Floor at 1 ms: a 0 would return immediately and busy-loop without
-        // reaching the resume handler. The top-of-loop resume check clears
-        // due deadlines before they can busy-spin.
         let ms = ms.max(1);
         best = Some(best.map_or(ms, |b| b.min(ms)));
     }
@@ -507,14 +539,14 @@ mod tests {
     #[test]
     fn wait_timeout_infinite_when_idle() {
         let now = Instant::now();
-        assert_eq!(compute_wait_timeout_inner(false, None, now), u32::MAX);
+        assert_eq!(compute_wait_timeout_inner(false, None, None, now), u32::MAX);
     }
 
     #[test]
     fn wait_timeout_pending_creations_uses_retry_cadence() {
         let now = Instant::now();
         assert_eq!(
-            compute_wait_timeout_inner(true, None, now),
+            compute_wait_timeout_inner(true, None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -523,7 +555,10 @@ mod tests {
     fn wait_timeout_float_deadline_uses_remaining_ms() {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(500);
-        assert_eq!(compute_wait_timeout_inner(false, Some(deadline), now), 500);
+        assert_eq!(
+            compute_wait_timeout_inner(false, Some(deadline), None, now),
+            500
+        );
     }
 
     #[test]
@@ -531,7 +566,10 @@ mod tests {
         let now = Instant::now();
         // Pending = 100 ms cadence; deadline in 50 ms → 50 wins.
         let deadline = now + Duration::from_millis(50);
-        assert_eq!(compute_wait_timeout_inner(true, Some(deadline), now), 50);
+        assert_eq!(
+            compute_wait_timeout_inner(true, Some(deadline), None, now),
+            50
+        );
     }
 
     #[test]
@@ -540,7 +578,7 @@ mod tests {
         // Pending = 100 ms; deadline in 5 s → 100 wins.
         let deadline = now + Duration::from_secs(5);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), now),
+            compute_wait_timeout_inner(true, Some(deadline), None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -551,6 +589,33 @@ mod tests {
         // Already past: saturating_duration_since is 0 → floor to 1 so the
         // loop re-wakes and runs the resume handler instead of busy-spinning.
         let deadline = now - Duration::from_millis(10);
-        assert_eq!(compute_wait_timeout_inner(false, Some(deadline), now), 1);
+        assert_eq!(
+            compute_wait_timeout_inner(false, Some(deadline), None, now),
+            1
+        );
+    }
+
+    #[test]
+    fn wait_timeout_foreground_sync_uses_remaining_ms() {
+        let now = Instant::now();
+        // Sync deadline in 250 ms (the default interval) → 250.
+        let deadline = now + Duration::from_millis(250);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, Some(deadline), now),
+            250
+        );
+    }
+
+    #[test]
+    fn wait_timeout_foreground_sync_wins_when_soonest() {
+        let now = Instant::now();
+        // Float deadline in 5 s; foreground sync in 80 ms → 80 wins. Confirms
+        // the third source participates in the min-reduce, not just appends.
+        let float_deadline = now + Duration::from_secs(5);
+        let sync_deadline = now + Duration::from_millis(80);
+        assert_eq!(
+            compute_wait_timeout_inner(false, Some(float_deadline), Some(sync_deadline), now),
+            80
+        );
     }
 }

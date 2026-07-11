@@ -1,16 +1,16 @@
-# Graph Report - scrolling-tiling-manager  (2026-07-02)
+# Graph Report - flow-wm  (2026-07-11)
 
 ## Corpus Check
-- 321 files · ~399,380 words
+- 334 files · ~598,826 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 8605 nodes · 16830 edges · 502 communities (473 shown, 29 thin omitted)
-- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 1266 edges (avg confidence: 0.8)
+- 11148 nodes · 23833 edges · 502 communities (477 shown, 25 thin omitted)
+- Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 1555 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `9876fe9b`
+- Built from commit: `4b5a0efc`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -283,7 +283,6 @@
 - [[_COMMUNITY_Community 270|Community 270]]
 - [[_COMMUNITY_Community 271|Community 271]]
 - [[_COMMUNITY_Community 272|Community 272]]
-- [[_COMMUNITY_Community 273|Community 273]]
 - [[_COMMUNITY_Community 274|Community 274]]
 - [[_COMMUNITY_Community 275|Community 275]]
 - [[_COMMUNITY_Community 276|Community 276]]
@@ -340,6 +339,7 @@
 - [[_COMMUNITY_Community 327|Community 327]]
 - [[_COMMUNITY_Community 328|Community 328]]
 - [[_COMMUNITY_Community 329|Community 329]]
+- [[_COMMUNITY_Community 330|Community 330]]
 - [[_COMMUNITY_Community 331|Community 331]]
 - [[_COMMUNITY_Community 332|Community 332]]
 - [[_COMMUNITY_Community 333|Community 333]]
@@ -490,34 +490,31 @@
 - [[_COMMUNITY_Community 484|Community 484]]
 - [[_COMMUNITY_Community 485|Community 485]]
 - [[_COMMUNITY_Community 486|Community 486]]
-- [[_COMMUNITY_Community 487|Community 487]]
 - [[_COMMUNITY_Community 488|Community 488]]
-- [[_COMMUNITY_Community 489|Community 489]]
 - [[_COMMUNITY_Community 490|Community 490]]
-- [[_COMMUNITY_Community 491|Community 491]]
-- [[_COMMUNITY_Community 492|Community 492]]
 - [[_COMMUNITY_Community 493|Community 493]]
 - [[_COMMUNITY_Community 494|Community 494]]
 - [[_COMMUNITY_Community 495|Community 495]]
 - [[_COMMUNITY_Community 496|Community 496]]
 - [[_COMMUNITY_Community 497|Community 497]]
-- [[_COMMUNITY_Community 498|Community 498]]
 - [[_COMMUNITY_Community 499|Community 499]]
-- [[_COMMUNITY_Community 501|Community 501]]
+- [[_COMMUNITY_Community 506|Community 506]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `push()` - 278 edges
-2. `WindowId` - 108 edges
-3. `get()` - 100 edges
-4. `test_config()` - 94 edges
-5. `forEach()` - 83 edges
-6. `candidate()` - 81 edges
-7. `node()` - 71 edges
-8. `default_rules()` - 70 edges
-9. `r()` - 67 edges
-10. `three_column_layout()` - 63 edges
+1. `push()` - 276 edges
+2. `push()` - 276 edges
+3. `o()` - 238 edges
+4. `WindowId` - 108 edges
+5. `get()` - 100 edges
+6. `get()` - 100 edges
+7. `test_config()` - 94 edges
+8. `forEach()` - 82 edges
+9. `forEach()` - 82 edges
+10. `candidate()` - 81 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `Win32Backend` --semantically_similar_to--> `MockBackend`  [INFERRED] [semantically similar]
+  src/animation/backend/win32.rs → src/animation/backend/mock.rs
 - `Padding` --semantically_similar_to--> `Padding`  [INFERRED] [semantically similar]
   src/config/types.rs → src/layout/types.rs
 - `registry integration tests` --references--> `HookEvent`  [INFERRED]
@@ -526,8 +523,6 @@
   .opencode/context/core/workflows/external-libraries-faq.md → .opencode/context/core/workflows/external-context-integration.md
 - `Task Breakdown Guidelines` --semantically_similar_to--> `Task Delegation Core Workflow`  [INFERRED] [semantically similar]
   .opencode/context/core/workflows/feature-breakdown.md → .opencode/context/core/workflows/task-delegation-basics.md
-- `Subagent Testing Modes` --references--> `Delegation Testing Mode (Integration Testing)`  [EXTRACTED]
-  .opencode/context/openagents-repo/concepts/subagent-testing-modes.md → concepts/subagent-testing-modes.md
 
 ## Import Cycles
 - 1-file cycle: `src/animation/animator.rs -> src/animation/animator.rs`
@@ -537,19 +532,19 @@
 - 1-file cycle: `src/daemon/config_derive.rs -> src/daemon/config_derive.rs`
 - 1-file cycle: `src/animation/interpolation.rs -> src/animation/interpolation.rs`
 - 1-file cycle: `src/animation/metrics.rs -> src/animation/metrics.rs`
-- 1-file cycle: `src/bin/flow.rs -> src/bin/flow.rs`
+- 1-file cycle: `src/autostart.rs -> src/autostart.rs`
+- 1-file cycle: `tests/cli/test_desktop.rs -> tests/cli/test_desktop.rs`
+- 1-file cycle: `src/registry/core.rs -> src/registry/core.rs`
+- 1-file cycle: `src/registry/win32.rs -> src/registry/win32.rs`
 - 1-file cycle: `src/borders/border.rs -> src/borders/border.rs`
+- 1-file cycle: `src/config/history.rs -> src/config/history.rs`
+- 1-file cycle: `src/config/lifecycle.rs -> src/config/lifecycle.rs`
+- 1-file cycle: `src/bin/flow.rs -> src/bin/flow.rs`
 - 1-file cycle: `src/borders/mod.rs -> src/borders/mod.rs`
 - 1-file cycle: `src/registry/types.rs -> src/registry/types.rs`
 - 1-file cycle: `src/borders/style.rs -> src/borders/style.rs`
 - 1-file cycle: `src/config/color.rs -> src/config/color.rs`
 - 1-file cycle: `src/config/types.rs -> src/config/types.rs`
-- 1-file cycle: `src/config/lifecycle.rs -> src/config/lifecycle.rs`
-- 1-file cycle: `src/config/dirs.rs -> src/config/dirs.rs`
-- 1-file cycle: `src/config/history.rs -> src/config/history.rs`
-- 1-file cycle: `src/logging.rs -> src/logging.rs`
-- 1-file cycle: `src/daemon/animation.rs -> src/daemon/animation.rs`
-- 1-file cycle: `src/daemon/borders.rs -> src/daemon/borders.rs`
 
 ## Hyperedges (group relationships)
 - **Animation Core Pipeline: Batch + Easing + Interpolation** — animation_batch_animationbatch, animation_easing_apply_ease, animation_interpolation_lerp_rect, animation_backend_mod_windowbackend [INFERRED 0.95]
@@ -583,7 +578,7 @@
 - **Design System Component Suite** — design-systems_oklch_color_space, design-systems_typography_system, design-systems_shadow_system, design-systems_spacing_system, design-systems_border_radius_system [EXTRACTED 0.95]
 - **Graphify Extraction Pipeline** — graphify_skill_ast_extraction, graphify_skill_semantic_extraction, references_extraction-spec_extraction_subagent_prompt, graphify_skill_community_detection, graphify_skill_god_nodes [EXTRACTED 0.95]
 
-## Communities (502 total, 29 thin omitted)
+## Communities (502 total, 25 thin omitted)
 
 ### Community 0 - "Layout Mutations"
 Cohesion: 0.06
@@ -591,19 +586,19 @@ Nodes (42): center_viewport_on_focused(), center_viewport_on_focused_all_fit_cas
 
 ### Community 1 - "Window Registry Core"
 Cohesion: 0.12
-Nodes (49): ReclassifyResult, default_rules(), direct_destroy_handler_works(), direct_foreground_handler_works(), focused_returns_none_after_clear(), focused_returns_none_by_default(), focused_returns_set_value(), get_window_mut_returns_none_for_absent_hwnd() (+41 more)
+Nodes (54): ReclassifyResult, clear_focused_drops_tracked_focus(), clear_focused_is_safe_noop_when_already_none(), default_rules(), direct_destroy_handler_works(), direct_foreground_handler_works(), focused_returns_none_after_clear(), focused_returns_none_by_default() (+46 more)
 
 ### Community 2 - "CLI Test Infrastructure"
-Cohesion: 0.12
-Nodes (26): active_window_ids(), DaemonGuard, is_pipe_available(), query_layout_actual(), query_layout_virtual(), register_test_class(), start_test_daemon_with_extra_args(), stop_test_daemon() (+18 more)
+Cohesion: 0.13
+Nodes (27): move_to_active_workspace_is_noop(), active_window_ids(), DaemonGuard, is_pipe_available(), query_layout_actual(), query_layout_virtual(), register_test_class(), start_test_daemon() (+19 more)
 
 ### Community 3 - "Layout Engine"
 Cohesion: 0.07
 Nodes (101): MutationConfig, ActualLayout, AppliedLayout, Direction, MonitorInfo, Option, Padding, Self (+93 more)
 
 ### Community 4 - "Daemon Orchestrator"
-Cohesion: 0.16
-Nodes (15): FlowWM, LayoutConfig, HistoryStore, HookSignal, HookThreadHandle, PipeServer, FlowConfig, Instant (+7 more)
+Cohesion: 0.07
+Nodes (35): FlowWM, LayoutConfig, HistoryStore, HookSignal, HookThreadHandle, Monitor, PipeServer, FloatingSpace (+27 more)
 
 ### Community 5 - "Window Classification"
 Cohesion: 0.08
@@ -614,20 +609,20 @@ Cohesion: 0.20
 Nodes (17): File, init(), open_log_file(), open_log_file_appends_without_truncating(), open_log_file_creates_parent_dirs(), open_log_file_truncates_when_override(), Option, Path (+9 more)
 
 ### Community 7 - "STM CLI Client"
-Cohesion: 0.03
-Nodes (102): _5(), _5e(), A7e(), activationCount(), addActor(), addALink(), addBox(), addDetails() (+94 more)
+Cohesion: 0.02
+Nodes (160): a5e(), AA(), abe(), accept(), Ai(), aLe(), aN(), ap() (+152 more)
 
 ### Community 8 - "Animation Animator"
-Cohesion: 0.10
-Nodes (40): ActiveBatch, animate_empty_batch_returns_error(), animate_returns_handle(), animator_starts_idle(), AnimatorCmd, cancel_stops_animation(), drop_new_policy_discards_second_animate(), handle_animate() (+32 more)
+Cohesion: 0.11
+Nodes (39): ActiveBatch, animate_empty_batch_returns_error(), animate_returns_handle(), animator_starts_idle(), AnimatorCmd, cancel_stops_animation(), drop_new_policy_discards_second_animate(), handle_animate() (+31 more)
 
 ### Community 9 - "Architecture Specs"
 Cohesion: 0.00
-Nodes (275): acquireParserWorker(), addPoints(), alternatives(), AT_LEAST_ONE(), AT_LEAST_ONE1(), AT_LEAST_ONE2(), AT_LEAST_ONE3(), AT_LEAST_ONE4() (+267 more)
+Nodes (296): addEntry(), addPoints(), addToResyncTokens(), $ae(), alternatives(), AT_LEAST_ONE(), AT_LEAST_ONE1(), AT_LEAST_ONE2() (+288 more)
 
 ### Community 10 - "Animation Mock Backend"
-Cohesion: 0.09
-Nodes (28): AnimationError, apply_batch_records_all_pairs(), dwm_flush_records_the_call(), get_window_rect_records_call_for_known_window(), get_window_rect_returns_err_for_unknown_window(), MockBackend, MockCall, MockState (+20 more)
+Cohesion: 0.15
+Nodes (20): AnimationError, apply_batch_records_all_pairs(), dwm_flush_records_the_call(), get_window_rect_records_call_for_known_window(), get_window_rect_returns_err_for_unknown_window(), MockBackend, MockCall, MockState (+12 more)
 
 ### Community 11 - "Common Types"
 Cohesion: 0.05
@@ -659,15 +654,15 @@ Nodes (5): build.rs — Windows-only guard, Future: Application Manifest (`manif
 
 ### Community 19 - "Easing Functions"
 Cohesion: 0.03
-Nodes (40): apply_ease(), assert_boundaries(), boundaries_non_elastic(), cubic_bezier_linear_control_points_approximate_linear(), ease_position(), ease_position_adapter_linear(), ease_position_custom_ease_out_back_can_exceed_one(), ease_position_custom_ease_out_expo_matches_apply_ease() (+32 more)
+Nodes (41): apply_ease(), assert_boundaries(), boundaries_non_elastic(), cubic_bezier_linear_control_points_approximate_linear(), ease_position(), ease_position_adapter_linear(), ease_position_custom_ease_out_back_can_exceed_one(), ease_position_custom_ease_out_expo_matches_apply_ease() (+33 more)
 
 ### Community 20 - "Config Types"
-Cohesion: 0.08
-Nodes (20): config_easing_roundtrips_all_variants(), config_overlap_zero_roundtrips_toml(), config_validate_accepts_column_width_none(), config_validate_accepts_min_equal_to_column_width(), config_validate_accepts_overlap_equal_to_thickness(), config_validate_accepts_overlap_zero(), config_validate_accepts_zero_padding(), config_validate_rejects_min_exceeding_column_width() (+12 more)
+Cohesion: 0.09
+Nodes (3): BorderConfig, MinimizeRestoreStrategy, Color
 
 ### Community 21 - "Registry Types"
-Cohesion: 0.17
-Nodes (15): deserialize(), FloatingState, IgnoredReason, ReclassifyResult, serialize(), TilingState, VirtualSlot, VisibilityChange (+7 more)
+Cohesion: 0.06
+Nodes (37): Border, BorderState, style_for_state(), BorderState, float_border_rect(), FlowWM, deserialize(), FloatingState (+29 more)
 
 ### Community 22 - "Layout Diff"
 Cohesion: 0.05
@@ -682,12 +677,12 @@ Cohesion: 0.13
 Nodes (34): config_dir(), default_config_dir(), history_rules_path(), history_rules_path_ends_with_history_flow_rules_toml(), history_rules_path_in(), history_rules_path_in_returns_correct_path(), log_file_path_in(), log_file_path_in_distinguishes_dates() (+26 more)
 
 ### Community 25 - "Win32 Registry Bridge"
-Cohesion: 0.09
-Nodes (40): close_window(), from_wide(), get_class_name(), get_extended_frame_bounds(), get_extended_frame_bounds_invalid_hwnd_returns_err(), get_extended_frame_bounds_null_hwnd_returns_err(), get_foreground_window(), get_invisible_bounds() (+32 more)
+Cohesion: 0.08
+Nodes (42): clear_foreground_window(), close_window(), from_wide(), get_class_name(), get_extended_frame_bounds(), get_extended_frame_bounds_invalid_hwnd_returns_err(), get_extended_frame_bounds_null_hwnd_returns_err(), get_foreground_window() (+34 more)
 
 ### Community 27 - "Animation Metrics"
-Cohesion: 0.23
-Nodes (9): AnimationError, IVec2, ivec2_new_stores_components(), Rect, rect_position_and_size(), window_target_as_rect(), WindowRef, WindowTarget (+1 more)
+Cohesion: 0.21
+Nodes (10): AnimationError, AnimationHandle, IVec2, ivec2_new_stores_components(), Rect, rect_position_and_size(), window_target_as_rect(), WindowRef (+2 more)
 
 ### Community 28 - "Design Iteration Workflows"
 Cohesion: 0.42
@@ -702,28 +697,28 @@ Cohesion: 0.13
 Nodes (19): AnimatorConfig, config_is_clone(), default_config_has_sensible_values(), FramePacing, InterruptPolicy, PositionAnimation, SizeAnimation, ease_size() (+11 more)
 
 ### Community 31 - "Animation Interpolation"
-Cohesion: 0.13
-Nodes (9): is_noop(), is_translation_only(), lerp_i32(), lerp_rect(), lerp_rect_at_one_returns_to(), lerp_rect_at_zero_returns_from(), lerp_rect_separate_position_and_size(), Animation Pipeline (Easing → Interpolation → Backend) (+1 more)
+Cohesion: 0.14
+Nodes (8): is_noop(), is_translation_only(), lerp_i32(), lerp_rect(), lerp_rect_at_one_returns_to(), lerp_rect_at_zero_returns_from(), lerp_rect_separate_position_and_size(), Rect
 
 ### Community 32 - "Classification Testing"
-Cohesion: 0.11
-Nodes (28): AGe(), build(), calculateHorizontalSpace(), calculateSpace(), calculateSpaceIfDrawnHorizontally(), calculateSpaceIfDrawnVertical(), calculateVerticalSpace(), emitUpdate() (+20 more)
+Cohesion: 0.05
+Nodes (63): $1(), addALink(), addDetails(), addLinks(), addProperties(), AH(), ake(), b0e() (+55 more)
 
 ### Community 33 - "Agent Metadata System"
 Cohesion: 0.05
-Nodes (38): Approval Gate Evaluator, Context Loading Evaluator, Tool Usage Evaluator, Approval Gate Test, Approval Gate Violation, Architecture, Best Practices, Common Issues (+30 more)
+Nodes (38): Approval Gate Evaluator, Context Loading Evaluator, Tool Usage Evaluator, Approval Gate Test, Architecture, Basic Test Run, Best Practices, Config File (`config.yaml`) (+30 more)
 
 ### Community 35 - "IPC Dispatch"
 Cohesion: 0.05
-Nodes (37): Adding a New Agent, Auto-Detect Components, Bump Version Script, Check Context Logs, Check Registry, Check Sessions, Check Version, Cleanup Stale Sessions (+29 more)
+Nodes (42): Adding a New Agent, Auto-Detect Components, Bump Version Script, Check Context Dependencies, Check Context Logs, Check Registry, Check Sessions, Check Version (+34 more)
 
 ### Community 36 - "Graphify Pipeline"
 Cohesion: 0.08
 Nodes (23): For /graphify add and --watch, For /graphify query, For the commit hook and native CLAUDE.md integration, For --update and --cluster-only, /graphify, Honesty Rules, Interpreter guard for subcommands, Part A - Structural extraction for code files (+15 more)
 
 ### Community 37 - "Animation Config Defaults"
-Cohesion: 0.30
-Nodes (16): daemon_arranges_windows_in_tiling_positions(), daemon_init_excludes_background_windows_from_real_desktop(), daemon_init_tiling_windows_have_reasonable_positions(), daemon_init_tiling_windows_have_unique_columns(), daemon_initializes_windows_with_sorted_positions(), daemon_registers_existing_windows_as_tiling(), daemon_shuts_down_cleanly(), daemon_tiles_three_windows_without_overlap() (+8 more)
+Cohesion: 0.20
+Nodes (24): unique_pipe_name(), daemon_arranges_windows_in_tiling_positions(), daemon_init_excludes_background_windows_from_real_desktop(), daemon_init_tiling_windows_have_reasonable_positions(), daemon_init_tiling_windows_have_unique_columns(), daemon_initializes_windows_with_sorted_positions(), daemon_registers_existing_windows_as_tiling(), daemon_shuts_down_cleanly() (+16 more)
 
 ### Community 38 - "Config Schema Generation"
 Cohesion: 0.26
@@ -731,7 +726,7 @@ Nodes (13): generate_config_schema(), generate_rules_schema(), rules_schema_has_
 
 ### Community 39 - "Rules Schema"
 Cohesion: 0.19
-Nodes (26): cmd_config(), cmd_config_check(), cmd_config_edit(), cmd_config_init(), cmd_config_path(), cmd_config_reload(), cmd_dispatch(), cmd_dispatch_focus() (+18 more)
+Nodes (16): cmd_dispatch(), cmd_dispatch_focus(), cmd_dispatch_merge_column(), cmd_dispatch_move_window(), cmd_dispatch_promote(), cmd_dispatch_set_window(), cmd_dispatch_swap_column(), DispatchCommands (+8 more)
 
 ### Community 40 - "Context Bundle Templates"
 Cohesion: 0.08
@@ -742,8 +737,8 @@ Cohesion: 0.05
 Nodes (38): Delegation to ContextOrganizer, Error Handling, Example 1: First Time (No Context), Example 2: Review & Update, Example 3: Quick Update, Example 4: External Context Files Present, Example 5: After Harvesting External Context, Examples (+30 more)
 
 ### Community 42 - "Window Actions"
-Cohesion: 0.15
-Nodes (25): a2e(), A4(), a6e(), al(), c2e(), C4(), d2e(), $F() (+17 more)
+Cohesion: 0.00
+Nodes (230): AGe(), alternatives(), AT_LEAST_ONE(), AT_LEAST_ONE1(), AT_LEAST_ONE2(), AT_LEAST_ONE3(), AT_LEAST_ONE4(), AT_LEAST_ONE5() (+222 more)
 
 ### Community 43 - "Animation Jank Metrics"
 Cohesion: 0.30
@@ -754,8 +749,8 @@ Cohesion: 0.17
 Nodes (7): FlowError, From, Display, Error, Formatter, Result, Self
 
 ### Community 45 - "Config Schema Properties"
-Cohesion: 0.12
-Nodes (24): b2(), Bye(), bz(), createDehyrationContext(), dehydrate(), dehydrateLexerReport(), FR(), G3() (+16 more)
+Cohesion: 0.02
+Nodes (158): addAnnotation(), addAttributes(), addClass(), addClassesToNamespace(), addCssStyles(), addDescription(), addDocument(), addEntity() (+150 more)
 
 ### Community 46 - "AI Dev Navigation"
 Cohesion: 0.16
@@ -774,16 +769,16 @@ Cohesion: 0.40
 Nodes (5): Concept: WindowId (cross-layer contract type), Evals: rust-review, Skill: rust-review, Evals: rust-workflow, Skill: rust-workflow
 
 ### Community 50 - "Desktop Management"
-Cohesion: 0.41
-Nodes (11): close_desktop(), create_desktop(), current_desktop(), open_desktop(), set_thread_desktop(), switch_to_desktop(), wide_null(), HDESK (+3 more)
+Cohesion: 0.03
+Nodes (91): add(), addElement(), addRequirement(), all(), allElements(), b9e(), BOe(), buildKeywordTokens() (+83 more)
 
 ### Community 51 - "Config Schema Definitions"
-Cohesion: 0.14
-Nodes (20): bGe(), gGe(), Ghe(), j0e(), mGe(), qge(), S1(), setData() (+12 more)
+Cohesion: 0.08
+Nodes (59): _9e(), aj(), am(), AMe(), bW(), CEe(), Ci(), cPe() (+51 more)
 
 ### Community 52 - "Rules Schema Definitions"
-Cohesion: 0.22
-Nodes (19): bq(), circle(), eQ(), gq(), H8e(), HQ(), html(), iQ() (+11 more)
+Cohesion: 0.05
+Nodes (59): aK(), Bn(), bPe(), buildLeftRecursionError(), buildRuleNotFoundError(), checkIsTarget(), concat(), g2() (+51 more)
 
 ### Community 53 - "Agent Metadata Tags"
 Cohesion: 0.18
@@ -794,8 +789,8 @@ Cohesion: 0.18
 Nodes (10): auto-detect-components.sh Script, check-context-deps Command, validate-registry.sh Script, CI/CD Integration, GitHub Actions, Pre-Commit Hook, Quick Reference, Registry Dependency Validation (+2 more)
 
 ### Community 56 - "Schema Validation Rules"
-Cohesion: 0.11
-Nodes (36): await_overlapped(), connect_to_named_pipe(), connect_to_pipe(), EventHandle, is_daemon_running(), ms_until(), ms_until_future_deadline_returns_positive_milliseconds(), ms_until_large_deadline_capped_at_u32_max() (+28 more)
+Cohesion: 0.22
+Nodes (17): await_overlapped(), PipeServer, read_line(), read_line_overlapped(), send_message(), send_message_to(), write_all(), write_all_overlapped() (+9 more)
 
 ### Community 57 - "Schema AllOf Patterns"
 Cohesion: 0.11
@@ -923,11 +918,11 @@ Nodes (9): workflow-designer, author, category, dependencies, id, name, tags, ty
 
 ### Community 88 - "Config Schema Definitions"
 Cohesion: 0.11
-Nodes (19): Padding, default, description, format, type, description, properties, type (+11 more)
+Nodes (18): Padding, default, description, format, type, properties, type, down (+10 more)
 
 ### Community 89 - "Padding Schema"
-Cohesion: 0.16
-Nodes (18): _7(), a3(), draw(), _drawToContext(), fillSketch(), getDefaultOptions(), gz(), hasClass() (+10 more)
+Cohesion: 0.03
+Nodes (147): $0e(), a_e(), arc(), Av(), aZe(), b(), b0(), b2() (+139 more)
 
 ### Community 90 - "Window Action Types"
 Cohesion: 0.08
@@ -970,8 +965,8 @@ Cohesion: 0.12
 Nodes (16): definitions, MinimizeRestore, MinimizeRestoreStrategy, description, description, properties, type, description (+8 more)
 
 ### Community 100 - "Web Animation Standards"
-Cohesion: 0.06
-Nodes (37): Animation Basics Standards, Accessibility, Advanced Animation Patterns, Animation Recipes, Best Practices, Chat UI Complete Animation System, Do's ✅, Don'ts ❌ (+29 more)
+Cohesion: 0.09
+Nodes (23): Animation Basics Standards, Accessibility, Advanced Animation Patterns, Animation Recipes, Best Practices, Chat UI Complete Animation System, Do's ✅, Don'ts ❌ (+15 more)
 
 ### Community 101 - "Task Router Script"
 Cohesion: 0.50
@@ -986,19 +981,19 @@ Cohesion: 0.20
 Nodes (7): graphify reference: extraction subagent prompt, For git commit hook, For native CLAUDE.md integration, graphify reference: commit hook and native CLAUDE.md integration, For --cluster-only, For --update (incremental re-extraction), graphify reference: incremental update and cluster-only
 
 ### Community 104 - "Strategy Schema"
-Cohesion: 0.03
-Nodes (89): $8e(), addLink(), addSingleLink(), AIe(), autolink(), b7e(), _be(), blockquote() (+81 more)
+Cohesion: 0.14
+Nodes (27): a2e(), A4(), a6e(), al(), c2e(), C4(), d2e(), $F() (+19 more)
 
 ### Community 105 - "Direction Schema"
 Cohesion: 0.07
 Nodes (30): Agents That Need Fixing, Available Subagent Types, Best Practices, Check Subagent Type Before Using, Coder Agent, Common Subagent Invocations, ContextScout Special Case, ✅ Correct Format (+22 more)
 
 ### Community 106 - "Window Schema"
-Cohesion: 0.05
-Nodes (38): 1. Architecture Diagram, 2. UI Mockup, 3. Social Media Graphic, 4. Flowchart/Process Diagram, 5. Icon/Illustration, 6. Image Editing, Best Practices, Capabilities (+30 more)
+Cohesion: 0.07
+Nodes (28): 1. Architecture Diagram, 2. UI Mockup, 3. Social Media Graphic, 4. Flowchart/Process Diagram, 5. Icon/Illustration, 6. Image Editing, Best Practices, Capabilities (+20 more)
 
 ### Community 107 - "Position Animation"
-Cohesion: 0.14
+Cohesion: 0.13
 Nodes (23): default_config_toml_parses_correctly(), default_flow_rules_toml_parses_correctly(), load_app_config(), load_app_config_directory_path_propagates_io_error(), load_app_config_empty_toml_returns_default(), load_app_config_malformed_toml_returns_error(), load_app_config_missing_file_returns_default(), load_app_config_parse_error_message_includes_path() (+15 more)
 
 ### Community 108 - "OpenAgents Navigation"
@@ -1006,8 +1001,8 @@ Cohesion: 0.11
 Nodes (16): By Type, OpenAgents Blueprints, Quick Routes, Related Context, Structure, By Type, OpenAgents Concepts, Quick Routes (+8 more)
 
 ### Community 109 - "Config & Classification Rules"
-Cohesion: 0.12
-Nodes (17): default, description, format, minimum, type, down, up, window (+9 more)
+Cohesion: 0.11
+Nodes (18): allOf, default, description, default, description, format, minimum, type (+10 more)
 
 ### Community 110 - "Testing & Error Navigation"
 Cohesion: 0.20
@@ -1050,24 +1045,24 @@ Cohesion: 0.21
 Nodes (9): FlowWM, FlowConfig, Option, PathBuf, Rect, Result, Self, String (+1 more)
 
 ### Community 120 - "Scroll Right Action"
-Cohesion: 0.21
-Nodes (4): Monitor, FloatingSpace, ScrollingSpace, Workspace
+Cohesion: 0.03
+Nodes (83): $0e(), AGe(), aZe(), b0(), bezierCurveTo(), bGe(), bZe(), cDe() (+75 more)
 
 ### Community 121 - "Swap Left Action"
 Cohesion: 0.07
 Nodes (26): After ContextScout Returns, Check 1: Type & Import Validation, Check 2: Anti-Pattern Scan, Check 3: Acceptance Criteria Verification, Check 4: ExternalScout Verification, CoderAgent, 🔍 ContextScout — Your First Move, How to Invoke (+18 more)
 
 ### Community 122 - "Swap Right Action"
-Cohesion: 0.18
-Nodes (12): bXe(), createHTML(), createScriptURL(), FXe(), my(), oxe(), Qf(), qXe() (+4 more)
+Cohesion: 0.03
+Nodes (120): abe(), accept(), addToResyncTokens(), Ai(), ap(), aSe(), atLeastOneInternalLogic(), atLeastOneSepFirstInternalLogic() (+112 more)
 
 ### Community 123 - "Toggle Float Action"
-Cohesion: 0.21
-Nodes (12): curve(), dm(), Eae(), Fw(), kK(), l_e(), _mergedShape(), Mw() (+4 more)
+Cohesion: 0.03
+Nodes (151): o(), _2(), aNe(), aOe(), Art(), bIe(), bl(), BNe() (+143 more)
 
 ### Community 124 - "Toggle Monocle Action"
-Cohesion: 0.24
-Nodes (11): Window, InvisibleBounds, Option, PathBuf, Rect, Self, Send, Size (+3 more)
+Cohesion: 0.02
+Nodes (153): addAstNodeRegionWithAssignmentsTo(), addMembers(), addVertex(), all(), allElements(), aU(), ay(), B4() (+145 more)
 
 ### Community 125 - "WindowRule Schema"
 Cohesion: 0.29
@@ -1078,12 +1073,12 @@ Cohesion: 0.04
 Nodes (45): Choose Skill Name, Claude Code Skills (Optional), Create Structure, Frontmatter, Guide: Adding an OpenCode Skill (Basics), Next Steps, Overview, Related (+37 more)
 
 ### Community 129 - "OpenCode Plugin Config"
-Cohesion: 0.40
-Nodes (5): By Type, OpenAgents Guides, Quick Routes, Related Context, Structure
+Cohesion: 0.17
+Nodes (10): By Type, OpenAgents Guides, Quick Routes, Related Context, Structure, By Type, OpenAgents Lookup, Quick Routes (+2 more)
 
 ### Community 130 - "Graphify Plugin JS"
-Cohesion: 0.02
-Nodes (142): $1(), a_e(), ACTION(), aD(), addParents(), addTokenUsingPush(), addToResyncTokens(), after() (+134 more)
+Cohesion: 0.03
+Nodes (151): $8e(), acquireParserWorker(), addHiddenNodes(), addParents(), af(), autolink(), b7e(), _be() (+143 more)
 
 ### Community 132 - "Schema Type A"
 Cohesion: 0.33
@@ -1102,20 +1097,20 @@ Cohesion: 0.15
 Nodes (15): BorderInner, destroyed_border_inner(), on_wm_size_is_noop_when_overlay_destroyed(), overlay_wnd_proc(), paint_is_noop_for_zero_area_rect(), paint_is_noop_when_overlay_destroyed(), CachedSurface, BorderStyle (+7 more)
 
 ### Community 136 - "Title Regex Schema"
-Cohesion: 0.27
-Nodes (10): cmd_start(), daemon_command(), find_daemon_exe(), preflight_config_check(), spawn_daemon(), wait_for_daemon(), Command, Option (+2 more)
+Cohesion: 0.33
+Nodes (7): daemon_command(), find_daemon_exe(), spawn_daemon(), Command, Option, Path, PathBuf
 
 ### Community 137 - "EaseInBack"
-Cohesion: 0.16
-Nodes (20): ensure_daemon_stopped(), flow(), start_stop_lifecycle(), start_when_already_running(), stop_when_not_running(), column_count(), set_window_cycle_toggles_tiled_to_floating(), set_window_float_then_tile_roundtrips_layout() (+12 more)
+Cohesion: 0.17
+Nodes (19): ensure_daemon_stopped(), flow(), start_stop_lifecycle(), start_when_already_running(), stop_when_not_running(), column_count(), set_window_cycle_toggles_tiled_to_floating(), set_window_float_then_tile_roundtrips_layout() (+11 more)
 
 ### Community 138 - "EaseInCirc"
-Cohesion: 0.02
-Nodes (105): _6e(), addAll(), Aje(), ARe(), b(), bA(), Bc(), bje() (+97 more)
+Cohesion: 0.12
+Nodes (27): a2e(), A4(), al(), bF(), c2e(), C4(), d2e(), f2e() (+19 more)
 
 ### Community 139 - "EaseInElastic"
-Cohesion: 0.13
-Nodes (17): HWINEVENTHOOK, LockResult, MutexGuard, add_float_hwnd(), float_hwnd_set_add_remove_membership(), float_hwnds_snapshot(), hook_callback(), is_float_hwnd() (+9 more)
+Cohesion: 0.09
+Nodes (24): FlowWM, HWINEVENTHOOK, LockResult, MutexGuard, add_float_hwnd(), float_hwnd_set_add_remove_membership(), float_hwnds_snapshot(), float_tracking_active() (+16 more)
 
 ### Community 140 - "EaseInExpo"
 Cohesion: 0.07
@@ -1130,8 +1125,8 @@ Cohesion: 0.29
 Nodes (13): destroy_focused_window_moves_focus_left(), destroy_only_window_clears_focus(), destroy_removes_column_and_compacts_layout(), focus_left(), hwnd_id(), layout_window_ids(), minimize_removes_window_from_layout(), settle() (+5 more)
 
 ### Community 143 - "EaseInOutElastic"
-Cohesion: 0.14
-Nodes (19): check_config(), check_config_empty_directory_returns_ok(), check_config_invalid_app_config_returns_err(), check_config_malformed_app_toml_returns_err(), check_config_malformed_rules_returns_err(), check_config_partial_toml_returns_ok(), check_config_valid_directory_returns_ok(), ConfigLoadError (+11 more)
+Cohesion: 0.13
+Nodes (22): check_config(), check_config_empty_directory_returns_ok(), check_config_invalid_app_config_returns_err(), check_config_malformed_app_toml_returns_err(), check_config_malformed_rules_returns_err(), check_config_partial_toml_returns_ok(), check_config_valid_directory_returns_ok(), ConfigLoadError (+14 more)
 
 ### Community 144 - "EaseInOutExpo"
 Cohesion: 0.21
@@ -1153,13 +1148,17 @@ Nodes (11): CachedSurface, corner_radius_px(), next_capacity(), Debug, HBITMAP, 
 Cohesion: 0.27
 Nodes (6): animate_layout_raw(), FlowWM, ActualLayout, AppliedLayout, WindowAnimator, WindowRegistry
 
+### Community 149 - "EaseOutBack"
+Cohesion: 0.12
+Nodes (6): compute_wait_timeout_inner(), FlowWM, HookEvent, Instant, Option, WindowInfo
+
 ### Community 150 - "EaseOutBounce"
-Cohesion: 0.40
-Nodes (5): Common Workflows, Completing Tasks, Starting a New Feature, Tracking Progress, Validating Everything
+Cohesion: 0.05
+Nodes (52): addLink(), addSingleLink(), awe(), calculateHorizontalSpace(), calculateSpace(), calculateSpaceIfDrawnHorizontally(), calculateSpaceIfDrawnVertical(), calculateVerticalSpace() (+44 more)
 
 ### Community 151 - "EaseOutCirc"
-Cohesion: 0.02
-Nodes (226): addAnnotation(), addAstNodeRegionWithAssignmentsTo(), addAttributes(), addClass(), addClassesToNamespace(), addCssStyles(), addDescription(), addEntity() (+218 more)
+Cohesion: 0.03
+Nodes (113): addAnnotation(), addAttributes(), addClass(), addClassesToNamespace(), addCssStyles(), addDescription(), addDocument(), addEntity() (+105 more)
 
 ### Community 152 - "EaseOutCubic"
 Cohesion: 0.15
@@ -1174,8 +1173,8 @@ Cohesion: 0.18
 Nodes (12): pipeline_embedded_default_rules_classify_taskbar_as_ignore(), pipeline_empty_user_and_default_returns_user_default_action(), pipeline_falls_through_to_default_action(), pipeline_falls_through_to_default_rules(), pipeline_learned_rules_slot_is_noop_when_empty(), pipeline_user_rule_overrides_embedded_default_for_taskbar(), pipeline_user_rule_takes_priority_over_default(), set_learned_rules_beats_default_rules() (+4 more)
 
 ### Community 155 - "Community 155"
-Cohesion: 0.31
-Nodes (5): float_border_rect(), FlowWM, BorderStyle, Option, Rect
+Cohesion: 0.03
+Nodes (150): _7(), $8e(), a3(), acquireParserWorker(), addHiddenNodes(), addParents(), ARe(), autolink() (+142 more)
 
 ### Community 156 - "Community 156"
 Cohesion: 0.13
@@ -1194,36 +1193,36 @@ Cohesion: 0.13
 Nodes (13): Directory Structure, Future Subcategories, Overview, Quick Navigation, Related Categories, Scope, 📁 Subcategories, Terminal UI (+5 more)
 
 ### Community 166 - "Community 166"
-Cohesion: 0.21
-Nodes (6): FlowWM, unimplemented_command(), Direction, SocketMessage, SocketResponse, WorkspaceId
+Cohesion: 0.19
+Nodes (7): FlowWM, unimplemented_command(), SetWindowAction, Direction, SocketMessage, SocketResponse, WorkspaceId
 
 ### Community 167 - "Drag Session Concept"
-Cohesion: 0.39
-Nodes (4): FlowWM, float_tracking_active(), float_tracking_active_flag_round_trip(), set_float_tracking_active()
+Cohesion: 0.05
+Nodes (56): addVertex(), af(), AR(), assign(), createIndentationTokenInstance(), createLinkingError(), createScope(), dedentMatcher() (+48 more)
 
 ### Community 168 - "IPC Named Pipe"
-Cohesion: 0.08
-Nodes (63): addHiddenNodes(), beginGroup(), buildLeafNode(), buildRootNode(), callFunction(), consume(), consumeArg(), consumeArgs() (+55 more)
+Cohesion: 0.03
+Nodes (80): aAe(), ace(), aFe(), aN(), aPe(), buildTerminalToken(), cAe(), Cce() (+72 more)
 
 ### Community 178 - "Matches Rule"
 Cohesion: 0.50
 Nodes (4): AWS Lambda, Cloudflare Workers, Infrastructure & Deployment, Vercel
 
 ### Community 179 - "Community 179"
-Cohesion: 0.07
-Nodes (67): _9e(), aj(), am(), AMe(), bW(), CEe(), Ci(), cPe() (+59 more)
+Cohesion: 0.09
+Nodes (27): aD(), _be(), cramp(), extend(), $F(), fontMetrics(), getColor(), havingBaseSizing() (+19 more)
 
 ### Community 180 - "Community 180"
-Cohesion: 0.13
-Nodes (20): HistoryStore, identity_distinguishes_different_classes_same_exe(), load_corrupt_file_returns_empty(), load_missing_file_returns_empty(), load_valid_file_populates_store(), record_empty_class_treated_as_none(), record_exe_only_when_class_none(), record_existing_app_updates_action() (+12 more)
+Cohesion: 0.05
+Nodes (75): HistoryStore, identity_distinguishes_different_classes_same_exe(), load_corrupt_file_returns_empty(), load_missing_file_returns_empty(), load_valid_file_populates_store(), record_empty_class_treated_as_none(), record_exe_only_when_class_none(), record_existing_app_updates_action() (+67 more)
 
 ### Community 181 - "WindowState Enum"
 Cohesion: 0.23
 Nodes (7): BorderInner, Border, ensure_window_class_registered(), Arc, Formatter, Result, String
 
 ### Community 183 - "TODO & Open Issues"
-Cohesion: 0.36
-Nodes (4): compute_wait_timeout_inner(), FlowWM, Instant, Option
+Cohesion: 0.29
+Nodes (7): Category System, Content Category (`content/`), Core Category (`core/`), Data Category (`data/`), Development Category (`development/`), Learning Category (`learning/`), Product Category (`product/`)
 
 ### Community 184 - "Community 184"
 Cohesion: 0.25
@@ -1239,7 +1238,7 @@ Nodes (24): Available Context Files, Best Practices, Cleanup, Context Index Syst
 
 ### Community 187 - "Community 187"
 Cohesion: 0.10
-Nodes (19): 1. Use Meaningful Summaries, 2. Check Dependencies Before Starting, 3. Identify Parallelizable Work, 4. Regular Validation, Architecture, Command Reference, File Locations, How to Use Me (+11 more)
+Nodes (19): Architecture, Command Reference, Common Workflows, Completing Tasks, File Locations, How to Use Me, Integration with TaskManager, Quick Start (+11 more)
 
 ### Community 188 - "Community 188"
 Cohesion: 0.08
@@ -1302,8 +1301,8 @@ Cohesion: 0.10
 Nodes (20): 1. Code Splitting, 1. Functional Components with Hooks, 1. Local State First, 1. useEffect Dependencies, 2. Custom Hooks for Reusable Logic, 2. useMemo for Expensive Calculations, 2. useReducer for Complex State, 2. Virtualization for Long Lists (+12 more)
 
 ### Community 203 - "Community 203"
-Cohesion: 0.03
-Nodes (75): add(), addElement(), addRequirement(), b9e(), bPe(), bT(), buildTerminalToken(), clear() (+67 more)
+Cohesion: 0.04
+Nodes (78): add(), addElement(), addRequirement(), aFe(), AW(), b9e(), bT(), calculate() (+70 more)
 
 ### Community 204 - "Community 204"
 Cohesion: 0.11
@@ -1323,7 +1322,7 @@ Nodes (18): 1. Determine Function, 2. Apply Template, 3. Apply MVI, 4. Validate 
 
 ### Community 208 - "Community 208"
 Cohesion: 0.05
-Nodes (37): 0-category.json, Agent Names, Available Categories, Backward Compatibility, Best Practices, Category Context Structure, Category Guidelines, Category Metadata (+29 more)
+Nodes (43): 0-category.json, Adding a New Category, Available Categories, Backward Compatibility, Best Practices, Category Context Structure, Category Guidelines, Category Metadata (+35 more)
 
 ### Community 209 - "Community 209"
 Cohesion: 0.11
@@ -1362,8 +1361,8 @@ Cohesion: 0.12
 Nodes (16): Active Projects, Archive (Resolved Items), Code Patterns Worth Preserving, Gotchas for Maintainers, Issue Details, Known Issues, Living Notes, Onboarding Checklist (+8 more)
 
 ### Community 218 - "Community 218"
-Cohesion: 0.03
-Nodes (91): a8(), awe(), b8(), bh(), Bi(), BRe(), bwe(), bX() (+83 more)
+Cohesion: 0.02
+Nodes (130): u(), a(), a8(), ace(), addAll(), Ag(), AIe(), Aje() (+122 more)
 
 ### Community 219 - "Community 219"
 Cohesion: 0.10
@@ -1382,8 +1381,8 @@ Cohesion: 0.12
 Nodes (15): 1. Resource-Based URLs, 1. Schema Design, 2. HTTP Methods, 2. Resolver Patterns, 3. DataLoader for N+1 Prevention, 3. Status Codes, 4. Consistent Response Format, 5. Filtering, Sorting, Pagination (+7 more)
 
 ### Community 223 - "Community 223"
-Cohesion: 0.06
-Nodes (65): a5e(), AA(), abe(), accept(), Ai(), aLe(), aSe(), bBe() (+57 more)
+Cohesion: 0.02
+Nodes (172): v(), w(), _C(), X_(), _5(), _5e(), A7e(), ACTION() (+164 more)
 
 ### Community 224 - "Community 224"
 Cohesion: 0.12
@@ -1423,7 +1422,7 @@ Nodes (14): Core Files (Future), Example Libraries, Overview, Planned Content, P
 
 ### Community 233 - "Community 233"
 Cohesion: 0.05
-Nodes (43): Adding Components, Agents vs Subagents, Auto-Detect System, Available Profiles, Best Practices, Business Profile, Collision Handling, Collision Strategies (+35 more)
+Nodes (42): Adding Components, Agents vs Subagents, Auto-Detect System, Auto-Update Registry (Post-Merge), Available Profiles, Best Practices, Business Profile, CI/CD Integration (+34 more)
 
 ### Community 234 - "Community 234"
 Cohesion: 0.14
@@ -1434,8 +1433,8 @@ Cohesion: 0.14
 Nodes (13): Best Practices, Context Files Frontend-Specialist Uses, Delegation Checklist, Do's ✅, Don'ts ❌, Frontend-Specialist Capabilities, Green Flags (Delegate), Overview (+5 more)
 
 ### Community 236 - "Community 236"
-Cohesion: 0.14
-Nodes (14): Check GitHub, Checklist, Complete Example, Guide: Creating a Release, Quick Steps, Related Files, Step 4: Commit Changes, Step 5: Create Git Tag (+6 more)
+Cohesion: 0.07
+Nodes (28): Check GitHub, Checklist, Common Issues, Complete Example, Examples, Format, Guide: Creating a Release, package.json (+20 more)
 
 ### Community 237 - "Community 237"
 Cohesion: 0.14
@@ -1538,8 +1537,8 @@ Cohesion: 0.17
 Nodes (12): 1 — Naming, 2 — Module Structure, 3 — Win32 Bindings, 4 — Cargo.toml, 5 — The 3-Layer Layout Pipeline, 6 — Error Handling, 7 — Rust Rules, 8 — Validation (+4 more)
 
 ### Community 262 - "Community 262"
-Cohesion: 0.05
-Nodes (60): a(), aN(), bl(), BOe(), buildEarlyExitMessage(), buildLookaheadForAlternation(), buildLookaheadForOptional(), buildNoViableAltMessage() (+52 more)
+Cohesion: 0.02
+Nodes (139): _6e(), a(), addAll(), AIe(), bA(), bh(), Bi(), Bs() (+131 more)
 
 ### Community 263 - "Community 263"
 Cohesion: 0.17
@@ -1581,10 +1580,6 @@ Nodes (10): Plugin Performance Guidelines, Plugin Security Practices, By Type, O
 Cohesion: 0.18
 Nodes (11): 1 — Module Boundaries, 2 — Unsafe Correctness, 3 — Error Handling, 4 — Win32 Patterns, 5 — Rust Quality, 6 — Cargo / Build, 7 — Clippy & Formatting, 8 — Test Coverage (+3 more)
 
-### Community 273 - "Community 273"
-Cohesion: 0.35
-Nodes (5): Chat Message Micro-Interactions, Chat UI Animation Patterns, Message Entrance, Related Files, Typing Indicator
-
 ### Community 274 - "Community 274"
 Cohesion: 0.18
 Nodes (4): content_overlaps_work_area(), FlowWM, InvisibleBounds, Rect
@@ -1594,8 +1589,8 @@ Cohesion: 0.20
 Nodes (10): Animation Basics, Animation Micro-Syntax, Core Animation Principles, Easing Functions, Notation Guide, Overview, Performance Guidelines, Quick Reference (+2 more)
 
 ### Community 276 - "Community 276"
-Cohesion: 0.33
-Nodes (6): Border, BorderState, style_for_state(), BorderState, BorderConfig, BorderStyle
+Cohesion: 0.02
+Nodes (157): _5(), _5e(), _9e(), a5e(), A7e(), AA(), ACTION(), activationCount() (+149 more)
 
 ### Community 277 - "Community 277"
 Cohesion: 0.12
@@ -1614,12 +1609,12 @@ Cohesion: 0.29
 Nodes (7): Per-Monitor DPI Awareness, DPI Awareness, Known Gotchas, Shell Hook for Window Events, Win32 API Reference — FlowWM, Window Enumeration, Work Area Query
 
 ### Community 281 - "Community 281"
-Cohesion: 0.29
-Nodes (7): allOf, default, description, duration_ms, easing, enabled, animation
+Cohesion: 0.12
+Nodes (43): alternative(), assertion(), atom(), atomEscape(), characterClass(), characterClassEscape(), classAtom(), classEscape() (+35 more)
 
 ### Community 282 - "Community 282"
-Cohesion: 0.08
-Nodes (60): $0e(), alternative(), AR(), arc(), assertion(), atom(), atomEscape(), aZe() (+52 more)
+Cohesion: 0.12
+Nodes (46): alternative(), AR(), assertion(), atom(), atomEscape(), characterClass(), characterClassEscape(), classAtom() (+38 more)
 
 ### Community 283 - "Community 283"
 Cohesion: 0.33
@@ -1654,12 +1649,12 @@ Cohesion: 0.22
 Nodes (8): 2026-01-06: Initial Context System, 2026-01-08: Navigation System Redesign, Context System Changelog, Major Changes, Migration Path, New Documentation, Organizational Decisions, Previous Changes
 
 ### Community 291 - "Community 291"
-Cohesion: 0.52
-Nodes (5): FloatingSpace, ScrollingSpace, Self, Workspace, WorkspaceId
+Cohesion: 0.29
+Nodes (5): has_parent_returns_false_for_toplevel_window(), has_parent_returns_true_for_child_window(), RealTestWindows, Drop, Self
 
 ### Community 292 - "Community 292"
-Cohesion: 0.22
-Nodes (9): Breaking Down Large Issues, Checklist, External Resources, Guide: GitHub Issues and Project Board Workflow, Overview, Quick Commands Reference, Related Files, Request Types (+1 more)
+Cohesion: 0.05
+Nodes (42): Add Multiple Issues, Add Single Issue, Assigning Issues, Auto-Close Issues, Best Practices, Breaking Down Large Issues, Bug Issue Template, Bug Triage (+34 more)
 
 ### Community 293 - "Community 293"
 Cohesion: 0.22
@@ -1710,8 +1705,8 @@ Cohesion: 0.10
 Nodes (29): FloatingSpace, Option, Rect, ScrollingSpace, Self, Vec, WindowId, Workspace (+21 more)
 
 ### Community 305 - "Community 305"
-Cohesion: 0.11
-Nodes (46): CQ(), cstPostRuleFull(), cstPostRuleOnlyOffset(), CZ(), du(), $Ee(), eZ(), FK() (+38 more)
+Cohesion: 0.04
+Nodes (141): _7(), a3(), a_e(), arc(), assign(), b2(), bK(), bq() (+133 more)
 
 ### Community 306 - "Community 306"
 Cohesion: 0.18
@@ -1738,12 +1733,12 @@ Cohesion: 0.29
 Nodes (6): Adding New Libraries, Detection Patterns, External Library Registry, Purpose, Usage by ExternalScout, When to Use This
 
 ### Community 312 - "Community 312"
-Cohesion: 0.27
-Nodes (9): insert_test_window_with_rect_and_width(), sorted_with_widths_clamps_negative_width_to_zero(), sorted_with_widths_empty_registry(), sorted_with_widths_excludes_non_tiling_windows(), sorted_with_widths_returns_ids_and_widths(), sorted_with_widths_single_window(), state_to_json(), Value (+1 more)
+Cohesion: 0.31
+Nodes (8): insert_test_window_with_rect_and_width(), sorted_with_widths_clamps_negative_width_to_zero(), sorted_with_widths_excludes_non_tiling_windows(), sorted_with_widths_returns_ids_and_widths(), sorted_with_widths_single_window(), state_to_json(), Value, WindowState
 
 ### Community 313 - "Community 313"
-Cohesion: 0.03
-Nodes (109): aAe(), ace(), addEntry(), aFe(), bF(), bMe(), bU(), cAe() (+101 more)
+Cohesion: 0.04
+Nodes (93): aAe(), aK(), bF(), cAe(), Cce(), $Ce(), cj(), computeRuleType() (+85 more)
 
 ### Community 314 - "Community 314"
 Cohesion: 0.29
@@ -1770,8 +1765,8 @@ Cohesion: 0.29
 Nodes (6): Integration, Maintenance, Project Intelligence, Quick Routes, Structure, Usage
 
 ### Community 320 - "Community 320"
-Cohesion: 0.03
-Nodes (177): _2(), aNe(), aOe(), Art(), bIe(), bM(), br(), children() (+169 more)
+Cohesion: 0.04
+Nodes (156): _2(), aNe(), aOe(), Art(), bIe(), bl(), br(), children() (+148 more)
 
 ### Community 321 - "Community 321"
 Cohesion: 0.29
@@ -1783,7 +1778,7 @@ Nodes (6): default, description, format, minimum, type, min_column_width_px
 
 ### Community 323 - "Community 323"
 Cohesion: 0.33
-Nodes (6): Benefits, Design Plan File (MANDATORY), Related Files, Stage 0: Create Design Plan (MANDATORY FIRST STEP), Template, Workflow Integration
+Nodes (6): Common Issues, Duplicate ID, Invalid Category, Missing Dependency, Path Not Found, Version Mismatch
 
 ### Community 324 - "Community 324"
 Cohesion: 0.29
@@ -1809,21 +1804,25 @@ Nodes (5): By Type, Core Configuration, Quick Routes, Related Context, Structure
 Cohesion: 0.33
 Nodes (6): Frontend Frameworks, Next.js, React, TanStack Query, TanStack Router, TanStack Start
 
+### Community 330 - "Community 330"
+Cohesion: 0.21
+Nodes (6): Benefits, Design Plan File (MANDATORY), Related Files, Stage 0: Create Design Plan (MANDATORY FIRST STEP), Template, Workflow Integration
+
 ### Community 331 - "Community 331"
 Cohesion: 0.33
 Nodes (5): By Type, Context System, Quick Routes, Related Context, Structure
 
 ### Community 332 - "Community 332"
-Cohesion: 0.50
-Nodes (4): event_hooking_minimize_and_restore(), find_window_by_title(), Option, Value
+Cohesion: 0.09
+Nodes (34): aD(), addLink(), addSingleLink(), calculateHorizontalSpace(), calculateSpace(), calculateSpaceIfDrawnHorizontally(), calculateSpaceIfDrawnVertical(), calculateVerticalSpace() (+26 more)
 
 ### Community 333 - "Community 333"
 Cohesion: 0.33
 Nodes (5): By Type, OpenAgents Core Concepts, Quick Routes, Related Context, Structure
 
 ### Community 334 - "Community 334"
-Cohesion: 0.04
-Nodes (69): $ae(), AH(), ake(), B4(), bke(), buildAlternationAmbiguityError(), buildAlternationPrefixAmbiguityError(), buildKeywordPattern() (+61 more)
+Cohesion: 0.25
+Nodes (7): Best Practices, Context Bundle Template, Example Context Bundle, How to Create a Context Bundle, Template, Usage Instructions, When to Create a Context Bundle
 
 ### Community 335 - "Community 335"
 Cohesion: 0.33
@@ -1882,20 +1881,20 @@ Cohesion: 0.33
 Nodes (6): 1. `/check-context-deps` Command, 2. `auto-detect-components.sh` Script, 3. `validate-registry.sh` Script, Pre-Commit Checklist, Validation Tools, Validation Workflow
 
 ### Community 349 - "Community 349"
-Cohesion: 0.17
-Nodes (18): BOOL, enum_toplevel_windows(), enum_windows_callback(), get_window_mut_returns_some_and_allows_mutation_for_existing(), handle_created_returns_none_for_nonexistent_hwnd(), handle_created_skips_already_tracked_tiling_window(), has_owner(), hwnd_key() (+10 more)
+Cohesion: 0.15
+Nodes (21): BOOL, enum_toplevel_windows(), enum_windows_callback(), get_window_mut_returns_some_and_allows_mutation_for_existing(), handle_created_skips_already_tracked_tiling_window(), has_owner(), has_parent(), hwnd_key() (+13 more)
 
 ### Community 350 - "Community 350"
-Cohesion: 0.40
-Nodes (5): Adding a New Category, Step 1: Create Directory Structure, Step 2: Add Category Metadata, Step 3: Add Context README, Step 4: Validate
+Cohesion: 0.03
+Nodes (83): addAstNodeRegionWithAssignmentsTo(), addMembers(), aj(), aU(), B4(), bCe(), bindFunctions(), bT() (+75 more)
 
 ### Community 351 - "Community 351"
 Cohesion: 0.33
 Nodes (5): By Type, Core System, Quick Routes, Related Context, Structure
 
 ### Community 352 - "Community 352"
-Cohesion: 0.40
-Nodes (5): Event Timeline, Session Collection, Session Data, Session Structure, What Are Sessions?
+Cohesion: 0.06
+Nodes (53): $1(), addEntry(), ake(), b0e(), BD(), bke(), computeIsSubtype(), count() (+45 more)
 
 ### Community 353 - "Community 353"
 Cohesion: 0.33
@@ -1914,8 +1913,8 @@ Cohesion: 0.40
 Nodes (4): AI Navigation, By Technology, Quick Routes, Structure
 
 ### Community 357 - "Community 357"
-Cohesion: 0.25
-Nodes (8): Architecture, Binaries, Building, FlowWM (`flow`), License, Prerequisites, Testing, Usage
+Cohesion: 0.15
+Nodes (13): Contributing, Driving it (CLI or hotkeys), First run, Float by default, and remember your choices, FlowWM, Getting started, How it compares, Install (+5 more)
 
 ### Community 358 - "Community 358"
 Cohesion: 0.40
@@ -1947,11 +1946,11 @@ Nodes (5): By Type, OpenAgents Errors, Quick Routes, Related Context, Structure
 
 ### Community 365 - "Community 365"
 Cohesion: 0.05
-Nodes (40): agent-metadata.json Centralized Metadata, Agent Metadata System, Subagents (Delegated Specialists), 1. Creation, 2. Testing, 3. Registration, 4. Distribution, Agent Design (+32 more)
+Nodes (37): agent-metadata.json Centralized Metadata, Agent Metadata System, Subagents (Delegated Specialists), 1. Creation, 2. Testing, 3. Registration, 4. Distribution, Agent Design (+29 more)
 
 ### Community 366 - "Community 366"
-Cohesion: 0.10
-Nodes (11): ClassificationPipeline, Item, Iterator, minimize_and_restore_tiling_window(), tiling_window_ids_returns_active_tiling_only(), WindowRegistry, ActualLayout, Vec (+3 more)
+Cohesion: 0.08
+Nodes (12): ClassificationPipeline, Item, Iterator, minimize_and_restore_tiling_window(), reconcile_visibility_signature_compiles(), reconcile_visibility_untracked_returns_unchanged(), set_user_rules_delegates_to_the_classification_pipeline(), WindowRegistry (+4 more)
 
 ### Community 367 - "Community 367"
 Cohesion: 0.43
@@ -1959,27 +1958,27 @@ Nodes (5): BorderStyle, CornerPreference, Color, CornerPreference, Self
 
 ### Community 368 - "Community 368"
 Cohesion: 0.10
-Nodes (21): AnimationConfig, AnimationConfig, BorderConfig, ConfigEasing, FloatingConfig, FlowConfig, MatchRule, MinimizeRestore (+13 more)
+Nodes (20): AnimationConfig, AnimationConfig, ConfigEasing, FloatingConfig, FlowConfig, FocusConfig, MatchRule, MinimizeRestore (+12 more)
 
 ### Community 369 - "Community 369"
-Cohesion: 0.53
-Nodes (3): ActualLayout, Rect, WindowId
+Cohesion: 0.08
+Nodes (33): fetch_with_timeout(), get_saved_theme(), get_theme(), handle_crate_list_update(), hideSidebar(), mdbook_something_else_has_focus(), playground_text(), resize() (+25 more)
 
 ### Community 371 - "Community 371"
 Cohesion: 0.43
 Nodes (6): Args, main(), Option, Result, String, run()
 
 ### Community 372 - "Community 372"
-Cohesion: 0.35
-Nodes (11): WorkspaceId, offset_does_not_overflow_when_target_much_larger(), offset_does_not_scale_with_id_distance(), offset_does_not_underflow_when_target_much_smaller(), offset_for_active_workspace_is_zero(), offset_for_next_workspace_is_positive(), offset_for_previous_workspace_is_negative(), offset_handles_zero_gap() (+3 more)
+Cohesion: 0.40
+Nodes (5): Approval Gate Violation, Common Issues, Context Loading Violation, Test Timeout, Tool Usage Violation
 
 ### Community 373 - "Community 373"
 Cohesion: 0.09
 Nodes (22): Applications Own Their Render, Aspirational: Deliberately Deferred, Explicitly Removed: Keybindings, Floating Window Enhancements, GetWindowRect Includes Invisible Borders, Implemented Baseline, InputInterceptor, DragSession, ResizeSession, Known Win32 Limitations (+14 more)
 
 ### Community 374 - "Community 374"
-Cohesion: 0.40
-Nodes (5): By Type, OpenAgents Lookup, Quick Routes, Related Context, Structure
+Cohesion: 0.09
+Nodes (13): a(), b(), c(), d(), e(), l(), m(), n (+5 more)
 
 ### Community 375 - "Community 375"
 Cohesion: 0.40
@@ -1998,16 +1997,16 @@ Cohesion: 0.40
 Nodes (5): How to Delegate, Step 1: Discover Context (Optional but Recommended), Step 2: Propose Approach, Step 3: Get Approval, Step 4: Delegate with Context
 
 ### Community 379 - "Community 379"
-Cohesion: 0.17
-Nodes (14): collect_restorable(), insert_test_window_with_rect(), restorable_windows_includes_only_active_floating(), restorable_windows_includes_only_active_tiling(), restorable_windows_returns_invisible_bounds(), restorable_windows_returns_pre_manage_rect_as_anchor(), restorable_windows_returns_pre_manage_rect_not_tiled_rect(), sorted_by_x_empty_registry() (+6 more)
+Cohesion: 0.14
+Nodes (16): collect_restorable(), insert_test_window_with_rect(), restorable_windows_includes_only_active_floating(), restorable_windows_includes_only_active_tiling(), restorable_windows_returns_invisible_bounds(), restorable_windows_returns_pre_manage_rect_as_anchor(), restorable_windows_returns_pre_manage_rect_not_tiled_rect(), sorted_by_x_excludes_non_tiling_windows() (+8 more)
 
 ### Community 380 - "Community 380"
 Cohesion: 0.40
 Nodes (4): Core Idea, Guide: Modular Mastra Building, Key Points, Quick Example
 
 ### Community 381 - "Community 381"
-Cohesion: 0.40
-Nodes (5): Auto-Update Registry (Post-Merge), CI/CD Integration, GitHub Workflows, Validate Registry (PR Checks), Version Bump (On Release)
+Cohesion: 0.20
+Nodes (26): am(), bAe(), Ci(), dAe(), ej(), fAe(), fD(), gAe() (+18 more)
 
 ### Community 382 - "Community 382"
 Cohesion: 0.40
@@ -2054,8 +2053,8 @@ Cohesion: 0.40
 Nodes (5): Circular Dependencies, Dependency Not Found in Registry, Missing Context Dependencies, Troubleshooting, Unused Context Files
 
 ### Community 393 - "Community 393"
-Cohesion: 0.25
-Nodes (7): Best Practices, Context Bundle Template, Example Context Bundle, How to Create a Context Bundle, Template, Usage Instructions, When to Create a Context Bundle
+Cohesion: 0.14
+Nodes (21): addPoints(), bGe(), Cl(), gGe(), Ghe(), GX(), kGe(), mGe() (+13 more)
 
 ### Community 394 - "Community 394"
 Cohesion: 0.24
@@ -2063,11 +2062,11 @@ Nodes (16): ConfigEasing, config_easing_to_style(), derive_animator_config(), de
 
 ### Community 395 - "Community 395"
 Cohesion: 0.40
-Nodes (5): Category with Shared Context, Category with Tests, Common Patterns, Core Category with Multiple Agents, Development Subagents
+Nodes (5): Event Timeline, Session Collection, Session Data, Session Structure, What Are Sessions?
 
 ### Community 396 - "Community 396"
-Cohesion: 0.09
-Nodes (23): Client-Side Timeout, Code path, Config, Cross-References, Dispatch, `flow-watchdog` (Stub), Graceful-Shutdown Window Rescue, IPC and Watchdog (+15 more)
+Cohesion: 0.08
+Nodes (24): Autostart, Client-Side Timeout, Code path, Config, Cross-References, Dispatch, `flow-watchdog` (Stub), Graceful-Shutdown Window Rescue (+16 more)
 
 ### Community 397 - "Community 397"
 Cohesion: 0.40
@@ -2078,8 +2077,8 @@ Cohesion: 0.29
 Nodes (7): 1. Approval Gate Evaluator, 2. Context Loading Evaluator, 3. Tool Usage Evaluator, 4. Stop on Failure Evaluator, 5. Execution Balance Evaluator, Available Evaluators, Evaluators
 
 ### Community 399 - "Community 399"
-Cohesion: 0.27
-Nodes (3): FlowWM, WindowId, VisibilityChange
+Cohesion: 0.13
+Nodes (5): FlowWM, should_recolor_previous(), Option, WindowId, VisibilityChange
 
 ### Community 400 - "Community 400"
 Cohesion: 0.40
@@ -2122,24 +2121,24 @@ Cohesion: 0.14
 Nodes (14): Cross-References, Hooks Used, Notable Default Rules, Phase 1: Win32 Pre-Filters, Phase 2: Rule Pipeline, Recovery Hooks, Recovery Snapshot (Planned), Rule Matching Details (+6 more)
 
 ### Community 410 - "Community 410"
-Cohesion: 0.40
-Nodes (5): Check Context Dependencies, Full Validation, Setup Pre-Commit Hook, Validate Context References, Validation Commands
+Cohesion: 0.11
+Nodes (19): Chat Message Micro-Interactions, Chat UI Animation Patterns, Message Entrance, Related Files, Typing Indicator, Button Interactions, Card Interactions, Component Animation Patterns (+11 more)
 
 ### Community 411 - "Community 411"
-Cohesion: 0.40
-Nodes (5): Basic Test Run, Run All Tests, Run Specific Test, Run with Debug, Running Tests
+Cohesion: 0.50
+Nodes (4): Collision Handling, Collision Strategies, Interactive Mode, Non-Interactive Mode
 
 ### Community 412 - "Community 412"
-Cohesion: 0.15
-Nodes (13): Created (`EVENT_OBJECT_CREATE`), Destroyed (`EVENT_OBJECT_DESTROY`), Event Pipelines, Foreground (`EVENT_SYSTEM_FOREGROUND`), Hidden / Shown (`EVENT_OBJECT_HIDE` / `EVENT_OBJECT_SHOW`), Minimized (`EVENT_SYSTEM_MINIMIZESTART`), Name Change (`EVENT_OBJECT_NAMECHANGE`), Per-Event Behavior (+5 more)
+Cohesion: 0.14
+Nodes (14): Created (`EVENT_OBJECT_CREATE`), Destroyed (`EVENT_OBJECT_DESTROY`), Event Pipelines, Foreground (`EVENT_SYSTEM_FOREGROUND`), Foreground on creation, Hidden / Shown (`EVENT_OBJECT_HIDE` / `EVENT_OBJECT_SHOW`), Minimized (`EVENT_SYSTEM_MINIMIZESTART`), Name Change (`EVENT_OBJECT_NAMECHANGE`) (+6 more)
 
 ### Community 413 - "Community 413"
 Cohesion: 0.40
 Nodes (5): strategy, allOf, default, description, minimize_restore
 
 ### Community 414 - "Community 414"
-Cohesion: 0.50
-Nodes (4): cmd_query(), cmd_query_all(), main(), QueryCommands
+Cohesion: 0.23
+Nodes (21): cmd_config(), cmd_config_check(), cmd_config_edit(), cmd_config_init(), cmd_config_path(), cmd_config_reload(), cmd_disable_autostart(), cmd_enable_autostart() (+13 more)
 
 ### Community 415 - "Community 415"
 Cohesion: 0.08
@@ -2202,8 +2201,8 @@ Cohesion: 0.09
 Nodes (41): center_viewport_canvas(), center_viewport_canvas_negative_when_canvas_smaller(), center_viewport_canvas_positive_when_canvas_larger(), center_viewport_canvas_zero_when_equal(), find_neighbor_clamps_row_to_target_column_size(), find_neighbor_down_returns_next_row_same_column(), find_neighbor_left_returns_first_row_in_prev_column(), find_neighbor_multirow_matching_row_in_both_columns() (+33 more)
 
 ### Community 432 - "Community 432"
-Cohesion: 0.50
-Nodes (4): Approval Gates, Common Patterns, Context Loading, Delegation to Subagents
+Cohesion: 0.20
+Nodes (15): connect_to_named_pipe(), connect_to_pipe(), is_daemon_running(), ms_until(), ms_until_future_deadline_returns_positive_milliseconds(), ms_until_large_deadline_capped_at_u32_max(), ms_until_nearly_expired_floor_at_one(), ms_until_zero_remaining_floors_to_one() (+7 more)
 
 ### Community 433 - "Community 433"
 Cohesion: 0.29
@@ -2218,8 +2217,8 @@ Cohesion: 0.40
 Nodes (3): Introduction, Summary, User Guide
 
 ### Community 436 - "Community 436"
-Cohesion: 0.40
-Nodes (5): Category Labels, Creating an Issue, Issue Types, Priority Labels, Step 1: Creating Issues
+Cohesion: 0.21
+Nodes (20): config_easing_roundtrips_all_variants(), config_overlap_zero_roundtrips_toml(), config_validate_accepts_column_width_none(), config_validate_accepts_min_equal_to_column_width(), config_validate_accepts_overlap_equal_to_thickness(), config_validate_accepts_overlap_zero(), config_validate_accepts_zero_padding(), config_validate_rejects_min_exceeding_column_width() (+12 more)
 
 ### Community 437 - "Community 437"
 Cohesion: 0.50
@@ -2254,8 +2253,8 @@ Cohesion: 0.50
 Nodes (3): For /graphify add, For --watch, graphify reference: add a URL and watch a folder
 
 ### Community 446 - "Community 446"
-Cohesion: 0.50
-Nodes (4): Dependency Format, Dependency Resolution, Example, Resolution Rules
+Cohesion: 0.23
+Nodes (8): Win32Backend, UIPI-Resilient Per-Window SetWindowPos Design, Default, Rect, Result, Self, WindowBackend, WindowRef
 
 ### Community 447 - "Community 447"
 Cohesion: 0.33
@@ -2321,13 +2320,17 @@ Nodes (3): Available Tool Execution Hooks, Comparison with Other Event Hooks, Ot
 Cohesion: 0.67
 Nodes (3): Event Mapping, Integration with OpenCode Event System, Plugin Return Object
 
-### Community 467 - "Community 467"
+### Community 466 - "Community 466"
 Cohesion: 0.50
-Nodes (4): Common Issues, Push Rejected, Tag Already Exists, Version Mismatch
+Nodes (4): WindowRule, description, required, type
+
+### Community 467 - "Community 467"
+Cohesion: 0.67
+Nodes (3): description, type, process_path_regex
 
 ### Community 470 - "Community 470"
-Cohesion: 0.50
-Nodes (4): package.json, Step 2: Update Version Files, Verify Consistency, VERSION File
+Cohesion: 0.26
+Nodes (7): drawDebugLine(), mdbookEnableThresholdDebug(), MDBookSidebarScrollbox, reloadCurrentHeader(), updateCurrentHeader(), updateHeaderExpanded(), updateThreshold()
 
 ### Community 471 - "Community 471"
 Cohesion: 0.67
@@ -2342,24 +2345,24 @@ Cohesion: 0.50
 Nodes (4): default, description, type, place_above
 
 ### Community 475 - "Community 475"
-Cohesion: 0.50
-Nodes (4): Add Multiple Issues, Add Single Issue, Step 2: Adding Issues to Project Board, Verify Issues on Board
+Cohesion: 0.17
+Nodes (10): Architecture Diagram, Example Use Cases, Invocation Pattern, Related Files, Social Media Graphic, Tools Required, UI Mockup, Visual Content Generation (+2 more)
 
 ### Community 476 - "Community 476"
-Cohesion: 0.50
-Nodes (4): Assigning Issues, Moving Issues, Step 3: Processing Issues, Workflow States
+Cohesion: 0.11
+Nodes (23): _6e(), bh(), cH(), copy(), Eh(), eqe(), HHe(), Hwe() (+15 more)
 
 ### Community 477 - "Community 477"
-Cohesion: 0.50
-Nodes (4): Auto-Close Issues, Issue References in Commits, Link Issues to PRs, Step 7: Automation and Integration
+Cohesion: 0.29
+Nodes (6): Building from Source, Clone and Build, Contributor Gates, First Run, Prerequisites, Putting `flow` on your PATH
 
 ### Community 478 - "Community 478"
-Cohesion: 0.50
-Nodes (4): Best Practices, Issue Creation, Issue Management, Project Board
+Cohesion: 0.36
+Nodes (8): debug_windows(), hwnd_of(), wait(), window_creation_focus_follows_each_new_window(), window_creation_focus_lands_on_newly_created_window(), Option, String, Value
 
 ### Community 479 - "Community 479"
 Cohesion: 0.50
-Nodes (4): Bug Issue Template, Feature Issue Template, Improvement Issue Template, Step 6: Issue Templates
+Nodes (4): Agent Names, Category Names, Context Names, Naming Conventions
 
 ### Community 481 - "Community 481"
 Cohesion: 0.67
@@ -2378,32 +2381,20 @@ Cohesion: 0.50
 Nodes (4): swap_right, default, description, type
 
 ### Community 486 - "Community 486"
-Cohesion: 0.24
-Nodes (18): unique_pipe_name(), active_window_count(), hwnd_id(), move_to_active_workspace_is_noop(), move_to_higher_workspace_switches_active(), move_to_other_workspace_switches_active(), move_to_unknown_workspace_returns_error(), rapid_switch_workspace_does_not_strand_bystander() (+10 more)
-
-### Community 487 - "Community 487"
-Cohesion: 0.50
-Nodes (4): Bug Triage, Common Workflows, Planning New Feature, Processing User Request
+Cohesion: 0.22
+Nodes (14): active_window_count(), hwnd_id(), move_to_higher_workspace_switches_active(), move_to_other_workspace_switches_active(), move_to_unknown_workspace_returns_error(), rapid_switch_workspace_does_not_strand_bystander(), slow_switch_workspace_settles_bystander(), switch_to_self_is_noop() (+6 more)
 
 ### Community 488 - "Community 488"
-Cohesion: 0.50
-Nodes (4): Complete Work, Start Work, Step 4: Working on Issues, Update Progress
-
-### Community 489 - "Community 489"
-Cohesion: 0.67
-Nodes (3): Examples, Semantic Versioning, Step 1: Determine Version
+Cohesion: 0.29
+Nodes (7): down, up, window, allOf, default, description, padding
 
 ### Community 490 - "Community 490"
 Cohesion: 0.50
 Nodes (4): toggle_monocle, default, description, type
 
-### Community 491 - "Community 491"
-Cohesion: 0.67
-Nodes (3): Format, Step 3: Update CHANGELOG, Tips
-
-### Community 492 - "Community 492"
-Cohesion: 0.50
-Nodes (4): WindowRule, description, required, type
+### Community 493 - "Community 493"
+Cohesion: 0.40
+Nodes (4): EventHandle, PipeHandle, Drop, Send
 
 ### Community 495 - "Community 495"
 Cohesion: 0.67
@@ -2417,33 +2408,33 @@ Nodes (3): description, type, exe
 Cohesion: 0.67
 Nodes (3): description, type, exe_regex
 
-### Community 498 - "Community 498"
-Cohesion: 0.67
-Nodes (3): description, type, process_path_regex
-
 ### Community 499 - "Community 499"
 Cohesion: 0.67
 Nodes (3): title_regex, description, type
 
+### Community 506 - "Community 506"
+Cohesion: 0.40
+Nodes (5): 1. Use Meaningful Summaries, 2. Check Dependencies Before Starting, 3. Identify Parallelizable Work, 4. Regular Validation, Tips & Best Practices
+
 ## Knowledge Gaps
-- **3149 isolated node(s):** `$schema`, `schema_version`, `description`, `id`, `name` (+3144 more)
+- **3165 isolated node(s):** `$schema`, `schema_version`, `description`, `id`, `name` (+3160 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **29 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **25 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `WindowRulesConfig` connect `Community 314` to `Community 368`, `Config Types`, `Config Schema Generation`?**
-  _High betweenness centrality (0.007) - this node is a cross-community bridge._
-- **Why does `load_default_rules()` connect `Position Animation` to `Community 154`, `Community 371`?**
-  _High betweenness centrality (0.007) - this node is a cross-community bridge._
+- **Why does `o()` connect `Toggle Float Action` to `Graphify Plugin JS`, `Community 262`, `STM CLI Client`, `Community 393`, `Architecture Specs`, `Community 276`, `EaseOutBounce`, `EaseOutCirc`, `Community 155`, `Classification Testing`, `Drag Session Concept`, `IPC Named Pipe`, `Window Actions`, `Config Schema Properties`, `Community 305`, `Desktop Management`, `Config Schema Definitions`, `Rules Schema Definitions`, `Community 313`, `Community 320`, `Community 203`, `Padding Schema`, `Community 218`, `Community 476`, `Community 350`, `Community 223`, `Community 352`, `Community 489`, `Community 374`, `Scroll Right Action`, `Swap Right Action`, `Toggle Monocle Action`, `Community 381`?**
+  _High betweenness centrality (0.104) - this node is a cross-community bridge._
 - **Why does `AnimationConfig` connect `Community 368` to `Community 394`, `Daemon Orchestrator`?**
   _High betweenness centrality (0.007) - this node is a cross-community bridge._
+- **Why does `OsStr` connect `Community 180` to `Community 432`, `Window Registry Core`, `CLI Test Infrastructure`, `Win32 Registry Bridge`?**
+  _High betweenness centrality (0.006) - this node is a cross-community bridge._
+- **Are the 237 inferred relationships involving `o()` (e.g. with `e()` and `.closeNode()`) actually correct?**
+  _`o()` has 237 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `$schema`, `schema_version`, `description` to the rest of the system?**
-  _3151 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _3167 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Layout Mutations` be split into smaller, more focused modules?**
   _Cohesion score 0.061952074810052604 - nodes in this community are weakly interconnected._
 - **Should `Window Registry Core` be split into smaller, more focused modules?**
-  _Cohesion score 0.12343358395989974 - nodes in this community are weakly interconnected._
-- **Should `CLI Test Infrastructure` be split into smaller, more focused modules?**
-  _Cohesion score 0.1226890756302521 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.11528291909042834 - nodes in this community are weakly interconnected._

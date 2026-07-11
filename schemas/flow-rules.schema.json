@@ -1,12 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "WindowRulesConfig",
-  "description": "Window classification configuration, loaded from `flow-rules.yml`.\n\nThis is the user-facing window rules file. Rules are evaluated top-to-bottom, first match wins. If no rule matches, `default_action` is used.\n\nLoaded from `%USERPROFILE%\\.config\\flow\\flow-rules.yml` (see [`config::dirs`](crate::config::dirs) for overrides). If the file doesn't exist, defaults to an empty rule list with `default_action: tile`.\n\n# Example\n\n```yaml default_action: tile rules: - match: exe: \"explorer.exe\" title_contains: \"Open\" action: ignore - match: class: \"Chrome_WidgetWin_1\" action: tile initial_width_px: 960 ```",
+  "description": "Window classification configuration, loaded from `flow-rules.toml`.\n\nThis is the user-facing window rules file. Rules are evaluated top-to-bottom, first match wins. If no rule matches, `default_action` is used.\n\nLoaded from `%USERPROFILE%\\.config\\flow\\flow-rules.toml` (see [`config::dirs`](crate::config::dirs) for overrides). If the file doesn't exist, defaults to an empty rule list with `default_action: float`.\n\n# Example\n\n```toml default_action = \"float\"\n\n[[rules]] match = { exe = \"explorer.exe\", title_contains = \"Open\" } action = \"ignore\"\n\n[[rules]] match = { class = \"Chrome_WidgetWin_1\" } action = \"tile\" initial_width_px = 960 ```",
   "type": "object",
+  "required": [
+    "default_action"
+  ],
   "properties": {
     "default_action": {
       "description": "Default action for windows not matching any rule.",
-      "default": "tile",
       "allOf": [
         {
           "$ref": "#/definitions/WindowAction"
@@ -119,7 +121,7 @@
       ]
     },
     "WindowRule": {
-      "description": "A single window classification rule.\n\nRules are evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, [`WindowRulesConfig::default_action`] is used.\n\nThe `match` field uses `#[serde(rename = \"match\")]` so the YAML key is `match` while the Rust field is `match_` (avoiding the reserved word).",
+      "description": "A single window classification rule.\n\nRules are evaluated **top-to-bottom, first match wins** against new windows. If no rule matches, [`WindowRulesConfig::default_action`] is used.\n\nThe `match` field uses `#[serde(rename = \"match\")]` so the TOML key is `match` while the Rust field is `match_` (avoiding the reserved word).",
       "type": "object",
       "required": [
         "action",
@@ -135,7 +137,7 @@
           ]
         },
         "initial_width_px": {
-          "description": "Optional initial column width in pixels.",
+          "description": "Optional initial column width in pixels.\n\nWhen set, a window matching this rule is created at this width instead of the default `column_width`. The value must fall within the engine's current bounds (`[min_column_width_px, abs_max_width]`) at apply time.",
           "type": [
             "integer",
             "null"

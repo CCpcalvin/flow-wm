@@ -271,6 +271,7 @@ impl FlowWM {
             shutting_down: false,
             pending_creations: Vec::new(),
             float_resume_deadline: None,
+            last_foreground_sync: std::time::Instant::now(),
         };
         // Adopt pre-existing float-classified windows (found during the init
         // scan) into workspace 1's FloatingSpace, at their current on-screen
