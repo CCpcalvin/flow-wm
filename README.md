@@ -13,7 +13,7 @@ Windows live as **columns on a canvas** that stretches wider than your monitor. 
 
 <!-- ![FlowWM demo](docs/assets/demo.gif) -->
 
-> **Status:** early, in active development. Not on `winget` / `cargo install` yet — see [Getting started](#getting-started) to try it today, and the [roadmap](docs/src/dev-guide/roadmap.md) for what's done and what's next.
+> **Status:** early, in active development — see [Getting started](#getting-started) to try it today, and the [roadmap](docs/src/dev-guide/roadmap.md) for what's done and what's next.
 
 ## How it compares
 
@@ -31,53 +31,91 @@ FlowWM exists because the existing Windows tiling managers didn't scroll the way
 
 ## Getting started
 
-### Prerequisites
-
-FlowWM is driven by hotkeys, but it ships **no built-in keybinder** — by design. You pick the hotkey daemon you like; anything that can run a command on a keypress will do:
-
-- **[AutoHotkey](https://www.autohotkey.com/) v2** (recommended) — pairs with the bundled `flow.ahk` sample that `flow config init --ahk` generates for you.
-- **[whkd](https://github.com/LGUG2Z/whkd)** — if you prefer a komorebi-style TOML hotkey config.
-- **[PowerToys](https://learn.microsoft.com/windows/powertoys/)** — if you already run it.
-
-See [Design Decisions → Keybindings removed](docs/src/dev-guide/design-decisions.md) for why FlowWM stays out of the keybinding business.
-
 ### Install
 
-FlowWM isn't on a package manager yet. Once it is, either of these will work:
+FlowWM isn't on a package manager yet. For now, [build it from source](docs/src/dev-guide/building-from-source.md) — you'll need Rust and the Visual Studio "Desktop development with C++" workload. That puts a `flow.exe` on your `PATH`.
+
+FlowWM also ships **no keybinder of its own** — on purpose. Every hotkey is just a `flow` CLI call, so anything that can run a command on a keypress will do. The recommended companion is [AutoHotkey v2](https://www.autohotkey.com/), and `flow config init --ahk` writes a ready-to-use `flow.ahk` for it. (See [Design Decisions → Keybindings removed](docs/src/dev-guide/design-decisions.md) for the why.)
+
+### TL;DR — your first 60 seconds
+
+Think of this as the tutorial level: a few commands, a handful of keys, and you're scrolling.
+
+**1. Install AutoHotkey v2.** Grab the installer from <https://www.autohotkey.com/> (v2.0 or newer).
+
+**2. Generate your config and keybindings.**
 
 ```powershell
-winget install CCpcalvin.flow-wm    # planned
-cargo install flow-wm               # planned
+flow config init --ahk
 ```
 
-Until then, [build from source](docs/src/dev-guide/building-from-source.md) (needs Rust + the Visual Studio "Desktop development with C++" workload).
+This writes `%USERPROFILE%\.config\flow\flow.toml` (sensible defaults) and `flow.ahk` (a ready-to-use AutoHotkey v2 script). Existing files are never overwritten.
 
-### First run
+**3. Start the daemon and its hotkeys together.**
 
 ```powershell
-flow config init          # writes default config to %USERPROFILE%\.config\flow\
-flow config init --ahk    # also writes flow.ahk — a ready-to-use AutoHotkey v2 script
-flow start                # launches the daemon in the background
+flow start --ahk
 ```
 
-Then start your hotkey daemon. If you used `--ahk`, just double-click the generated `flow.ahk` — or drop it in your startup folder so it runs on login (`Win+R` → `shell:startup` → drop the file in).
+The daemon launches in the background, and once it's listening your `flow.ahk` fires up too. (Want this on every login? Run `flow enable-autostart --ahk` once.)
 
-That's it — FlowWM is now running. The first thing you'll notice is that **nothing looks tiled yet**. That's on purpose (see [Motivation](#motivation) below). Hit your focus key, pick a window, and tile it — FlowWM remembers your choice for that app next time.
+**4. Everything floats — until you say so.** Open a few windows. Notice that *nothing looks tiled yet*. That's deliberate: most apps are written to float, so FlowWM floats them by default and only tiles what you tell it to. Click one window to focus it.
+
+**5. Tile a window.** Press `ScrollLock + T`. The focused window snaps into the scrolling column layout. Press it again to float it back. FlowWM even *remembers* your choice — next time you open that app, it tiles automatically.
+
+**6. Drive the layout, vim-style.** Now that you have tiled columns, here's the whole move set (hold `ScrollLock`):
+
+| Key | What it does |
+|---|---|
+| `h` `j` `k` `l` | Move focus **left / down / up / right** |
+| `Shift + h/j/k/l` | **Move** the focused window that way (swaps columns sideways, swaps rows within a column) |
+| `Ctrl + h / l` | **Merge** the focused window into the adjacent column (stack windows in one column — the signature scroll move) |
+| `Ctrl + Shift + h / l` | **Promote** the focused window into a brand-new column on that side |
+| `,`  /  `.` | **Shrink** / **expand** the focused column |
+| `c` | **Center** the viewport on the focused column |
+| `1`…`9`, `0` | Switch to **workspace** 1…10 (`Shift` sends the focused window there) |
+| `q` | **Close** the focused window |
+| `p` | **Stop** the daemon (and exit the script) |
+
+That's the whole game. For the complete, annotated list, see the [Command Reference](docs/src/user-guide/dispatch-reference.md).
+
+### Why ScrollLock? (and how to change it)
+
+`ScrollLock` is the default modifier for one reason: it almost never clashes with anything. If your keyboard lacks it, swap it — open `%USERPROFILE%\.config\flow\flow.ahk` and change the single `ModKey` line at the top:
+
+```ahk
+ModKey := "ScrollLock"   ; try "CapsLock", "F13", or any key from
+                         ; https://www.autohotkey.com/docs/v2/KeyList.htm
+```
+
+Change that one line and every chord follows.
+
+> **A note on the Windows key (`LWin`).** It's tempting to set `ModKey := "LWin"`, but Windows special-cases the Win key everywhere — Start menu, `Win+D`, `Win+L`, shortcuts the OS swallows before AutoHotkey ever sees them — so bindings frequently misfire. (This isn't AutoHotkey's fault; the key is intercepted at the system level.) The author daily-drives a keyboard that *hardware*-remaps `LWin` to `ScrollLock` for exactly this reason. The cleanest path is usually a dedicated modifier key.
 
 ### Driving it (CLI or hotkeys)
 
-Every binding in `flow.ahk` just calls the `flow` CLI under the hood. You can run the same commands yourself any time:
+Here's the secret: **every binding above is just a `flow` CLI call.** AutoHotkey runs `flow dispatch <command>` under the hood — which means you can drive FlowWM from any terminal, script, or tool that can run a command:
 
 ```powershell
-flow dispatch focus right          # move focus between columns
-flow dispatch expand-column        # widen the focused column
-flow dispatch move-window right    # move a window across columns
+flow dispatch focus right          # same as ScrollLock + l
+flow dispatch move-window left     # same as ScrollLock + Shift + h
+flow dispatch expand-column        # same as ScrollLock + .
+flow dispatch set-window tile      # tile the focused window directly
 flow dispatch switch-workspace 2   # jump to workspace 2
 flow query all                     # see what the daemon sees
 flow stop                          # shut it down
 ```
 
-Run `flow --help` and `flow dispatch --help` to see the full list.
+**Don't want AutoHotkey?** No problem. Anything that runs a command on a keypress will do — for example [whkd](https://github.com/LGUG2Z/whkd) (untested by us, but the `flow dispatch` surface is tool-agnostic), or [PowerToys](https://learn.microsoft.com/windows/powertoys/) if you already run it.
+
+**Browse every command:**
+
+```powershell
+flow dispatch help     # list every dispatch action
+flow --help            # top-level commands (start, stop, config, query, ...)
+```
+
+For the full annotated reference — what each dispatch command does, its arguments, and the default hotkey it's bound to — see the [Command Reference](docs/src/user-guide/dispatch-reference.md).
 
 ## Motivation
 

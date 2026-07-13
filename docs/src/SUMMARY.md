@@ -7,6 +7,7 @@
 # User Guide
 
 - [Overview](./user-guide/README.md)
+- [Command Reference](./user-guide/dispatch-reference.md)
 
 # Developer Guide
 

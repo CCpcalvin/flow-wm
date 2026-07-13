@@ -12,22 +12,27 @@
 ; This file is yours. Edit it freely — FlowWM never overwrites it once it
 ; exists. Two things you may want to customise (both at the top of the file):
 ;
-;   1. flowExe  — path to flow.exe. Defaults to "flow" (resolved from PATH).
+;   1. ModKey    — the modifier every binding is held with. ScrollLock is the
+;                 default because it almost never clashes with other apps, but
+;                 many compact/laptop keyboards lack it. To switch, change the
+;                 one line below, e.g. ModKey := "CapsLock", "F13", or "LWin".
+;                 Key list: https://www.autohotkey.com/docs/v2/KeyList.htm
+;
+;                 A note on the Windows key: "LWin" is tempting, but Windows
+;                 special-cases it everywhere (Start menu, Win+D, Win+L, …) and
+;                 swallows many shortcuts before AutoHotkey ever sees them, so
+;                 bindings frequently misfire. See the README's
+;                 "Why ScrollLock?" section for the full story.
+;
+;   2. flowExe  — path to flow.exe. Defaults to "flow" (resolved from PATH).
 ;                 If FlowWM isn't on your PATH, set the full path, e.g.
 ;                 "C:\Users\you\flow.exe".
 ;
-;   2. Modifier — every binding is held with ScrollLock below. ScrollLock is
-;                 the default because it rarely conflicts with anything, but
-;                 many compact/laptop keyboards lack it. To switch, do a
-;                 find-and-replace of "ScrollLock" with your key, e.g. "Win",
-;                 "CapsLock", or "!^" (Alt+Ctrl). Key list:
-;                 https://www.autohotkey.com/docs/v2/KeyList.htm
-;
 ; Run at login:  `flow enable-autostart --ahk` (creates a single shell:startup
 ;                shortcut that runs `flow.exe start --ahk`; idempotent).
-; Full dispatch: run `flow dispatch --help` for every available command.
+; Full dispatch: run `flow dispatch help` for every available command.
 ;
-; Layout (hold modifier + key):
+; Layout (hold ModKey + key):
 ;   h j k l  focus left/down/up/right          (+Shift = move window)
 ;                                             (+Ctrl  = merge into column)
 ;                                             (+Ctrl+Shift = promote to new column)
@@ -41,7 +46,8 @@
 ; ════════════════════════════════════════════════════════════════════════════
 
 ; --- Config ------------------------------------------------------------------
-flowExe := "flow"            ; path to flow.exe (PATH by default)
+ModKey   := "ScrollLock"          ; the modifier every binding is held with
+flowExe := "flow"                ; path to flow.exe (PATH by default)
 
 ; --- Flow command helpers ----------------------------------------------------
 Flow(cmd) {
@@ -54,14 +60,16 @@ FlowDispatch(cmd) {
     Run(flowExe ' dispatch ' cmd, , 'Hide')
 }
 
-; --- Stop the daemon ---------------------------------------------------------
-ScrollLock & p::{
+; --- Action handlers ---------------------------------------------------------
+; Each handler maps one ModKey+key chord to a `flow dispatch` call. The
+; Ctrl/Shift variants are read at fire-time so a single key covers several
+; related actions.
+Act_Stop(*) {
     Flow("stop")
-    ExitApp
+    ExitApp()
 }
 
-; --- Focus / move / merge (h j k l) ------------------------------------------
-ScrollLock & h::{
+Act_Left(*) {     ; h
     if GetKeyState("Control") and GetKeyState("Shift")
         FlowDispatch("promote left")
     else if GetKeyState("Shift")
@@ -72,7 +80,7 @@ ScrollLock & h::{
         FlowDispatch("focus left")
 }
 
-ScrollLock & l::{
+Act_Right(*) {    ; l
     if GetKeyState("Control") and GetKeyState("Shift")
         FlowDispatch("promote right")
     else if GetKeyState("Shift")
@@ -83,32 +91,20 @@ ScrollLock & l::{
         FlowDispatch("focus right")
 }
 
-ScrollLock & j::{
+Act_Down(*) {     ; j
     if GetKeyState("Shift")
         FlowDispatch("move-window down")
     else
         FlowDispatch("focus down")
 }
 
-ScrollLock & k::{
+Act_Up(*) {       ; k
     if GetKeyState("Shift")
         FlowDispatch("move-window up")
     else
         FlowDispatch("focus up")
 }
 
-; --- Column sizing & window mode ---------------------------------------------
-ScrollLock & ,::FlowDispatch("shrink-column")
-ScrollLock & .::FlowDispatch("expand-column")
-
-ScrollLock & c::FlowDispatch("center")
-ScrollLock & t::FlowDispatch("set-window cycle")   ; float <-> tile
-
-; --- Close -------------------------------------------------------------------
-ScrollLock & q::FlowDispatch("close-window")
-
-; --- Workspaces (1..9, 0 = 10) -----------------------------------------------
-; Tap: switch to workspace N. Shift+N: send the focused window to workspace N.
 WorkspaceAction(n) {
     if GetKeyState("Shift")
         FlowDispatch("move-to-workspace " n)
@@ -116,13 +112,27 @@ WorkspaceAction(n) {
         FlowDispatch("switch-workspace " n)
 }
 
-ScrollLock & 1::WorkspaceAction(1)
-ScrollLock & 2::WorkspaceAction(2)
-ScrollLock & 3::WorkspaceAction(3)
-ScrollLock & 4::WorkspaceAction(4)
-ScrollLock & 5::WorkspaceAction(5)
-ScrollLock & 6::WorkspaceAction(6)
-ScrollLock & 7::WorkspaceAction(7)
-ScrollLock & 8::WorkspaceAction(8)
-ScrollLock & 9::WorkspaceAction(9)
-ScrollLock & 0::WorkspaceAction(10)
+; --- Register every binding --------------------------------------------------
+; Done dynamically so ModKey is one changeable line: swap the modifier above and
+; every chord below follows. Custom combos (e.g. "ScrollLock & h") are passed
+; to Hotkey() as a single string built from ModKey.
+Hotkey(ModKey " & p", Act_Stop)
+Hotkey(ModKey " & h", Act_Left)
+Hotkey(ModKey " & l", Act_Right)
+Hotkey(ModKey " & j", Act_Down)
+Hotkey(ModKey " & k", Act_Up)
+Hotkey(ModKey " & ,", (*) => FlowDispatch("shrink-column"))
+Hotkey(ModKey " & .", (*) => FlowDispatch("expand-column"))
+Hotkey(ModKey " & c", (*) => FlowDispatch("center"))
+Hotkey(ModKey " & t", (*) => FlowDispatch("set-window cycle"))
+Hotkey(ModKey " & q", (*) => FlowDispatch("close-window"))
+Hotkey(ModKey " & 1", (*) => WorkspaceAction(1))
+Hotkey(ModKey " & 2", (*) => WorkspaceAction(2))
+Hotkey(ModKey " & 3", (*) => WorkspaceAction(3))
+Hotkey(ModKey " & 4", (*) => WorkspaceAction(4))
+Hotkey(ModKey " & 5", (*) => WorkspaceAction(5))
+Hotkey(ModKey " & 6", (*) => WorkspaceAction(6))
+Hotkey(ModKey " & 7", (*) => WorkspaceAction(7))
+Hotkey(ModKey " & 8", (*) => WorkspaceAction(8))
+Hotkey(ModKey " & 9", (*) => WorkspaceAction(9))
+Hotkey(ModKey " & 0", (*) => WorkspaceAction(10))

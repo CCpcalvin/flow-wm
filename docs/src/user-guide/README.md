@@ -1,32 +1,38 @@
 # User Guide
 
-> **Status: Stub.** `flow` is under active development and the user-facing
-> surface (commands, configuration, hotkeys) is still being finalised. This
-> section will grow once the daemon reaches a stable feature set.
+FlowWM is a scrolling tiling window manager for Windows. This guide covers the
+day-to-day surface: the binaries, how to start, and the full command reference.
+
+> **New here?** Start with the README's
+> [*Getting started*](https://github.com/CCpcalvin/flow-wm#getting-started) — a
+> 60-second guided tour (install AutoHotkey, `flow config init --ahk`,
+> `flow start --ahk`, and the default hotkeys). Then come back here for the
+> complete command list.
 
 ## Binaries
 
 | Binary | Purpose |
 |--------|---------|
-| `flowd` | The daemon. Run this in the background (or via `flow start`). |
-| `flow` | The CLI client. Use this to send commands to the daemon. |
+| `flowd` | The daemon. Run in the background via `flow start` (or foreground for debugging). |
+| `flow` | The CLI client. Sends commands to the daemon over a named pipe. |
 | `flow-watchdog` | Spawned automatically by `flowd` for crash recovery. |
 
-## Quick Start
+## Quick start
 
 ```powershell
-# Start the daemon (foreground, useful for debugging)
-flowd
-
-# In another terminal
-flow start
-flow stop
-flow query windows all
+flow config init --ahk   # write flow.toml + flow.ahk (defaults)
+flow start --ahk         # start the daemon and the hotkey script
+flow query all           # see what the daemon sees (JSON)
+flow stop                # shut it down
 ```
 
-For configuration, see [`flow.toml` and `flow-rules.toml`](../dev-guide/config-and-persistence.md).
+## Where to go next
 
-> The full command reference, hotkey list, and troubleshooting guide will land
-> here as the feature set stabilises. In the meantime, the
-> [Developer Guide](../dev-guide/README.md) documents the architecture and
-> every command the daemon currently understands.
+- **[Command Reference](./dispatch-reference.md)** — every `flow dispatch` action,
+  annotated, with its default hotkey.
+- **Hotkeys** — `flow.ahk` is yours to edit. The modifier is one `ModKey` line at
+  the top; see the README's *Why ScrollLock?* section.
+- **Configuration** — [`flow.toml` and `flow-rules.toml`](../dev-guide/config-and-persistence.md).
+
+For architecture, the layout pipeline, and subsystem deep dives, see the
+[Developer Guide](../dev-guide/README.md).
