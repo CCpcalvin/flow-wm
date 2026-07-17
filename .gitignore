@@ -16,5 +16,8 @@ TODO.md
 .DS_Store
 **:Zone.Identifier
 
-graphify-out/cost.json
-graphify-out/cache
+# Per-developer agentic workflow / tooling (kept local, not shared)
+AGENTS.md
+.opencode/
+.pi/
+graphify-out/
