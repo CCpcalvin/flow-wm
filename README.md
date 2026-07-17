@@ -1,17 +1,12 @@
 # FlowWM
 
-A scrolling tiling window manager for Windows — inspired by [niri](https://github.com/YaLTeR/niri) and the [Hyprland](https://github.com/hyprwm/Hyprland) scroll plugin, built for people who'd rather stay on Windows.
+A scrolling tiling window manager for Windows — inspired by [niri](https://github.com/YaLTeR/niri) and the [Hyprland](https://github.com/hyprwm/Hyprland) scroll plugin. 
 
 Windows live as **columns on a canvas** that stretches wider than your monitor. The viewport slides left and right, so you scroll between columns instead of cramming everything into a fixed grid. It feels natural on an ultrawide — especially a 32:9.
 
-<!-- ─────────────────────────────────────────────────────────────────────── -->
-<!-- DEMO                                                                     -->
-<!-- Drop a recording under docs/assets/ (e.g. demo.gif) and uncomment the    -->
-<!-- line below. A good demo: 10–20s showing scroll between columns, tiling   -->
-<!-- a window, and merging two windows into one column on an ultrawide.       -->
-<!-- ─────────────────────────────────────────────────────────────────────── -->
-
-<!-- ![FlowWM demo](docs/assets/demo.gif) -->
+<video src="https://github.com/user-attachments/assets/80d1c69e-df6e-4c83-9364-ed86c8635f44" controls muted width="800">
+  Your browser can't render embedded MP4 — <a href="https://github.com/user-attachments/assets/80d1c69e-df6e-4c83-9364-ed86c8635f44">download the demo clip</a>.
+</video>
 
 > **Status:** early, in active development — see [Getting started](#getting-started) to try it today, and the [roadmap](docs/src/dev-guide/roadmap.md) for what's done and what's next.
 
@@ -27,7 +22,7 @@ FlowWM exists because the existing Windows tiling managers didn't scroll the way
 | New windows default to… | floating | tiled | tiled |
 | Learns your tile/float choices | ✅ | — | — |
 
-**FlowWM is early access** — actively developed, with a focused goal: bring the scrolling, column-merging tiling workflow from niri and Hyprland to Windows. If that's the workflow you're after, FlowWM is built for you.
+**FlowWM is early access** — actively developed, with a focused goal: bring the scroll-tiling workflow from niri and Hyprland to Windows. If that's the workflow you're after, FlowWM is built for you.
 
 ## Getting started
 
@@ -37,9 +32,7 @@ FlowWM isn't on a package manager yet. For now, [build it from source](docs/src/
 
 FlowWM also ships **no keybinder of its own** — on purpose. Every hotkey is just a `flow` CLI call, so anything that can run a command on a keypress will do. The recommended companion is [AutoHotkey v2](https://www.autohotkey.com/), and `flow config init --ahk` writes a ready-to-use `flow.ahk` for it. (See [Design Decisions → Keybindings removed](docs/src/dev-guide/design-decisions.md) for the why.)
 
-### TL;DR — your first 60 seconds
-
-Think of this as the tutorial level: a few commands, a handful of keys, and you're scrolling.
+### TL;DR
 
 **1. Install AutoHotkey v2.** Grab the installer from <https://www.autohotkey.com/> (v2.0 or newer).
 
@@ -119,14 +112,33 @@ For the full annotated reference — what each dispatch command does, its argume
 
 ## Motivation
 
-I used Linux for a long time — [niri](https://github.com/YaLTeR/niri) and the Hyprland scroll plugin in particular — and I fell for scrolling tiling. Then I had to move back to Windows and nothing felt the same.
+I've been working toward a keyboard-centric workflow, and along the way I tried
+different tiling schemes — from dwindle to komorebi's so-called "ultrawide"
+layout. I came to realize scrolling tiling makes sense for two reasons:
+
+1. It supports a dynamic number of windows without distorting their sizes. Most
+   tiling rules cram every window onto one screen, so once you open too many they
+   become basically unusable — effectively capping how many a workspace can hold.
+   The usual suggestion is to open a new workspace, but honestly, separating
+   windows across workspaces isn't trivial.
+
+2. Most tiling rules handle ultrawide monitors poorly — when you only have a few
+   windows, they just stretch everything across the whole screen.
+
+It was the Hyprland scroll plugin in particular that won me over, and I fell for
+scrolling tiling. Then for various reasons I had to switch back to Windows, and
+nothing felt the same.
 
 I tried the obvious options:
 
 - **GlazeWM** — a solid tiling manager, but no scrolling mode at all.
-- **komorebi** — it *does* have scrolling, but I found it unstable on my setup, and a bit rigid: I couldn't merge windows into a shared column, which is half the point of the scroll model. (Komorebi is also more complex than FlowWM overall — this isn't a knock, just a different scope.)
+- **komorebi** — it *does* have scrolling, but I found it unstable on my setup,
+  and a bit rigid: I couldn't merge windows into a shared column, which is half
+  the point of the scroll model. (Komorebi is also more complex than FlowWM
+  overall — this isn't a knock, just a different scope.)
 
-So I started FlowWM to bring scrolling tiling to Windows, with a few things I'd been missing:
+So I started FlowWM to bring scrolling tiling to Windows, with a few things I'd
+been missing:
 
 ### Scrolling-native, ultrawide-friendly
 
