@@ -1,9 +1,9 @@
-# IPC and Watchdog
+# IPC
 
 The `flow` CLI communicates with the `flowd` daemon over a single Windows named pipe
 using newline-delimited JSON. The daemon listens for one client at a time on a
 background accept thread, while the main IPC thread processes hook events and
-dispatches commands. A separate `flow-watchdog` binary is planned for crash recovery.
+dispatches commands.
 
 ## Named-Pipe Protocol
 
@@ -303,9 +303,9 @@ before the very first flow run in history. Consequences:
   registration-time anchor.
 
 The unclean-shutdown case -- where the daemon process is gone and cannot run the
-rescue pass -- is exactly what the [`flow-watchdog`](#flow-watchdog-stub) is
-planned for: it will restore from an on-disk snapshot without needing the daemon
-alive.
+rescue pass -- is what the planned watchdog process is for: restoring from an
+on-disk snapshot without needing the daemon alive (see the
+[Roadmap](./roadmap.md)).
 
 ### Code path
 
@@ -316,33 +316,13 @@ alive.
 | Which windows are controlled | `WindowRegistry::restorable_windows` in [`src/registry/core.rs`](../../src/registry/core.rs) |
 | Clamp geometry | `Rect::clamped_into` in [`src/common/types.rs`](../../src/common/types.rs) |
 
-## `flow-watchdog` (Stub)
+## Watchdog
 
-[`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs) is a planned crash-
-recovery helper. When the daemon exits unexpectedly, the watchdog is expected to
-restore windows from a recovery snapshot so they are not stranded off-screen.
-
-The binary currently prints `"not yet implemented"` and exits. When implemented,
-it will be spawned by `flowd` as a child process with `--parent-pid` and
-`--recovery-path` arguments. The watchdog will poll the parent PID and, on exit,
-read the recovery snapshot (`flow-recovery.json`) and call `SetWindowPos` on
-each HWND to restore windows to their pre-manage geometry.
-
-### Why a Separate Binary
-
-The watchdog must survive even if the daemon is corrupted, hung, or crashed. A
-separate binary gives it:
-
-- **Separate process lifetime** -- the OS reaps the daemon; the watchdog keeps
-  running.
-- **No dependency on daemon state** -- it reads a file and calls Win32 APIs.
-  No shared memory, no locks, no complex initialisation.
-- **Minimal code path** -- focused only on recovery, with nothing that can
-  deadlock or panic in a way that blocks the restore.
-
-A Windows service was considered but rejected: it requires admin privileges for
-installation and introduces a service control manager dependency. A child
-process is simpler, more portable, and sufficient for a single-user desktop tool.
+A separate watchdog process is planned for crash recovery — restoring windows
+from an on-disk snapshot when the daemon dies unexpectedly. It is not yet
+implemented and is deliberately deferred until `flow`/`flowd` are
+feature-complete. See the [Roadmap](./roadmap.md) for the full design,
+including why it is a separate process rather than a Windows service.
 
 ## Cross-References
 

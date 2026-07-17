@@ -3,23 +3,31 @@
 Where `flow` is headed. The core tiling engine, the scrolling canvas, the
 floating space, and niri-style workspace switching are all implemented and
 exercised end-to-end. What remains is polish, the long tail of IPC commands,
-multi-monitor support, and the aspirational input-driven features.
+multi-monitor support, crash recovery, and the aspirational input-driven
+features.
 
-## Timeline Overview
+## Status at a Glance
 
-```mermaid
-timeline
-    title flow Roadmap
-    Polish : SwapWorkspace animation
-    Polish : Remaining IPC (PlaceAbove, Promote, QueryState, config reload, ForgetApp)
-    Polish : Watchdog + recovery-snapshot persistence
-    Polish : Floating enhancements (smart placement, z-order, size memory)
-    Polish : MoveWindow up/down + floating nudge
-    Mid-term : Multi-monitor support
-    Mid-term : Performance (cloaking off-screen windows)
-    Aspirational : InputInterceptor / DragSession / ResizeSession
-    Aspirational : Super+LMB mouse gestures
-```
+| Area | Status | Note |
+|---|---|---|
+| Tiling engine + scrolling canvas | ✅ Done | `mutate → project → animate` pipeline |
+| Window lifecycle hooks | ✅ Done | create/destroy/minimize/restore/show-hide/foreground + `STATECHANGE`/`NAMECHANGE` |
+| Dispatch surface | ✅ Mostly | focus, swap, scroll, widths, center, monocle, close — see [Remaining IPC stubs](#remaining-ipc-stubs) for the gaps |
+| Floating space | ✅ Done | tile↔float, centered placement, merged scroll+float batches |
+| Workspaces | ✅ Done | 10 per monitor; switch + move-to animate; `SwapWorkspace` pending |
+| Classification + learned rules | ✅ Done | DWM-cloak/iconic/Alt-Tab/owner filters + 4-layer rule pipeline |
+| Animation | ✅ Done | 31 easing curves + `CubicBezier`, `RetargetFromCurrent`, `MockBackend` |
+| Graceful-shutdown rescue | ✅ Done | `rescue_stranded_windows` restores off-screen windows on clean exit |
+| Mouse-drag follow on tiled windows | 🜂 Near-term | tiled windows don't react to user drags today — looks broken |
+| `SwapWorkspace` animation | 🜂 Near-term | only workspace command still stubbed |
+| Remaining IPC stubs | 🜂 Near-term | `PlaceAbove`, `QueryState`, `CheckConfig`, `SetConfigValue`, `ForgetApp`/`ForgetAllApps` |
+| Floating enhancements | 🜂 Near-term | smart placement, size memory, z-order, gap mgmt |
+| Real cross-column `MoveWindow` | 🜂 Near-term | Left/Right aliased to swap-column; row-preserving move + floating nudge pending |
+| Multi-monitor support | ◷ Mid-term | `Vec<Monitor>` modeled; constructor hard-codes one |
+| Cloak parked windows (`DWMWA_CLOAK`) | ◷ Mid-term | read side exists; write side missing |
+| Watchdog + recovery snapshot | ◷ Mid-term | not started; gated on `flow`/`flowd` being complete |
+| Input hooks (DragSession etc.) | ◷ Aspirational | `src/input/` does not exist |
+| Coexistence warning | ◷ Aspirational | detect komorebi / GlazeWM at startup |
 
 ## Implemented Baseline
 
@@ -42,14 +50,30 @@ Win32 hook thread are all in place and driving real window management:
 - **Classification**: DWM-cloak, iconic, Alt-Tab visibility, and owner
   pre-filters, plus the four-layer user/learned/default/`default_action`
   rule pipeline. See [Classification & Learned Rules](./classification.md).
-- **Animation**: 31 named easing curves plus arbitrary CSS cubic-bezier,
+- **Animation**: 31 named easing curves plus arbitrary CSS `cubic-bezier`,
   `RetargetFromCurrent` mid-flight retargeting, and a `MockBackend` for
   tests. See [Animation](./animation.md).
+- **Graceful-shutdown rescue**: on clean exit the daemon runs
+  `rescue_stranded_windows`, moving any off-screen window back onto the
+  active monitor using its `pre_manage_rect` as the anchor. See
+  [IPC & Watchdog](./ipc-and-watchdog.md).
 
 ## Near-term: Polish and Completeness
 
 The wiring-heavy work is finished. The remaining near-term items close gaps
-in the IPC surface and round out the floating and workspace feature sets.
+in the IPC surface, make tiled windows feel responsive to direct
+manipulation, and round out the floating and workspace feature sets.
+
+### React to Mouse Dragging of Tiled Windows
+
+Today the daemon does not react when the user drags a tiled window with the
+mouse: the window is moved by the OS/application, but `flow` neither follows
+the drag live nor re-applies the tiled geometry, so the window visually
+detaches from its column until the next layout-changing command snaps it
+back. This looks broken. The fix is to detect the drag (via the existing
+`WinEvent` surface — `EVENT_OBJECT_LOCATIONCHANGE` on a managed tiled
+window) and either re-assert the tiled position or transition the window to
+floating for the duration of the drag.
 
 ### Workspace: SwapWorkspace
 
@@ -60,7 +84,7 @@ needs its own animation decision because it exchanges two workspaces'
 positions in the packed stack rather than sliding between them. Its protocol
 shape (`SwapWorkspace { workspace_id }`) is already locked in.
 
-### Remaining IPC Commands
+### Remaining IPC Stubs
 
 Several `SocketMessage` variants are declared and parsed by the CLI but
 return `unimplemented_command` on the daemon side. Their wire formats are
@@ -69,25 +93,12 @@ stable so external tooling and keybindings can target them now:
 | Command | Purpose |
 |---|---|
 | `PlaceAbove` | Raise the focused floating window's z-order (`SetWindowPos` with `HWND_TOPMOST`/restore) |
-| `Promote` | Move the focused window to the master (first) position in its column |
 | `QueryState` | Read-only introspection of daemon/registry state beyond `QueryWindowsAll` |
-| `ReloadConfig` / `CheckConfig` / `SetConfigValue` | Runtime config mutation without a daemon restart |
+| `CheckConfig` / `SetConfigValue` | Runtime config validation / mutation without a daemon restart (`ReloadConfig` is already implemented) |
 | `ForgetApp` / `ForgetAllApps` | Programmatic clearing of learned rules (today this requires hand-editing `history-flow-rules.toml`) |
 
 See [Classification & Learned Rules](./classification.md) for the learned-rules
 model that `ForgetApp` would expose programmatically.
-
-### Watchdog and Recovery-Snapshot Persistence
-
-`flow-watchdog` ([`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs))
-is still a stub — it prints `"flow-watchdog: not yet implemented"` and exits.
-The planned design: `flowd` spawns the watchdog with `--parent-pid` and
-`--recovery-path`; the watchdog polls the parent PID and, on exit, reads a
-`flow-recovery.json` snapshot and calls `SetWindowPos` to restore each window
-to its pre-manage geometry. The `Window` struct already carries
-`pre_manage_rect` for this purpose; the atomic write-to-temp-then-rename
-persistence path is what is missing. See
-[IPC & Watchdog](./ipc-and-watchdog.md).
 
 ### Floating Window Enhancements
 
@@ -100,17 +111,19 @@ list, summarised here:
 - **Per-window float size memory** — remember each window's last floating
   rect and restore it on subsequent tile→float transitions.
 - **Z-order raising** — `PlaceAbove` to bring the focused float to the top
-  of the z-order (depends on the IPC command above).
+  of the z-order (depends on the IPC stub above).
 - **Floating gap management** — reserve padding around floats at workspace
   edges.
 
-### Semantic Move: Up/Down and Floating Nudge
+### MoveWindow: Real Cross-Column Move and Floating Nudge
 
-`MoveWindow` currently resolves only the tiled left/right path (delegating
-to `SwapColumn`). Two deferred paths remain:
+`MoveWindow`'s up/down path is implemented (it delegates to
+`dispatch_swap_window` for an in-column swap). Two paths remain deferred:
 
-- **Tiled up/down** — a within-column window swap (delegates to
-  `dispatch_swap_window`).
+- **Tiled left/right, row-preserving** — `Left`/`Right` are currently
+  aliased to `SwapColumn` (a column swap), not a true move that preserves
+  row membership. The alias is intentional as a placeholder; a real
+  cross-column extract-and-insert is the missing piece.
 - **Floating, any direction** — a pixel nudge by a configurable shift.
 
 The branching structure already lives behind a single delegation point in
@@ -141,6 +154,33 @@ DWM skips compositing them, reducing GPU work on large canvases. The
 classification pipeline already inspects `DWMWA_CLOAKED`; the write side
 is the new work.
 
+### Watchdog and Recovery-Snapshot Persistence
+
+**Not started.** This is deliberately deferred until `flow` and `flowd` are
+feature-complete; it is tracked here as the intended design.
+
+The planned design: `flowd` spawns a separate `flow-watchdog` helper
+process with `--parent-pid` and `--recovery-path` arguments. The watchdog
+polls the parent PID and, on unexpected exit, reads a
+`flow-recovery.json` snapshot and calls `SetWindowPos` to restore each
+window to its pre-manage geometry. The `Window` struct already carries
+`pre_manage_rect` for this purpose; the atomic write-to-temp-then-rename
+persistence path and the watchdog binary itself are what is missing. The
+watchdog must survive even if the daemon is corrupted, hung, or crashed, so
+it owns a separate process lifetime — the OS reaps the daemon while the
+watchdog keeps running, with no dependency on daemon state (it reads a file
+and calls Win32 APIs directly) and a minimal code path focused only on
+recovery. A Windows service was considered and rejected — it requires admin
+privileges for installation and adds a service-control-manager dependency;
+a child process is simpler and sufficient for a single-user desktop tool.
+
+On **graceful** shutdown, no watchdog is needed: the daemon performs the
+equivalent restore inline via `rescue_stranded_windows` (already
+implemented — see [Implemented Baseline](#implemented-baseline)). The
+watchdog only covers the crash case.
+
+See [IPC & Watchdog](./ipc-and-watchdog.md).
+
 ## Aspirational: Deliberately Deferred
 
 These features are acknowledged as valuable but **not planned** for the
@@ -161,7 +201,19 @@ Mouse gestures (drag to tile, drag to edge to snap, etc.) build on the
 `DragSession` infrastructure above and share its dependency on an
 unimplemented input hook.
 
-## Explicitly Removed: Keybindings
+### Coexistence Warning
+
+If `komorebi`, `GlazeWM`, or another tiling window manager is detected as
+running, `flow` should display a warning and ask the user to close the
+conflicting manager before using `flow`. Coexistence with another WM that
+also moves windows will produce unpredictable results.
+
+## Design Records
+
+These sections record timeless constraints and deliberate design decisions,
+not pending work.
+
+### Keybindings Intentionally Removed
 
 Keybinding handling was **intentionally removed** from both the config and
 the codebase. The rationale: external tools like AutoHotkey, PowerToys, or
@@ -175,12 +227,12 @@ Users map their preferred hotkeys to `flow dispatch` CLI calls via their
 chosen keybinding tool. This keeps `flow`'s attack surface small and avoids
 duplicating well-tested input infrastructure.
 
-## Known Win32 Limitations
+### Known Win32 Limitations
 
 These are not bugs — they are inherent properties of the Windows rendering
 model.
 
-### SetWindowPos vs DeferWindowPos
+#### SetWindowPos vs DeferWindowPos
 
 `flow` uses `SetWindowPos` (immediate positioning) rather than
 `DeferWindowPos` (batch positioning). `DeferWindowPos` batches multiple
@@ -190,7 +242,7 @@ admin window (protected by UIPI) fails the entire batch with
 logs a warning but does not block the remaining windows. See
 [Animation](./animation.md) for the per-backend rationale.
 
-### GetWindowRect Includes Invisible Borders
+#### GetWindowRect Includes Invisible Borders
 
 `GetWindowRect` returns a rect that includes a hidden ~7px border on the
 left, right, and bottom edges. This is not the visual rect of the window.
@@ -198,25 +250,10 @@ left, right, and bottom edges. This is not the visual rect of the window.
 See the [Window Registry](./window-registry.md) chapter for how invisible
 bounds are measured and how `visible_to_window()` compensates.
 
-### Applications Own Their Render
+#### Applications Own Their Render
 
 `flow` can request a window position via `SetWindowPos`, but the application
 controls its own rendering. Some apps (especially UWP and Electron-based)
 may not immediately respect position changes or may reposition themselves
 autonomously. This is a fundamental constraint of the Windows windowing
 model.
-
-## Warning System (Planned)
-
-If `komorebi`, `GlazeWM`, or another tiling window manager is detected as
-running, `flow` should display a warning and ask the user to close the
-conflicting manager before using `flow`. Coexistence with another WM that
-also moves windows will produce unpredictable results.
-
-## Window Restoration
-
-When `flow` exits (gracefully or via crash), tiled windows may be positioned
-off-screen. The planned `flow-watchdog` (see above) handles crash recovery;
-on graceful shutdown the daemon performs the equivalent restore inline —
-querying all window positions and moving any off-screen windows to the
-nearest screen edge using `SetWindowPos` (no animation needed).

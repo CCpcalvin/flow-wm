@@ -3,7 +3,7 @@
 FlowWM (`flow`) is a tiling window manager for Windows built around an
 infinite-horizontal-canvas layout model. Windows occupy columns on a virtual canvas
 wider than any single monitor; the viewport slides left and right to bring them into
-view. The entire system is a single Cargo package containing three binaries that share
+view. The entire system is a single Cargo package containing two binaries that share
 one library crate, coordinated by a top-level orchestrator struct called
 `FlowWM`.
 
@@ -13,20 +13,18 @@ one library crate, coordinated by a top-level orchestrator struct called
 |--------|------|
 | `flowd` | Background daemon — owns all state, manages windows, accepts IPC commands |
 | `flow` | CLI client — sends commands to the daemon over a named pipe |
-| `flow-watchdog` | Crash-recovery helper — restores windows if the daemon dies unexpectedly |
 
-All three binaries share the library crate rooted at [`src/lib.rs`](../../src/lib.rs).
-The daemon entry point is [`src/main.rs`](../../src/main.rs); the other two live in
-[`src/bin/flow.rs`](../../src/bin/flow.rs) and
-[`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs).
+Both binaries share the library crate rooted at [`src/lib.rs`](../../src/lib.rs).
+The daemon entry point is [`src/main.rs`](../../src/main.rs); the CLI lives in
+[`src/bin/flow.rs`](../../src/bin/flow.rs).
 
 ## Subsystem Map
 
 Everything runs inside the `flowd` process. Two **inputs** feed events into one
 **orchestrator** — the `FlowWM` main loop — which routes each event to
 the right **subsystem**. No subsystem knows about any other; the orchestrator is the
-only glue. The `flow` CLI and `flow-watchdog` are external binaries that share the
-library's IPC types but hold no application state.
+only glue. The `flow` CLI is an external binary that shares the library's IPC
+types but holds no application state.
 
 ```mermaid
 flowchart TB
@@ -102,9 +100,9 @@ the resulting `AppliedLayout` becomes the animator's move targets.
 - **HistoryStore** (`src/config/history.rs`) — persists the user's explicit
   `set-window` decisions (learned rules) to `history-flow-rules.toml` so the next
   window of the same app is classified automatically. See
-  [Classification & Learned Rules](./classification.md). (The recovery-snapshot
-  persistence planned for `flow-watchdog` is not yet implemented — there is no
-  separate `persist` module today.)
+  [Classification & Learned Rules](./classification.md). (A separate recovery-snapshot
+  `persist` module is planned but not yet implemented — see the
+  [Roadmap](./roadmap.md).)
 
 ## Ownership Model
 

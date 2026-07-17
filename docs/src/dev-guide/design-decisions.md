@@ -6,7 +6,7 @@ rationale for the choice.
 
 ## Single Cargo Package (Not a Workspace)
 
-`flow` is a single Cargo package with three binaries (`flowd`, `flow`, `flow-watchdog`)
+`flow` is a single Cargo package with two binaries (`flowd`, `flow`)
 sharing one library crate (`src/lib.rs`). Rust supports this layout natively — one
 package can contain a library crate, a default binary, and additional binaries.
 

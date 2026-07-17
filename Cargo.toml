@@ -5,6 +5,9 @@ edition = "2024"
 description = "A scrolling, infinite-horizontal-canvas tiling window manager for Windows"
 license = "MIT"
 repository = "https://github.com/CCpcalvin/flow-wm"
+readme = "README.md"
+keywords = ["windows", "window-manager", "tiling", "wm", "scrolling"]
+categories = ["command-line-utilities", "os"]
 
 [[bin]]
 name = "flowd"
@@ -13,10 +16,6 @@ path = "src/main.rs"
 [[bin]]
 name = "flow"
 path = "src/bin/flow.rs"
-
-[[bin]]
-name = "flow-watchdog"
-path = "src/bin/flow-watchdog.rs"
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
@@ -30,11 +29,30 @@ clap = { version = "4.6.1", features = ["derive"] }
 # Win32 bindings. Feature flags are transitive gates that enable functions
 # in other modules (e.g., Win32_System_IO gates ReadFile/WriteFile/ConnectNamedPipe;
 # Win32_Security gates CreateFileW/CreateNamedPipeW).
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_IO", "Win32_Storage_FileSystem", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Registry"] }
+windows = { version = "0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_System_Pipes",
+  "Win32_System_IO",
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Accessibility",
+  "Win32_System_Threading",
+  "Win32_System_StationsAndDesktops",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_Shell",
+  "Win32_System_Com",
+  "Win32_System_Registry",
+] }
 regex = "1.12.3"
 crossbeam-channel = "0.5.15"
 toml = "1.1.2"
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4.45", default-features = false, features = [
+  "clock",
+  "std",
+] }
 
 [profile.release]
 opt-level = 3
