@@ -29,9 +29,8 @@ cargo build               # debug build
 cargo build --release     # optimised, stripped binaries
 ```
 
-The three binaries — `flowd.exe` (daemon), `flow.exe` (CLI client), and
-`flow-watchdog.exe` (crash-recovery helper) — are written to
-`target\debug\` or `target\release\`.
+The two binaries — `flowd.exe` (daemon) and `flow.exe` (CLI client) — are
+written to `target\debug\` or `target\release\`.
 
 ### Putting `flow` on your PATH
 

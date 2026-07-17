@@ -4,14 +4,13 @@
 //!
 //! # Binaries
 //!
-//! The project ships as three binaries inside a single Cargo package sharing
+//! The project ships as two binaries inside a single Cargo package sharing
 //! this library crate:
 //!
 //! | Binary | Role |
 //! |--------|------|
 //! | `flowd` | Daemon — owns all state, manages windows |
 //! | `flow` | CLI client — sends commands to the daemon via named-pipe IPC |
-//! | `flow-watchdog` | Crash-recovery helper — restores windows if the daemon dies |
 //!
 //! # Modules
 //!

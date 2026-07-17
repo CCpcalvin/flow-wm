@@ -351,13 +351,13 @@ second chance:
 
 ## Recovery Snapshot (Planned)
 
-The `flow-watchdog` binary ([`src/bin/flow-watchdog.rs`](../../src/bin/flow-watchdog.rs))
-is designed to restore windows if the daemon crashes. The watchdog would read a
-`flow-recovery.json` file written by the daemon on every state mutation and call
-`SetWindowPos` for each entry to put windows back at their pre-manage positions.
-This feature is currently a stub — the watchdog exists but the atomic
-write-to-temp-then-rename persistence logic is not yet implemented. The `Window`
-struct already carries `pre_manage_rect` for this purpose.
+A separate watchdog process is planned to restore windows if the daemon
+crashes, reading a `flow-recovery.json` snapshot written by the daemon on
+every state mutation and calling `SetWindowPos` for each entry to put
+windows back at their pre-manage positions. This is not yet implemented and
+is gated on `flow`/`flowd` being feature-complete; the `Window` struct
+already carries `pre_manage_rect` for this purpose. See the
+[Roadmap](./roadmap.md) for the full design.
 
 ## Cross-References
 

@@ -58,8 +58,7 @@ flow/
 │   ├── main.rs                      # flowd entry point
 │   ├── lib.rs                       # shared library
 │   ├── bin/
-│   │   ├── flow.rs                   # CLI client
-│   │   └── flow-watchdog.rs          # crash-recovery helper
+│   │   └── flow.rs                   # CLI client
 │   ├── common/                      # shared types: Rect, WindowId, Direction, errors
 │   ├── config/                      # TOML loading, schema gen, dirs, lifecycle
 │   ├── registry/                    # WindowRegistry: OS sync, classification, hooks

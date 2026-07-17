@@ -6,13 +6,12 @@ grid-based managers such as glazeWM or komorebi, windows occupy columns on a
 virtual canvas that can extend wider than any single monitor. The viewport
 slides left and right, bringing columns in and out of view.
 
-The project ships as three binaries inside a single Cargo package:
+The project ships as two binaries inside a single Cargo package:
 
 | Binary | Role |
 |--------|------|
 | `flowd` | The daemon process. Runs in the background and owns all state. |
 | `flow` | The CLI client. Sends commands to the daemon, queries state, edits config. |
-| `flow-watchdog` | The crash-recovery helper. Restores windows if the daemon dies. |
 
 ## How to Use This Book
 

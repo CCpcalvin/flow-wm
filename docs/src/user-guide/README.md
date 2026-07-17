@@ -15,7 +15,6 @@ day-to-day surface: the binaries, how to start, and the full command reference.
 |--------|---------|
 | `flowd` | The daemon. Run in the background via `flow start` (or foreground for debugging). |
 | `flow` | The CLI client. Sends commands to the daemon over a named pipe. |
-| `flow-watchdog` | Spawned automatically by `flowd` for crash recovery. |
 
 ## Quick start
 

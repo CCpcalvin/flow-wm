@@ -32,7 +32,7 @@
 - [Classification & Learned Rules](./dev-guide/classification.md)
 - [Animation](./dev-guide/animation.md)
 - [Borders](./dev-guide/borders.md)
-- [IPC & Watchdog](./dev-guide/ipc-and-watchdog.md)
+- [IPC](./dev-guide/ipc-and-watchdog.md)
 - [Config & Persistence](./dev-guide/config-and-persistence.md)
 
 ## Reference
