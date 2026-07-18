@@ -4,9 +4,9 @@
 //! Parsing is strict: lowercase/uppercase both accepted on input, but
 //! serialization always emits uppercase hex.
 
-use schemars::schema::Schema;
-use schemars::{JsonSchema, SchemaGenerator};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -105,22 +105,29 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 impl JsonSchema for Color {
-    fn schema_name() -> String {
-        "Color".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "Color".into()
+    }
+
+    /// Include the module path so `Color` does not collide with same-named
+    /// types in other crates when both contribute JSON Schemas to the same
+    /// `$defs` map.
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::Color").into()
     }
 
     fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
-        serde_json::from_value(serde_json::json!({
+        json_schema!({
             "type": "string",
             "pattern": "^#[0-9A-Fa-f]{6}$",
             "format": "hex-color",
             "description": "RGB hex color, e.g. \"#FF8800\"."
-        }))
-        .expect("color schema is a valid JSON Schema object")
+        })
     }
 
-    fn is_referenceable() -> bool {
-        false
+    /// Inline the schema rather than emit a `$ref` — `Color` is a leaf scalar with no reuse.
+    fn inline_schema() -> bool {
+        true
     }
 }
 
@@ -182,6 +189,64 @@ mod tests {
     fn serde_rejects_invalid_string() {
         let bad = toml::from_str::<BorrowedColor>("color = \"magenta\"\n");
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn json_schema_emits_v1_inline_string_shape() {
+        // Regression test for the schemars v0.8 -> v1 port of the custom
+        // `JsonSchema for Color` impl (the only hand-written impl touched by
+        // the migration). The `json_schema!` macro must produce a Draft
+        // 2020-12 string schema carrying the hex-color pattern and format.
+        // Arrange
+        let mut generator = SchemaGenerator::default();
+        // Act
+        let schema = Color::json_schema(&mut generator);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let obj = value.as_object().expect("schema is an object");
+        // Assert
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("string"),
+            "Color schema type should be 'string'"
+        );
+        assert_eq!(
+            obj.get("pattern").and_then(|v| v.as_str()),
+            Some("^#[0-9A-Fa-f]{6}$"),
+            "Color schema should carry the hex pattern"
+        );
+        assert_eq!(
+            obj.get("format").and_then(|v| v.as_str()),
+            Some("hex-color"),
+            "Color schema should carry the 'hex-color' format"
+        );
+    }
+
+    #[test]
+    fn json_schema_trait_methods_return_v1_contracts() {
+        // schemars v1 renamed and reshaped the `JsonSchema` trait:
+        // `schema_name`/`schema_id` now return `Cow<'static, str>`, and
+        // `is_referenceable() -> bool` was INVERTED to `inline_schema() -> bool`.
+        // Lock each contract so a partial revert to v0.8 surfaces here rather
+        // than silently producing wrong schemas downstream.
+        // Arrange + Act
+        let name = Color::schema_name();
+        let id = Color::schema_id();
+        let inline = Color::inline_schema();
+        // Assert
+        assert_eq!(name.as_ref(), "Color", "schema_name must be 'Color'");
+        assert_ne!(
+            name.as_ref(),
+            id.as_ref(),
+            "schema_id should be module-qualified to disambiguate same-named types across crates, got id = {id}"
+        );
+        assert!(
+            id.as_ref().ends_with("::Color"),
+            "schema_id should end with '::Color', got: {id}"
+        );
+        assert!(
+            inline,
+            "inline_schema must be true (v1); corresponds to is_referenceable=false in v0.8"
+        );
     }
 
     /// Tiny wrapper used only so `toml::to_string` has a top-level table to
