@@ -1,8 +1,8 @@
 # Building from Source
 
 FlowWM is a native Windows binary built with the MSVC toolchain. This page is
-for anyone who wants to run FlowWM before the `winget` / `cargo install`
-packages exist, or who wants to contribute.
+for contributors, or anyone who wants to build locally instead of installing
+from crates.io with `cargo install flow-wm`.
 
 > If you only want to *use* FlowWM, the high-level overview lives in the
 > project [`README.md`](../../../README.md). This page is the build detail.
