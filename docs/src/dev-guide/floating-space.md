@@ -265,9 +265,9 @@ was deliberately differentiated.
 
 | Concept | Owner | Scope | Used for |
 |---------|-------|-------|----------|
-| **OS focus** (`registry.focused()`) | `WindowRegistry` | Global — the actual Win32 foreground window | Determining which window `set-window` acts on; `SetForegroundWindow` calls |
-| **`ScrollingSpace::last_focused_window`** | `ScrollingSpace` | Per-space — most recently interacted-with **tile** | Insert-after-focused, remove-with-succession, monocle target |
-| **(none for floats)** | — | — | `set-window` operates on OS focus regardless of which space the window is in |
+| **OS focus** (`registry.focused()`) | `WindowRegistry` | Global — the actual Win32 foreground window | The authoritative resolver for *which window a command acts on*: `set-window` transitions, all tiled-only layout ops (focus / swap / expand / shrink / set-column-width / toggle-monocle / center / merge / promote), and `SetForegroundWindow` calls |
+| **`ScrollingSpace::last_focused_window`** | `ScrollingSpace` | Per-space — most recently interacted-with **tile** | Insert-after anchor, focus succession on removal, workspace-switch re-foreground. **Not** used to resolve command targets — tiled-only ops read OS focus instead (see [below](#tiled-only-ops-resolve-from-os-focus)) |
+| **(none for floats)** | — | — | `set-window` operates on OS focus regardless of which space the window is in; tiled-only ops silently no-op when a float is foreground (future: float-aware ops such as pixel-nudge for `move-window`) |
 
 ### Why `last_focused_window` (not `focused`)
 
@@ -282,6 +282,33 @@ Floating windows have no separate cursor because the OS focus is sufficient:
 `dispatch_set_window` reads `registry.focused()` to find the target window, then
 inspects its `WindowState` to decide what transition to apply. The scrolling
 space's cursor is irrelevant for this lookup.
+
+## Tiled-only ops resolve from OS focus
+
+All layout operations that only make sense for tiles — `focus`, `swap-window`,
+`swap-column`, `merge-column`, `promote-window`, `expand-column`,
+`shrink-column`, `set-column-width`, `toggle-monocle`, `center` — resolve their
+target from `registry.focused()` (the OS foreground), **not** from
+`ScrollingSpace::last_focused_window`. After resolving the foreground
+`WindowId`, the dispatch handler verifies
+`matches!(state, WindowState::Tiling(TilingState::Active { .. }))`. If the
+foreground is a float, ignored, minimized, hidden, or absent, the handler logs
+at `debug!` and returns `SocketResponse::Ok` silently — a deliberate no-op, not
+an error. (Matching existing no-op precedent: switch-to-self, move-to-self, and
+`set-window` NoOp. There is no `Warning`/`Info` variant on `SocketResponse`.)
+
+This prevents the bug where focusing a float left `last_focused_window` pointing
+at a stale tile, and a subsequent column-resize silently acted on that tile
+instead of being a no-op. `last_focused_window` is still *written* by the
+`focus` op (it remains the per-space tile history cursor for insert-after and
+succession purposes), but it is no longer *read* by any command handler to
+decide what to act on.
+
+The classification is inline in each dispatch handler rather than wrapped in a
+helper, so each handler can emit a `debug!` message naming the specific op. When
+float-specific behavior arrives (e.g. `move-window → pixel nudge`), a second
+`matches!` arm for `WindowState::Floating(FloatingState::Active { .. })` will
+slot in alongside the tiling arm.
 
 ## Configuration
 

@@ -333,3 +333,46 @@ impl FlowWM {
         Some(window.invisible_bounds.window_to_visible(window_rect))
     }
 }
+
+#[cfg(test)]
+impl FlowWM {
+    /// Construct a `FlowWM` for unit tests, bypassing all Win32 startup work.
+    ///
+    /// Fabricates non-essential fields (`PipeServer`, hook handles, animator)
+    /// with test-safe dummies — see [`PipeServer::test_dummy`],
+    /// [`HookThreadHandle::test_dummy`](crate::registry::hooks::HookThreadHandle::test_dummy),
+    /// [`HookSignal::test_dummy`](crate::registry::hooks::HookSignal::test_dummy),
+    /// and [`MockBackend`](crate::animation::backend::mock::MockBackend). The
+    /// caller supplies a fully-populated [`WindowRegistry`] and the
+    /// [`Vec<Monitor>`] stack; everything else defaults.
+    ///
+    /// Intended for testing dispatch handlers (`dispatch_focus`,
+    /// `dispatch_swap_column`, etc.) without spawning a real daemon. The
+    /// fabricated fields are never touched on no-op code paths; positive paths
+    /// exercise `monitors` / `animator` / `registry` as normal.
+    pub(super) fn new_for_test(registry: WindowRegistry, monitors: Vec<Monitor>) -> Self {
+        use crate::animation::backend::mock::MockBackend;
+
+        let (_hook_sender, hook_receiver) = std::sync::mpsc::channel();
+        Self {
+            registry,
+            history: HistoryStore::default(),
+            monitors,
+            active_monitor: 0,
+            animator: WindowAnimator::new(
+                MockBackend::new(),
+                crate::animation::AnimatorConfig::default(),
+            ),
+            server: PipeServer::test_dummy(),
+            config: FlowConfig::default(),
+            config_dir: std::path::PathBuf::new(),
+            hook_receiver,
+            _hook_handle: hooks::HookThreadHandle::test_dummy(),
+            hook_signal: hooks::HookSignal::test_dummy(),
+            shutting_down: false,
+            pending_creations: Vec::new(),
+            float_resume_deadline: None,
+            last_foreground_sync: std::time::Instant::now(),
+        }
+    }
+}

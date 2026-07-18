@@ -476,6 +476,37 @@ impl Drop for HookSignal {
 // can be safely used from any thread. See type-level docs for rationale.
 unsafe impl Send for HookSignal {}
 
+// ── Test constructors ────────────────────────────────────────────────
+
+#[cfg(test)]
+impl HookThreadHandle {
+    /// Construct a dummy thread handle for unit tests.
+    ///
+    /// Uses thread-id `0`, which is never a valid OS thread. The `Drop` impl
+    /// calls `PostThreadMessageW(0, WM_QUIT, …)`, which fails with
+    /// `ERROR_INVALID_THREAD_ID` — the error is already discarded (`let _ =`),
+    /// so drop is a silent no-op. Safe because no real thread is signaled.
+    pub(crate) fn test_dummy() -> Self {
+        Self { os_thread_id: 0 }
+    }
+}
+
+#[cfg(test)]
+impl HookSignal {
+    /// Construct a signal wrapping a fresh unnamed manual-reset Win32 Event.
+    ///
+    /// Creating an event is a cheap kernel-object allocation (no thread, no
+    /// hook registration). The `Drop` impl calls `CloseHandle`, which is the
+    /// correct cleanup for this handle. Intended for `FlowWM::new_for_test`.
+    pub(crate) fn test_dummy() -> Self {
+        let handle = unsafe {
+            CreateEventW(None, true, false, windows::core::PCWSTR::null())
+                .expect("CreateEventW should not fail in test_dummy")
+        };
+        Self(handle)
+    }
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /// Spawns the background hook thread and returns a channel receiver.

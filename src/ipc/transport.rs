@@ -733,6 +733,28 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 #[cfg(test)]
+impl PipeServer {
+    /// Construct a dummy pipe server for unit tests.
+    ///
+    /// The test path never reads from or writes to the pipe — dispatch
+    /// handlers that no-op return before touching `self.server`. Both
+    /// [`PipeHandle`] and [`EventHandle`] are given real Win32 event handles
+    /// so their `Drop` impls (`CloseHandle`) succeed cleanly. No named pipe
+    /// is created, so parallel tests don't conflict on `\\.\pipe\flow`.
+    pub(crate) fn test_dummy() -> Self {
+        let dummy = unsafe {
+            CreateEventW(None, true, false, windows::core::PCWSTR::null())
+                .expect("CreateEventW should not fail in test_dummy")
+        };
+        Self {
+            handle: PipeHandle(dummy),
+            connected_event: EventHandle::new().expect("EventHandle::new in test_dummy"),
+            accept_thread: None,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

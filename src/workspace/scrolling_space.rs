@@ -69,7 +69,7 @@ use crate::layout::types::{ActualLayout, AppliedLayout, MonitorInfo, Padding, Vi
 /// engine.add_window(WindowId(3));
 ///
 /// // Focus is on WindowId(3) (last added). Focus left to WindowId(2).
-/// let (focused, _viewport_diff) = engine.focus(Direction::Left).unwrap();
+/// let (focused, _viewport_diff) = engine.focus(WindowId(3), Direction::Left).unwrap();
 /// assert_eq!(focused, WindowId(2));
 /// ```
 pub struct ScrollingSpace {
@@ -318,12 +318,12 @@ impl ScrollingSpace {
     // Focus operations
     // -----------------------------------------------------------------------
 
-    /// Move focus in the given direction, shifting the camera if the target
-    /// is off-screen.
+    /// Move focus from `source` in the given direction, shifting the camera if
+    /// the target is off-screen.
     ///
-    /// Focus is tracked by [`WindowId`] — if the target column requires a
-    /// camera shift, the viewport scrolls automatically. No focus fixup is
-    /// needed because the window ID is stable regardless of layout changes.
+    /// `source` is the window to move focus *from*; `last_focused_window` is
+    /// updated to the destination window. The caller resolves `source` (e.g.
+    /// from OS-foreground or per-space focus tracking).
     ///
     /// # Returns
     ///
@@ -335,9 +335,12 @@ impl ScrollingSpace {
     /// The caller **must** pass the `AppliedLayout` to the animation system when present.
     /// Failure to do so causes window positions to desync from the layout state,
     /// producing incorrect diffs on subsequent mutations.
-    pub fn focus(&mut self, direction: Direction) -> Option<(WindowId, Option<AppliedLayout>)> {
-        let focused = self.last_focused_window?;
-        let result = mutations::focus(&self.virtual_layout, focused, direction, &self.config)?;
+    pub fn focus(
+        &mut self,
+        source: WindowId,
+        direction: Direction,
+    ) -> Option<(WindowId, Option<AppliedLayout>)> {
+        let result = mutations::focus(&self.virtual_layout, source, direction, &self.config)?;
         self.last_focused_window = Some(result.focused);
 
         let diff = if result.new_layout.viewport_offset != self.virtual_layout.viewport_offset {
@@ -362,33 +365,33 @@ impl ScrollingSpace {
     // Swap operations
     // -----------------------------------------------------------------------
 
-    /// Swap the focused window's **column** with an adjacent column (Left/Right).
+    /// Swap the target window's **column** with an adjacent column (Left/Right).
     ///
     /// Columns only have horizontal neighbours, so vertical directions
     /// (`Up` / `Down`) always return `None`. Use [`swap_window`](Self::swap_window)
     /// for per-window swaps in all four directions.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn swap_column(&mut self, direction: Direction) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn swap_column(&mut self, target: WindowId, direction: Direction) -> Option<AppliedLayout> {
         let new_layout =
-            mutations::swap_column(&self.virtual_layout, focused, direction, &self.config)?;
+            mutations::swap_column(&self.virtual_layout, target, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Swap the focused **window** with an adjacent individual window.
+    /// Swap the target **window** with an adjacent individual window.
     ///
     /// Unlike [`swap_column`](Self::swap_column) which moves entire columns,
     /// this swaps two specific window IDs regardless of which columns they
-    /// belong to. For Left/Right, the focused window is exchanged with the
+    /// belong to. For Left/Right, the target window is exchanged with the
     /// nearest window in the adjacent column. For Up/Down, it behaves like
     /// a row swap within the same column.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn swap_window(&mut self, direction: Direction) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn swap_window(&mut self, target: WindowId, direction: Direction) -> Option<AppliedLayout> {
         let new_layout =
-            mutations::swap_window(&self.virtual_layout, focused, direction, &self.config)?;
+            mutations::swap_window(&self.virtual_layout, target, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
@@ -396,39 +399,47 @@ impl ScrollingSpace {
     // Merge / promote operations
     // -----------------------------------------------------------------------
 
-    /// Merge the focused window into the adjacent column (Left/Right).
+    /// Merge the target window into the adjacent column (Left/Right).
     ///
-    /// The focused window is removed from its current column and appended as
+    /// The target window is removed from its current column and appended as
     /// a new bottom row of the neighbour column. Both columns' row heights are
     /// redistributed to equal shares via [`mutations::distribute_heights`].
     ///
     /// Returns `None` when there is no neighbour in the requested direction,
-    /// when the focused window is unknown, or when the merge would violate
+    /// when the target window is unknown, or when the merge would violate
     /// `min_window_height_px` in the destination column.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn merge_column(&mut self, direction: Direction) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn merge_column(
+        &mut self,
+        target: WindowId,
+        direction: Direction,
+    ) -> Option<AppliedLayout> {
         let new_layout =
-            mutations::merge_column(&self.virtual_layout, focused, direction, &self.config)?;
+            mutations::merge_column(&self.virtual_layout, target, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Promote the focused window out of its column into a new standalone column.
+    /// Promote the target window out of its column into a new standalone column.
     ///
     /// A new single-row column is inserted immediately to the Left or Right of
-    /// the source column, and the focused window is moved into it. The source
+    /// the source column, and the target window is moved into it. The source
     /// column's remaining rows are redistributed to equal heights.
     ///
-    /// Returns `None` when the focused window is already alone in its column
-    /// (no-op per design), when the direction is vertical, or when the focused
+    /// Returns `None` when the target window is already alone in its column
+    /// (no-op per design), when the direction is vertical, or when the target
     /// window is unknown.
     ///
     /// Focus requires no fixup — it follows the window by [`WindowId`].
-    pub fn promote_window(&mut self, direction: Direction) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn promote_window(
+        &mut self,
+        target: WindowId,
+        direction: Direction,
+    ) -> Option<AppliedLayout> {
         let new_layout =
-            mutations::promote_window(&self.virtual_layout, focused, direction, &self.config)?;
+            mutations::promote_window(&self.virtual_layout, target, direction, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
@@ -436,29 +447,30 @@ impl ScrollingSpace {
     // Resize operations
     // -----------------------------------------------------------------------
 
-    /// Expand the focused column by one `column_shift` (= `column_width + window_gap`).
+    /// Expand the target column by one `column_shift` (= `column_width + window_gap`).
     ///
     /// No direction is needed — the resize is independent (no neighbor compensation).
-    pub fn expand_column(&mut self) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
-        let new_layout = mutations::expand_column(&self.virtual_layout, focused, &self.config)?;
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn expand_column(&mut self, target: WindowId) -> Option<AppliedLayout> {
+        let new_layout = mutations::expand_column(&self.virtual_layout, target, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Shrink the focused column by one `column_shift` (= `column_width + window_gap`).
+    /// Shrink the target column by one `column_shift` (= `column_width + window_gap`).
     ///
     /// No direction is needed — the resize is independent (no neighbor compensation).
-    pub fn shrink_column(&mut self) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
-        let new_layout = mutations::shrink_column(&self.virtual_layout, focused, &self.config)?;
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn shrink_column(&mut self, target: WindowId) -> Option<AppliedLayout> {
+        let new_layout = mutations::shrink_column(&self.virtual_layout, target, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
-    /// Set the focused column width to an explicit pixel value.
-    pub fn set_column_width(&mut self, target_px: i32) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
+    /// Set the target column width to an explicit pixel value.
+    ///
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn set_column_width(&mut self, target: WindowId, target_px: i32) -> Option<AppliedLayout> {
         let new_layout =
-            mutations::set_column_width(&self.virtual_layout, focused, target_px, &self.config)?;
+            mutations::set_column_width(&self.virtual_layout, target, target_px, &self.config)?;
         Some(self.apply_mutation(new_layout))
     }
 
@@ -481,18 +493,19 @@ impl ScrollingSpace {
     // Monocle toggle
     // -----------------------------------------------------------------------
 
-    /// Toggle monocle mode for the focused window.
-    pub fn toggle_monocle(&mut self) -> Option<AppliedLayout> {
-        let focused = self.last_focused_window?;
-        // Resolve the focused column up front, before any mutation runs. If the
-        // focused window isn't in the layout there's nothing to toggle, and
+    /// Toggle monocle mode for the target window.
+    ///
+    /// `target` is the caller-resolved window (typically the OS-foreground tiled window).
+    pub fn toggle_monocle(&mut self, target: WindowId) -> Option<AppliedLayout> {
+        // Resolve the target column up front, before any mutation runs. If the
+        // target window isn't in the layout there's nothing to toggle, and
         // returning early here is safe because nothing has been computed yet.
-        let focused_col = self.virtual_layout.find_window(focused).map(|(c, _)| c)?;
+        let focused_col = self.virtual_layout.find_window(target).map(|(c, _)| c)?;
         let saved = self
             .monocle_saved_width
             .and_then(|(col, w)| if col == focused_col { Some(w) } else { None });
         let (new_layout, new_saved) =
-            mutations::toggle_monocle(&self.virtual_layout, focused, saved, &self.config)?;
+            mutations::toggle_monocle(&self.virtual_layout, target, saved, &self.config)?;
 
         // `focused_col` is still valid: `mutations::toggle_monocle` returns a
         // brand-new layout and does not mutate `self.virtual_layout`, and it
@@ -675,18 +688,20 @@ impl ScrollingSpace {
     // Viewport center operations (prefix-sum, variable-width aware)
     // -----------------------------------------------------------------------
 
-    /// Center the viewport so the focused column lands at the monitor midpoint.
+    /// Center the viewport so the target window's column lands at the monitor midpoint.
     ///
     /// Uses the actual prefix-sum canvas position (variable-width aware), not
     /// the slot grid. Always computes `canvas_x(focused) − (monitor_width −
     /// focused_width) / 2`, even when all columns fit — this is the explicit
-    /// center command behavior. Returns `None` when the layout is empty. See
+    /// center command behavior. Returns `None` when the layout is empty or
+    /// `target` is not found. `target` is the caller-resolved window (typically
+    /// the OS-foreground tiled window). See
     /// (`docs/src/dev-guide/layout/mutations.md`).
-    pub fn center_focused_column(&mut self) -> Option<AppliedLayout> {
+    pub fn center_focused_column(&mut self, target: WindowId) -> Option<AppliedLayout> {
         if self.virtual_layout.columns.is_empty() {
             return None;
         }
-        let focus_col = self.focus_col_index();
+        let focus_col = self.virtual_layout.find_window(target).map(|(c, _)| c)?;
         debug_assert!(
             focus_col < self.virtual_layout.columns.len(),
             "focus_col {focus_col} out of range"
@@ -974,7 +989,9 @@ mod tests {
     #[test]
     fn engine_focus_moves() {
         let mut engine = engine_with_three_columns();
-        let (new_focus, _diff) = engine.focus(Direction::Right).expect("focus right");
+        let (new_focus, _diff) = engine
+            .focus(WindowId(1), Direction::Right)
+            .expect("focus right");
         assert_eq!(new_focus, WindowId(2));
         assert_eq!(engine.last_focused_window(), Some(WindowId(2)));
     }
@@ -982,7 +999,9 @@ mod tests {
     #[test]
     fn engine_swap_columns() {
         let mut engine = engine_with_three_columns();
-        let diff = engine.swap_column(Direction::Right).expect("swap");
+        let diff = engine
+            .swap_column(WindowId(1), Direction::Right)
+            .expect("swap");
         assert_eq!(
             diff.virtual_layout.columns[0].rows[0].window_id,
             WindowId(2)
@@ -997,7 +1016,7 @@ mod tests {
     #[test]
     fn engine_expand_column() {
         let mut engine = engine_with_three_columns();
-        let diff = engine.expand_column().expect("expand");
+        let diff = engine.expand_column(WindowId(1)).expect("expand");
         // 960px (base) + column_shift(964) = 1924px → clamped to abs_max 1912px
         assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
         assert_eq!(diff.virtual_layout.columns[1].width_px, 960); // unchanged
@@ -1026,10 +1045,10 @@ mod tests {
     #[test]
     fn engine_monocle_toggle() {
         let mut engine = engine_with_three_columns();
-        let diff_on = engine.toggle_monocle().expect("monocle on");
+        let diff_on = engine.toggle_monocle(WindowId(1)).expect("monocle on");
         assert_eq!(diff_on.virtual_layout.columns[0].width_px, 1912);
 
-        let diff_off = engine.toggle_monocle().expect("monocle off");
+        let diff_off = engine.toggle_monocle(WindowId(1)).expect("monocle off");
         assert_eq!(diff_off.virtual_layout.columns[0].width_px, 960);
     }
 
@@ -1071,7 +1090,9 @@ mod tests {
 
         // Step 2: Mutate — swap columns 0 and 1
         engine.set_focus(WindowId(1));
-        let d_swap = engine.swap_column(Direction::Right).expect("swap");
+        let d_swap = engine
+            .swap_column(WindowId(1), Direction::Right)
+            .expect("swap");
         assert_eq!(
             d_swap.virtual_layout.columns[0].rows[0].window_id,
             WindowId(2)
@@ -1084,7 +1105,7 @@ mod tests {
 
         // Step 3: Mutate — expand column (independent, no compensation)
         engine.set_focus(WindowId(1));
-        let d_expand = engine.expand_column().expect("expand");
+        let d_expand = engine.expand_column(WindowId(1)).expect("expand");
         // 960px + column_shift(964) = 1924 → clamped to abs_max 1912px, other columns unchanged
         assert_eq!(d_expand.virtual_layout.columns[1].width_px, 1912);
         assert_eq!(d_expand.virtual_layout.columns[0].width_px, 960);
@@ -1112,12 +1133,16 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         // Focus right twice: col1→col2 (visible), col2→col3 (triggers scroll)
-        let f1 = engine.focus(Direction::Right).expect("focus right 1");
+        let f1 = engine
+            .focus(WindowId(1), Direction::Right)
+            .expect("focus right 1");
         assert_eq!(f1.0, WindowId(2));
         // After first focus (visible), viewport_offset unchanged
         let offset_after_first = engine.virtual_layout().viewport_offset;
 
-        let f2 = engine.focus(Direction::Right).expect("focus right 2");
+        let f2 = engine
+            .focus(WindowId(2), Direction::Right)
+            .expect("focus right 2");
         assert_eq!(f2.0, WindowId(3));
         assert!(
             engine.virtual_layout().viewport_offset > offset_after_first,
@@ -1133,29 +1158,29 @@ mod tests {
         engine.add_window(WindowId(1));
 
         // Swap column left → None (no column to left)
-        assert!(engine.swap_column(Direction::Left).is_none());
+        assert!(engine.swap_column(WindowId(1), Direction::Left).is_none());
         // Swap column right → None (no column to right)
-        assert!(engine.swap_column(Direction::Right).is_none());
+        assert!(engine.swap_column(WindowId(1), Direction::Right).is_none());
         // Swap column up → None (vertical direction invalid for column swap)
-        assert!(engine.swap_column(Direction::Up).is_none());
+        assert!(engine.swap_column(WindowId(1), Direction::Up).is_none());
         // Swap column down → None (vertical direction invalid for column swap)
-        assert!(engine.swap_column(Direction::Down).is_none());
+        assert!(engine.swap_column(WindowId(1), Direction::Down).is_none());
 
         // Expand/shrink — single column at base width (960px)
         // Expand: 960 + column_shift(964) = 1924 → clamped to abs_max 1912px
-        let diff = engine.expand_column().expect("expand single");
+        let diff = engine.expand_column(WindowId(1)).expect("expand single");
         assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
         // Shrink: abs_max(1912) → slot_max(960px)
 
-        let diff2 = engine.shrink_column().expect("shrink single");
+        let diff2 = engine.shrink_column(WindowId(1)).expect("shrink single");
         assert_eq!(diff2.virtual_layout.columns[0].width_px, 960);
 
         // Focus vertical — only one row
-        assert!(engine.focus(Direction::Up).is_none());
-        assert!(engine.focus(Direction::Down).is_none());
+        assert!(engine.focus(WindowId(1), Direction::Up).is_none());
+        assert!(engine.focus(WindowId(1), Direction::Down).is_none());
 
         // Monocle still works (single column)
-        let diff = engine.toggle_monocle().expect("monocle");
+        let diff = engine.toggle_monocle(WindowId(1)).expect("monocle");
         assert_eq!(diff.virtual_layout.columns[0].width_px, 1912);
     }
 
@@ -1166,11 +1191,11 @@ mod tests {
 
         assert!(engine.scroll_left().is_none());
         assert!(engine.scroll_right().is_none());
-        assert!(engine.focus(Direction::Right).is_none());
-        assert!(engine.swap_column(Direction::Right).is_none());
-        assert!(engine.expand_column().is_none());
-        assert!(engine.shrink_column().is_none());
-        assert!(engine.toggle_monocle().is_none());
+        assert!(engine.focus(WindowId(1), Direction::Right).is_none());
+        assert!(engine.swap_column(WindowId(1), Direction::Right).is_none());
+        assert!(engine.expand_column(WindowId(1)).is_none());
+        assert!(engine.shrink_column(WindowId(1)).is_none());
+        assert!(engine.toggle_monocle(WindowId(1)).is_none());
     }
 
     #[test]
@@ -1312,7 +1337,7 @@ mod tests {
         let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
 
-        let d_on = engine.toggle_monocle().expect("monocle on");
+        let d_on = engine.toggle_monocle(WindowId(1)).expect("monocle on");
         assert_eq!(d_on.virtual_layout.columns[0].width_px, 1912);
 
         // Add window → new column, focus moves to new window
@@ -1321,7 +1346,7 @@ mod tests {
 
         // Focus back to column 0 and toggle monocle off
         engine.set_focus(WindowId(1));
-        let d_off = engine.toggle_monocle().expect("monocle off");
+        let d_off = engine.toggle_monocle(WindowId(1)).expect("monocle off");
         assert_eq!(d_off.virtual_layout.columns[0].width_px, 960);
     }
 
@@ -1334,7 +1359,7 @@ mod tests {
 
         // Focus WindowId(1) in column 0, expand (960 + column_shift(964) → abs_max 1912px)
         engine.set_focus(WindowId(1));
-        let diff = engine.expand_column().expect("expand");
+        let diff = engine.expand_column(WindowId(1)).expect("expand");
         // The layout must have entries (windows with new pixel positions)
         assert!(
             !diff.actual_layout.entries.is_empty(),
@@ -1356,15 +1381,17 @@ mod tests {
 
         // Focus right twice to scroll viewport, then focus back to window 2
         // so column 0 (window 1) is off-screen left
-        let _ = engine.focus(Direction::Right).expect("f1");
-        let _ = engine.focus(Direction::Right).expect("f2");
+        let _ = engine.focus(WindowId(1), Direction::Right).expect("f1");
+        let _ = engine.focus(WindowId(2), Direction::Right).expect("f2");
         assert!(engine.virtual_layout().viewport_offset > 0);
 
         // Focus on window at the left edge of viewport, then swap left
         // The column to the left (window 1) is off-screen
         engine.set_focus(WindowId(2));
         let prev_offset = engine.virtual_layout().viewport_offset;
-        let diff = engine.swap_column(Direction::Left).expect("swap left");
+        let diff = engine
+            .swap_column(WindowId(2), Direction::Left)
+            .expect("swap left");
         assert!(!diff.actual_layout.entries.is_empty());
         // Camera should shift to make the swapped column visible
         assert!(
@@ -1391,7 +1418,9 @@ mod tests {
 
         // Focus WindowId(1) in column 0, set width to 1440px (free-form, independent)
         engine.set_focus(WindowId(1));
-        let diff = engine.set_column_width(1440).expect("set width");
+        let diff = engine
+            .set_column_width(WindowId(1), 1440)
+            .expect("set width");
         assert_eq!(diff.virtual_layout.columns[0].width_px, 1440);
         // Neighbor is unchanged (no compensation)
         assert_eq!(diff.virtual_layout.columns[1].width_px, 960);
@@ -1601,7 +1630,9 @@ mod tests {
         engine.add_window(WindowId(3));
         engine.set_focus(WindowId(1));
 
-        let result = engine.focus(Direction::Right).expect("focus right");
+        let result = engine
+            .focus(WindowId(1), Direction::Right)
+            .expect("focus right");
         assert_eq!(result.0, WindowId(2));
         // Column 2 is visible within the 3840px viewport → no scroll needed → diff is None
         assert!(
@@ -1622,8 +1653,12 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         // Focus right twice: first stays visible, second triggers scroll
-        let _ = engine.focus(Direction::Right).expect("focus right 1");
-        let result = engine.focus(Direction::Right).expect("focus right 2");
+        let _ = engine
+            .focus(WindowId(1), Direction::Right)
+            .expect("focus right 1");
+        let result = engine
+            .focus(WindowId(2), Direction::Right)
+            .expect("focus right 2");
 
         assert_eq!(result.0, WindowId(3));
         // Viewport scrolled → diff must be Some
@@ -1648,7 +1683,9 @@ mod tests {
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(1));
 
-        let result = engine.focus(Direction::Down).expect("focus down");
+        let result = engine
+            .focus(WindowId(1), Direction::Down)
+            .expect("focus down");
         assert_eq!(result.0, WindowId(2));
         assert!(
             result.1.is_none(),
@@ -1668,7 +1705,9 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         let prev_offset = engine.virtual_layout().viewport_offset;
-        let _ = engine.focus(Direction::Down).expect("focus down");
+        let _ = engine
+            .focus(WindowId(1), Direction::Down)
+            .expect("focus down");
         // Vertical focus within a fully visible column → no scroll
         assert_eq!(engine.virtual_layout().viewport_offset, prev_offset);
     }
@@ -1685,7 +1724,9 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         // Layout: [W1, W5] [W2]. swap_window Right on W1 → [W2, W5] [W1]
-        let diff = engine.swap_window(Direction::Right).expect("swap window");
+        let diff = engine
+            .swap_window(WindowId(1), Direction::Right)
+            .expect("swap window");
         assert_eq!(
             diff.virtual_layout.columns[0]
                 .rows
@@ -1713,7 +1754,9 @@ mod tests {
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(2));
 
-        let diff = engine.swap_window(Direction::Up).expect("swap window up");
+        let diff = engine
+            .swap_window(WindowId(2), Direction::Up)
+            .expect("swap window up");
         assert_eq!(
             diff.virtual_layout.columns[0]
                 .rows
@@ -1734,9 +1777,21 @@ mod tests {
         // We can't clear focus directly, so test with empty engine instead.
         let mut empty_engine =
             ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
-        assert!(empty_engine.swap_window(Direction::Right).is_none());
-        assert!(empty_engine.swap_window(Direction::Up).is_none());
-        assert!(empty_engine.swap_window(Direction::Down).is_none());
+        assert!(
+            empty_engine
+                .swap_window(WindowId(1), Direction::Right)
+                .is_none()
+        );
+        assert!(
+            empty_engine
+                .swap_window(WindowId(1), Direction::Up)
+                .is_none()
+        );
+        assert!(
+            empty_engine
+                .swap_window(WindowId(1), Direction::Down)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1746,10 +1801,10 @@ mod tests {
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
-        assert!(engine.swap_window(Direction::Left).is_none());
-        assert!(engine.swap_window(Direction::Right).is_none());
-        assert!(engine.swap_window(Direction::Up).is_none());
-        assert!(engine.swap_window(Direction::Down).is_none());
+        assert!(engine.swap_window(WindowId(1), Direction::Left).is_none());
+        assert!(engine.swap_window(WindowId(1), Direction::Right).is_none());
+        assert!(engine.swap_window(WindowId(1), Direction::Up).is_none());
+        assert!(engine.swap_window(WindowId(1), Direction::Down).is_none());
     }
 
     // --- Engine merge_column tests ---
@@ -1762,7 +1817,9 @@ mod tests {
         engine.add_window(WindowId(2));
         engine.set_focus(WindowId(1));
 
-        let diff = engine.merge_column(Direction::Right).expect("merge right");
+        let diff = engine
+            .merge_column(WindowId(1), Direction::Right)
+            .expect("merge right");
         assert_eq!(diff.virtual_layout.columns.len(), 1);
         assert_eq!(
             diff.virtual_layout.columns[0]
@@ -1788,10 +1845,10 @@ mod tests {
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
-        assert!(engine.merge_column(Direction::Left).is_none());
-        assert!(engine.merge_column(Direction::Right).is_none());
-        assert!(engine.merge_column(Direction::Up).is_none());
-        assert!(engine.merge_column(Direction::Down).is_none());
+        assert!(engine.merge_column(WindowId(1), Direction::Left).is_none());
+        assert!(engine.merge_column(WindowId(1), Direction::Right).is_none());
+        assert!(engine.merge_column(WindowId(1), Direction::Up).is_none());
+        assert!(engine.merge_column(WindowId(1), Direction::Down).is_none());
     }
 
     // --- Engine promote_window tests ---
@@ -1805,7 +1862,7 @@ mod tests {
         engine.set_focus(WindowId(2));
 
         let diff = engine
-            .promote_window(Direction::Right)
+            .promote_window(WindowId(2), Direction::Right)
             .expect("promote right");
         assert_eq!(diff.virtual_layout.columns.len(), 2);
         assert_eq!(
@@ -1829,10 +1886,22 @@ mod tests {
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
-        assert!(engine.promote_window(Direction::Left).is_none());
-        assert!(engine.promote_window(Direction::Right).is_none());
-        assert!(engine.promote_window(Direction::Up).is_none());
-        assert!(engine.promote_window(Direction::Down).is_none());
+        assert!(
+            engine
+                .promote_window(WindowId(1), Direction::Left)
+                .is_none()
+        );
+        assert!(
+            engine
+                .promote_window(WindowId(1), Direction::Right)
+                .is_none()
+        );
+        assert!(engine.promote_window(WindowId(1), Direction::Up).is_none());
+        assert!(
+            engine
+                .promote_window(WindowId(1), Direction::Down)
+                .is_none()
+        );
     }
 
     // --- Engine initialize_windows tests ---
@@ -1966,7 +2035,9 @@ mod tests {
         let mut engine = engine_with_three_columns();
         let total_windows = engine.virtual_layout().window_count(); // 3
 
-        let result = engine.swap_column(Direction::Right).expect("swap");
+        let result = engine
+            .swap_column(WindowId(1), Direction::Right)
+            .expect("swap");
         assert_eq!(
             result.actual_layout.entries.len(),
             total_windows,
@@ -1993,7 +2064,7 @@ mod tests {
         let mut engine = engine_with_three_columns();
         let total_windows = engine.virtual_layout().window_count();
 
-        let result = engine.expand_column().expect("expand");
+        let result = engine.expand_column(WindowId(1)).expect("expand");
         assert_eq!(
             result.actual_layout.entries.len(),
             total_windows,
@@ -2011,7 +2082,9 @@ mod tests {
         let total_windows = engine.virtual_layout().window_count(); // 3
 
         // Mutation A: swap columns 0 ↔ 1
-        let result_a = engine.swap_column(Direction::Right).expect("swap A");
+        let result_a = engine
+            .swap_column(WindowId(1), Direction::Right)
+            .expect("swap A");
         assert_eq!(
             result_a.actual_layout.entries.len(),
             total_windows,
@@ -2021,7 +2094,9 @@ mod tests {
         // Mutation B: immediately swap again (same direction, different result
         // because focus is still on WindowId(1) which is now in column 1).
         // [W2, W1, W3] → swap W1 right → [W2, W3, W1]
-        let result_b = engine.swap_column(Direction::Right).expect("swap B");
+        let result_b = engine
+            .swap_column(WindowId(1), Direction::Right)
+            .expect("swap B");
         assert_eq!(
             result_b.actual_layout.entries.len(),
             total_windows,
@@ -2054,11 +2129,13 @@ mod tests {
         let total_windows = engine.virtual_layout().window_count();
 
         // Mutation A: swap column
-        let result_a = engine.swap_column(Direction::Right).expect("swap");
+        let result_a = engine
+            .swap_column(WindowId(1), Direction::Right)
+            .expect("swap");
         assert_eq!(result_a.actual_layout.entries.len(), total_windows);
 
         // Mutation B: expand column (different mutation type, still rapid)
-        let result_b = engine.expand_column().expect("expand");
+        let result_b = engine.expand_column(WindowId(1)).expect("expand");
         assert_eq!(
             result_b.actual_layout.entries.len(),
             total_windows,
@@ -2199,7 +2276,7 @@ mod tests {
     fn engine_center_focused_column_empty_returns_none() {
         // Negative: empty layout → None.
         let mut engine = center_test_engine();
-        assert!(engine.center_focused_column().is_none());
+        assert!(engine.center_focused_column(WindowId(1)).is_none());
     }
 
     #[test]
@@ -2212,7 +2289,7 @@ mod tests {
         engine.set_focus(WindowId(1));
 
         let diff = engine
-            .center_focused_column()
+            .center_focused_column(WindowId(1))
             .expect("center focused on 1 col");
         assert_eq!(
             diff.virtual_layout.viewport_offset, -756,
@@ -2236,7 +2313,7 @@ mod tests {
         engine.set_focus(WindowId(3)); // col 2
 
         let diff = engine
-            .center_focused_column()
+            .center_focused_column(WindowId(3))
             .expect("center focused overflow");
         assert_eq!(diff.virtual_layout.viewport_offset, 52);
     }
@@ -2251,7 +2328,9 @@ mod tests {
         engine.set_focus(WindowId(2));
 
         let total = engine.virtual_layout().window_count();
-        let diff = engine.center_focused_column().expect("center focused");
+        let diff = engine
+            .center_focused_column(WindowId(2))
+            .expect("center focused");
         assert_eq!(engine.last_focused_window(), Some(WindowId(2)));
         assert_eq!(diff.virtual_layout.window_count(), total);
         assert_eq!(diff.actual_layout.entries.len(), total);
