@@ -90,12 +90,12 @@ mod tests {
             .pointer("/properties/padding")
             .expect("has /properties/padding");
 
+        // schemars v1 (Draft 2020-12) emits a direct `$ref` here; v0.8 wrapped
+        // it in `allOf` because Draft 7 forbade sibling keys alongside $ref.
         let ref_path = padding_schema
-            .get("allOf")
-            .and_then(|v| v.get(0))
-            .and_then(|v| v.get("$ref"))
+            .get("$ref")
             .and_then(|v| v.as_str())
-            .expect("padding has allOf > $ref");
+            .expect("padding has $ref");
         let ref_path = ref_path.trim_start_matches("#/");
         let padding_props = parsed
             .pointer(&format!("/{ref_path}/properties"))
@@ -121,12 +121,11 @@ mod tests {
             .pointer("/properties/animation")
             .expect("has /properties/animation");
 
+        // See note in schema_padding_has_window_up_down: v1 emits direct $ref.
         let ref_path = anim_schema
-            .get("allOf")
-            .and_then(|v| v.get(0))
-            .and_then(|v| v.get("$ref"))
+            .get("$ref")
             .and_then(|v| v.as_str())
-            .expect("animation has allOf > $ref");
+            .expect("animation has $ref");
         let ref_path = ref_path.trim_start_matches("#/");
         let anim_props = parsed
             .pointer(&format!("/{ref_path}/properties"))
@@ -140,34 +139,27 @@ mod tests {
         assert!(obj.contains_key("duration_ms"));
         assert!(obj.contains_key("easing"));
 
-        // Verify the easing field is represented as an enum (not a bare
-        // "string" type).  schemars derives unit enums as `oneOf` where
-        // each variant is `type: "string"` with a single-element `enum`
-        // constraint.  The animation schema uses $ref to
-        // #/definitions/ConfigEasing, so we follow the reference.
+        // Verify the easing field is represented as an enum, not a bare
+        // string. Follow the $ref to #/$defs/ConfigEasing to inspect its
+        // oneOf variants.
         let easing_schema = obj
             .get("easing")
             .expect("easing property exists")
             .as_object()
             .expect("easing property is an object");
 
-        // Follow the allOf/$ref if present (schemars puts enum types behind
-        // a reference to the definitions section).
-        let easing_def = if let Some(all_of) = easing_schema.get("allOf").and_then(|v| v.as_array())
-        {
-            let ref_str = all_of
-                .iter()
-                .find_map(|item| item.get("$ref").and_then(|v| v.as_str()))
-                .expect("easing allOf has $ref");
-            let ref_path = ref_str.trim_start_matches("#/");
-            parsed
-                .pointer(&format!("/{ref_path}"))
-                .unwrap_or_else(|| panic!("definition {ref_path} exists"))
-                .as_object()
-                .unwrap_or_else(|| panic!("definition {ref_path} is object"))
-        } else {
-            easing_schema
-        };
+        // The `easing` field is a direct `$ref` to `#/$defs/ConfigEasing`
+        // (v1 direct ref; v0.8 wrapped it in allOf). Follow it to the def.
+        let easing_ref = easing_schema
+            .get("$ref")
+            .and_then(|v| v.as_str())
+            .expect("easing has $ref");
+        let easing_ref_path = easing_ref.trim_start_matches("#/");
+        let easing_def = parsed
+            .pointer(&format!("/{easing_ref_path}"))
+            .unwrap_or_else(|| panic!("definition {easing_ref_path} exists"))
+            .as_object()
+            .unwrap_or_else(|| panic!("definition {easing_ref_path} is object"));
 
         // schemars uses `oneOf` with each variant as a separate object
         assert!(
@@ -183,21 +175,13 @@ mod tests {
             .as_array()
             .expect("oneOf is array");
 
-        // Each oneOf entry should be type "string" with a single-value enum
+        // v1 represents each unit-enum variant as `{"const": "variant"}`
+        // (Draft 2020-12 `const` keyword); v0.8 used `{"type":"string","enum":["x"]}`.
         let mut enum_strings: Vec<&str> = Vec::new();
         for entry in one_of {
             let entry_obj = entry.as_object().expect("oneOf entry is object");
-            assert_eq!(
-                entry_obj.get("type").and_then(|v| v.as_str()),
-                Some("string"),
-                "each oneOf entry should be type 'string'"
-            );
-            if let Some(enum_vals) = entry_obj.get("enum").and_then(|v| v.as_array()) {
-                for val in enum_vals {
-                    if let Some(s) = val.as_str() {
-                        enum_strings.push(s);
-                    }
-                }
+            if let Some(s) = entry_obj.get("const").and_then(|v| v.as_str()) {
+                enum_strings.push(s);
             }
         }
 
@@ -219,6 +203,130 @@ mod tests {
             enum_strings.len(),
             31,
             "enum should have exactly 31 variants, got: {enum_strings:?}"
+        );
+    }
+
+    #[test]
+    fn schema_color_fields_are_inlined_not_refd() {
+        // schemars v1: `Color::inline_schema()` returns `true`, so color
+        // fields appear inline (type + pattern + format) rather than as a
+        // `$ref` to `#/$defs/Color`. v0.8 expressed this as
+        // `is_referenceable() = false`. Regression test for the migration.
+        // Arrange
+        let json = generate_config_schema().expect("schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+
+        // Assert (negative): with inline_schema = true, no Color entry lands
+        // in $defs.
+        if let Some(defs) = parsed.pointer("/$defs").and_then(|v| v.as_object()) {
+            assert!(
+                !defs.contains_key("Color"),
+                "Color should be inlined (inline_schema=true), but #/$defs/Color exists"
+            );
+        }
+
+        // Act: `borders` is a normal referenceable struct -> direct $ref (v1).
+        let borders_ref = parsed
+            .pointer("/properties/borders")
+            .and_then(|v| v.get("$ref"))
+            .and_then(|v| v.as_str())
+            .expect("borders has $ref");
+        let borders_path = borders_ref.trim_start_matches("#/");
+
+        // Assert (positive): focused_color is a Color field -> inlined, not
+        // $ref'd, with the full hex-color string shape present directly.
+        let focused = parsed
+            .pointer(&format!("/{borders_path}/properties/focused_color"))
+            .expect("focused_color schema exists");
+        let focused_obj = focused.as_object().expect("focused_color is an object");
+
+        assert!(
+            !focused_obj.contains_key("$ref"),
+            "inline_schema=true must not emit a $ref for Color fields"
+        );
+        assert_eq!(
+            focused_obj.get("type").and_then(|v| v.as_str()),
+            Some("string"),
+            "inlined Color field should be type:string, got: {focused:?}"
+        );
+        assert_eq!(
+            focused_obj.get("pattern").and_then(|v| v.as_str()),
+            Some("^#[0-9A-Fa-f]{6}$")
+        );
+        assert_eq!(
+            focused_obj.get("format").and_then(|v| v.as_str()),
+            Some("hex-color")
+        );
+    }
+
+    #[test]
+    fn all_borders_color_fields_are_inlined() {
+        // Complements `schema_color_fields_are_inlined_not_refd` (which deep-
+        // dives `focused_color`) by sweeping ALL three Color fields declared
+        // in `BorderConfig` (`focused_color`, `unfocused_color`,
+        // `floating_color`). A regression that re-introduces a `$ref` for any
+        // single field must fail this test.
+        // Arrange
+        let json = generate_config_schema().expect("schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+        // Act: borders is a referenceable struct -> direct `$ref` in v1.
+        let borders_ref = parsed
+            .pointer("/properties/borders")
+            .and_then(|v| v.get("$ref"))
+            .and_then(|v| v.as_str())
+            .expect("borders has $ref");
+        let borders_path = borders_ref.trim_start_matches("#/");
+        let borders_props = parsed
+            .pointer(&format!("/{borders_path}/properties"))
+            .and_then(|v| v.as_object())
+            .expect("borders struct has properties");
+        // Assert: every Color field in BorderConfig must be inlined with the
+        // full hex-color string shape (no $ref) because `Color::inline_schema`
+        // returns true.
+        for field in ["focused_color", "unfocused_color", "floating_color"] {
+            let field_schema = borders_props
+                .get(field)
+                .unwrap_or_else(|| panic!("borders has {field}"));
+            let obj = field_schema
+                .as_object()
+                .unwrap_or_else(|| panic!("{field} schema is an object"));
+            assert!(
+                !obj.contains_key("$ref"),
+                "{field} should be inlined (inline_schema=true), got: {field_schema}"
+            );
+            assert_eq!(
+                obj.get("type").and_then(|v| v.as_str()),
+                Some("string"),
+                "{field} should be type:string, got: {field_schema}"
+            );
+            assert_eq!(
+                obj.get("pattern").and_then(|v| v.as_str()),
+                Some("^#[0-9A-Fa-f]{6}$"),
+                "{field} should carry the hex pattern, got: {field_schema}"
+            );
+            assert_eq!(
+                obj.get("format").and_then(|v| v.as_str()),
+                Some("hex-color"),
+                "{field} should carry the hex-color format, got: {field_schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_meta_schema_is_draft_2020_12() {
+        // schemars v1 emits the JSON Schema Draft 2020-12 meta-schema URI;
+        // v0.8 emitted the Draft 7 URI. Trivial, stable migration guard.
+        // Arrange + Act
+        let json = generate_config_schema().expect("schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+        let meta = parsed
+            .get("$schema")
+            .and_then(|v| v.as_str())
+            .expect("schema has $schema");
+        // Assert
+        assert!(
+            meta.contains("2020-12"),
+            "expected Draft 2020-12 $schema URI, got: {meta}"
         );
     }
 
@@ -264,9 +372,10 @@ mod tests {
         let json = generate_rules_schema().expect("rules schema gen");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
 
-        // Navigate to the MatchRule properties via definitions
+        // Navigate to the MatchRule properties via $defs (Draft 2020-12).
+        // v0.8 schemars used the Draft 7 key "definitions"; v1 uses "$defs".
         let match_ref = parsed
-            .pointer("/definitions/MatchRule/properties")
+            .pointer("/$defs/MatchRule/properties")
             .expect("has MatchRule definition with properties");
 
         let obj = match_ref
