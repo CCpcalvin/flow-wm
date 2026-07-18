@@ -138,8 +138,8 @@ sequenceDiagram
     participant CLI as flow CLI
     participant Pipe as PipeServer
     participant flow as FlowWM
-    participant Layout as ScrollingSpace
     participant Reg as WindowRegistry
+    participant Layout as ScrollingSpace
     participant Anim as WindowAnimator
     participant Win32 as Win32 API
 
@@ -148,11 +148,20 @@ sequenceDiagram
     flow->>Pipe: read_message()
     Note over CLI,Pipe: SocketMessage e.g. FocusLeft
     flow->>flow: dispatch(msg)
-    flow->>Layout: active_scrolling_mut().focus(Left)
-    Layout-->>flow: Some((WindowId, Option<LayoutDiff>))
-    flow->>Win32: SetForegroundWindow(hwnd)
-    flow->>Reg: set_focused(hwnd)
-    flow->>Anim: animate_layout(diff)
+    Note over flow: Tiled-only ops first classify<br/>the OS-foreground window
+    flow->>Reg: focused()
+    Reg-->>flow: Option<WindowId>
+    flow->>Reg: get_window(hwnd)
+    Reg-->>flow: Option<&Window>
+    alt foreground is Tiling(Active)
+        flow->>Layout: active_scrolling_mut().focus(id, Left)
+        Layout-->>flow: Some((WindowId, Option<LayoutDiff>))
+        flow->>Win32: SetForegroundWindow(hwnd)
+        flow->>Reg: set_focused(hwnd)
+        flow->>Anim: animate_layout(diff)
+    else foreground is float / ignored / absent
+        Note over flow: log::debug! + return SocketResponse::Ok<br/>(silent no-op, not an error)
+    end
     flow->>Pipe: write_response(Ok)
     Pipe->>CLI: SocketResponse
     CLI->>Pipe: disconnect
@@ -162,12 +171,23 @@ Every IPC command follows the same pattern:
 
 1. `dispatch()` matches on the `SocketMessage` variant and calls the appropriate
    subsystem method.
-2. Layout commands call `active_scrolling_mut()` to reach the `ScrollingSpace`,
+2. **Tiled-only ops** (focus / swap-window / swap-column / merge / promote /
+   expand / shrink / set-column-width / toggle-monocle / center) first resolve
+   the OS foreground via `registry.focused()`, look up the window, and verify
+   `matches!(state, WindowState::Tiling(TilingState::Active { .. }))`. If the
+   foreground is a float, ignored, minimized, hidden, or absent, the handler
+   logs at `debug!` and returns `SocketResponse::Ok` silently — a deliberate
+   no-op, not an error. This prevents the bug where a float foreground caused
+   these ops to act on the stale `last_focused_window` tile cursor. See
+   [Floating Space / Focus Model](./floating-space.md#focus-model-clarification).
+3. Layout commands call `active_scrolling_mut()` to reach the `ScrollingSpace`,
    mutate the virtual layout, and receive an `AppliedLayout` or `Option<LayoutDiff>`.
-3. Some commands require OS-level side effects (e.g. `FocusLeft` calls
+   The target `WindowId` is now passed explicitly from the dispatch layer rather
+   than re-resolved inside `ScrollingSpace` from `last_focused_window`.
+4. Some commands require OS-level side effects (e.g. `FocusLeft` calls
    `SetForegroundWindow` and syncs the registry's focus tracking).
-4. `animate_layout()` converts the result to animation targets.
-5. A `SocketResponse` is written back to the CLI.
+5. `animate_layout()` converts the result to animation targets.
+6. A `SocketResponse` is written back to the CLI.
 
 Commands that close windows (`CloseWindow`) take a different path — they only
 queue `WM_CLOSE` and let the `EVENT_OBJECT_DESTROY` hook handle the actual

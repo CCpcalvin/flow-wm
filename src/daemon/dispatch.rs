@@ -185,7 +185,22 @@ impl FlowWM {
     /// color. Letting the hook own `set_focused` keeps the prev/new pair
     /// correct.
     fn dispatch_focus(&mut self, dir: Direction) -> SocketResponse {
-        match self.active_scrolling_mut().focus(dir) {
+        // Resolve the source window from OS foreground (not the per-space tile
+        // cursor) and no-op silently when it isn't an active tile — see
+        // (`docs/src/dev-guide/floating-space.md`).
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_focus: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_focus: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_focus: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().focus(id, dir) {
             Some((focused_id, diff_opt)) => {
                 let target_hwnd = focused_id.0;
 
@@ -263,7 +278,20 @@ impl FlowWM {
     /// `ensure_column_visible`, so the viewport scrolls as part of the same
     /// diff and no separate "offscreen" message is needed.
     fn dispatch_swap_column(&mut self, dir: Direction) -> SocketResponse {
-        match self.active_scrolling_mut().swap_column(dir) {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_swap_column: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_swap_column: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_swap_column: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().swap_column(id, dir) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -280,7 +308,20 @@ impl FlowWM {
     /// window with its neighbour: up/down moves it within the same column,
     /// left/right exchanges it with a window in the adjacent column.
     fn dispatch_swap_window(&mut self, dir: Direction) -> SocketResponse {
-        match self.active_scrolling_mut().swap_window(dir) {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_swap_window: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_swap_window: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_swap_window: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().swap_window(id, dir) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -300,7 +341,20 @@ impl FlowWM {
     /// neighbour, the direction is vertical, or the merge would violate
     /// `min_window_height_px`.
     fn dispatch_merge_column(&mut self, dir: Direction) -> SocketResponse {
-        match self.active_scrolling_mut().merge_column(dir) {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_merge_column: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_merge_column: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_merge_column: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().merge_column(id, dir) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -319,7 +373,20 @@ impl FlowWM {
     /// (returns error) when the focused window is already alone in its
     /// column.
     fn dispatch_promote_window(&mut self, dir: Direction) -> SocketResponse {
-        match self.active_scrolling_mut().promote_window(dir) {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_promote_window: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_promote_window: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_promote_window: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().promote_window(id, dir) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -387,7 +454,20 @@ impl FlowWM {
 
     /// Dispatch an expand-column command on the focused column.
     fn dispatch_expand(&mut self) -> SocketResponse {
-        match self.active_scrolling_mut().expand_column() {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_expand: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_expand: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_expand: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().expand_column(id) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -400,7 +480,20 @@ impl FlowWM {
 
     /// Dispatch a shrink-column command on the focused column.
     fn dispatch_shrink(&mut self) -> SocketResponse {
-        match self.active_scrolling_mut().shrink_column() {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_shrink: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_shrink: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_shrink: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().shrink_column(id) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -418,11 +511,24 @@ impl FlowWM {
     /// delegated. This is the **free-form / drag-resize** path — the value is
     /// applied directly and is not snapped to the expand/shrink slot ladder.
     fn dispatch_set_column_width(&mut self, width_px: u32) -> SocketResponse {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_set_column_width: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_set_column_width: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_set_column_width: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
         let (min, max) = self.active_scrolling().column_width_bounds();
         // `u32 → i32` can fail for absurd inputs (`> i32::MAX`). Reject with a
         // precise message instead of letting the cast wrap negative and report
         // a misleading value.
-        let target = match i32::try_from(width_px) {
+        let target_px = match i32::try_from(width_px) {
             Ok(t) => t,
             Err(_) => {
                 return SocketResponse::Error {
@@ -432,17 +538,17 @@ impl FlowWM {
                 };
             }
         };
-        if target < min {
+        if target_px < min {
             return SocketResponse::Error {
-                message: format!("width_px must be >= {min}, got {target}"),
+                message: format!("width_px must be >= {min}, got {target_px}"),
             };
         }
-        if target > max {
+        if target_px > max {
             return SocketResponse::Error {
-                message: format!("width_px must be <= {max}, got {target}"),
+                message: format!("width_px must be <= {max}, got {target_px}"),
             };
         }
-        match self.active_scrolling_mut().set_column_width(target) {
+        match self.active_scrolling_mut().set_column_width(id, target_px) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -460,7 +566,20 @@ impl FlowWM {
     /// even when all columns fit — this is the explicit center command. See
     /// (`docs/src/dev-guide/layout/mutations.md`).
     fn dispatch_center(&mut self) -> SocketResponse {
-        match self.active_scrolling_mut().center_focused_column() {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_center: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_center: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_center: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().center_focused_column(id) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -473,7 +592,20 @@ impl FlowWM {
 
     /// Dispatch a monocle mode toggle on the focused column.
     fn dispatch_toggle_monocle(&mut self) -> SocketResponse {
-        match self.active_scrolling_mut().toggle_monocle() {
+        // Resolve from OS foreground; silent no-op when not an active tile.
+        let Some(id) = self.registry.focused() else {
+            log::debug!("dispatch_toggle_monocle: no-op (no OS-foreground window)");
+            return SocketResponse::Ok;
+        };
+        let Some(win) = self.registry.get_window(HWND(id.0 as *mut _)) else {
+            log::debug!("dispatch_toggle_monocle: no-op (foreground id not in registry)");
+            return SocketResponse::Ok;
+        };
+        if !matches!(win.state, WindowState::Tiling(TilingState::Active { .. })) {
+            log::debug!("dispatch_toggle_monocle: no-op (focused window is not an active tile)");
+            return SocketResponse::Ok;
+        }
+        match self.active_scrolling_mut().toggle_monocle(id) {
             Some(diff) => {
                 self.animate_layout(&diff);
                 SocketResponse::Ok
@@ -1576,5 +1708,175 @@ mod tests {
         // Width: 3440 × 6/10 = 2064, clamped to 1536.
         // Height: 800 × 8/10 = 640, below the 1152 cap → unchanged.
         assert_eq!(size, Size { w: 1536, h: 640 });
+    }
+
+    // ── Dispatch-handler classification guard tests ───────────────────
+    //
+    // Tests for the Phase 2 inline classification: tiled-only dispatch
+    // handlers must silently no-op (SocketResponse::Ok) when the OS-foreground
+    // window is not an active tile. These use FlowWM::new_for_test to bypass
+    // all Win32 daemon startup — see (`docs/src/dev-guide/floating-space.md`).
+
+    use crate::config::types::WindowRulesConfig;
+    use crate::layout::types::{MonitorInfo, Padding};
+    use crate::registry::WindowRegistry;
+    use crate::registry::types::IgnoredReason;
+    use crate::workspace::{Monitor, ScrollingSpace, Workspace};
+
+    /// Fake HWND value used across all dispatch classification tests.
+    /// Nonzero so it doesn't collide with null-handle sentinels.
+    const TEST_HWND: isize = 0x10001;
+
+    /// Build a FlowWM with one fake window registered, its state overridden
+    /// to `state`, and set as the OS foreground. The window is also added to
+    /// the scrolling space so positive-path tests (active tile) can exercise
+    /// layout mutations.
+    fn flow_with_focused_state(state: WindowState) -> FlowWM {
+        let rules = WindowRulesConfig::default();
+        let mut registry = WindowRegistry::new(&rules, &rules);
+
+        let info = registry_win32::WindowInfo {
+            hwnd: HWND(TEST_HWND as *mut _),
+            title: "TestWindow".into(),
+            class: "TestClass".into(),
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            exe: "test.exe".into(),
+            process_path: "C:\\test.exe".into(),
+            is_visible: true,
+            is_maximized: false,
+            is_fullscreen: false,
+        };
+        registry.register_window_from_info(&info);
+
+        // Override whatever classification produced to the exact state the
+        // test wants.
+        if let Some(win) = registry.get_window_mut(HWND(TEST_HWND as *mut _)) {
+            win.state = state;
+        }
+        registry.set_focused(TEST_HWND);
+
+        let monitor_info = MonitorInfo {
+            work_area: Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        };
+        let padding = Padding {
+            window_gap: 4,
+            up: 0,
+            down: 0,
+        };
+        let mut scrolling = ScrollingSpace::new(monitor_info, 960, 320, 100, padding, 4);
+        scrolling.add_window(WindowId(TEST_HWND));
+
+        let workspace = Workspace::new(WorkspaceId(1), scrolling);
+        let monitor = Monitor::new(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            vec![workspace],
+            0,
+        );
+        FlowWM::new_for_test(registry, vec![monitor])
+    }
+
+    /// Float foreground: all 10 tiled-only handlers must silent-no-op (Ok).
+    #[test]
+    fn float_focused_all_tiled_ops_are_noop() {
+        let mut flow = flow_with_focused_state(WindowState::Floating(FloatingState::Active {
+            rect: Rect {
+                x: 100,
+                y: 100,
+                width: 400,
+                height: 300,
+            },
+        }));
+        assert_eq!(flow.dispatch_focus(Direction::Left), SocketResponse::Ok);
+        assert_eq!(
+            flow.dispatch_swap_column(Direction::Left),
+            SocketResponse::Ok
+        );
+        assert_eq!(flow.dispatch_swap_window(Direction::Up), SocketResponse::Ok);
+        assert_eq!(
+            flow.dispatch_merge_column(Direction::Left),
+            SocketResponse::Ok
+        );
+        assert_eq!(
+            flow.dispatch_promote_window(Direction::Up),
+            SocketResponse::Ok
+        );
+        assert_eq!(flow.dispatch_expand(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_shrink(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_set_column_width(1000), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_toggle_monocle(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_center(), SocketResponse::Ok);
+    }
+
+    /// Ignored foreground (maximized): all tiled-only handlers silent-no-op.
+    #[test]
+    fn ignored_focused_all_tiled_ops_are_noop() {
+        let mut flow = flow_with_focused_state(WindowState::Ignored(IgnoredReason::Maximized));
+        assert_eq!(flow.dispatch_focus(Direction::Left), SocketResponse::Ok);
+        assert_eq!(
+            flow.dispatch_swap_column(Direction::Left),
+            SocketResponse::Ok
+        );
+        assert_eq!(flow.dispatch_expand(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_shrink(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_toggle_monocle(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_center(), SocketResponse::Ok);
+    }
+
+    /// No foreground window at all: all tiled-only handlers silent-no-op.
+    #[test]
+    fn no_foreground_all_tiled_ops_are_noop() {
+        let mut flow = flow_with_focused_state(WindowState::Floating(FloatingState::Active {
+            rect: Rect {
+                x: 100,
+                y: 100,
+                width: 400,
+                height: 300,
+            },
+        }));
+        flow.registry.clear_focused();
+        assert_eq!(flow.dispatch_focus(Direction::Left), SocketResponse::Ok);
+        assert_eq!(
+            flow.dispatch_swap_column(Direction::Left),
+            SocketResponse::Ok
+        );
+        assert_eq!(flow.dispatch_expand(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_shrink(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_toggle_monocle(), SocketResponse::Ok);
+        assert_eq!(flow.dispatch_center(), SocketResponse::Ok);
+    }
+
+    /// Active-tile foreground: the guard must NOT short-circuit. With a single
+    /// column, dispatch_focus(Left) reaches the layout layer and returns Error
+    /// ("no window to focus in that direction") — distinct from the guard's Ok.
+    #[test]
+    fn tile_focused_guard_passes_through_to_layout() {
+        let mut flow =
+            flow_with_focused_state(WindowState::Tiling(TilingState::Active { col: 0, row: 0 }));
+        let resp = flow.dispatch_focus(Direction::Left);
+        assert!(
+            matches!(resp, SocketResponse::Error { .. }),
+            "expected Error (guard passed through to layout), got {resp:?}"
+        );
     }
 }
