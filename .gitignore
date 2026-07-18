@@ -5,8 +5,7 @@
 ref/
 .vscode
 .worktree
-.tmp/sessions
-.tmp/tasks
+.tmp/
 state*.json
 shortcut.ahk
 TODO.md
