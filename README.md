@@ -28,7 +28,23 @@ FlowWM exists because the existing Windows tiling managers didn't scroll the way
 
 ### Install
 
-FlowWM isn't on a package manager yet. For now, [build it from source](docs/src/dev-guide/building-from-source.md) — you'll need Rust and the Visual Studio "Desktop development with C++" workload. That puts a `flow.exe` on your `PATH`.
+FlowWM is Windows-only and compiles locally, so you need the **Rust MSVC toolchain** ([rustup](https://rustup.rs/)) plus the **Visual Studio "Desktop development with C++"** workload — it links against Win32, so MinGW/GNU won't work.
+
+**From crates.io (recommended):**
+
+```powershell
+cargo install flow-wm
+```
+
+**From source:**
+
+```powershell
+git clone https://github.com/CCpcalvin/flow-wm.git
+cd flow-wm
+cargo build --release
+```
+
+Both paths produce `flow.exe` (the CLI you drive) and `flowd.exe` (the daemon). `cargo install` puts them on your `PATH` automatically; a source build writes them to `target\release\` — see [Building from Source](docs/src/dev-guide/building-from-source.md) for adding that to `PATH`.
 
 FlowWM also ships **no keybinder of its own** — on purpose. Every hotkey is just a `flow` CLI call, so anything that can run a command on a keypress will do. The recommended companion is [AutoHotkey v2](https://www.autohotkey.com/), and `flow config init --ahk` writes a ready-to-use `flow.ahk` for it. (See [Design Decisions → Keybindings removed](docs/src/dev-guide/design-decisions.md) for the why.)
 
