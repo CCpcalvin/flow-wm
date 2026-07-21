@@ -57,6 +57,7 @@ schemars = "1.2.1"
 [profile.release]
 opt-level = 3
 lto = true
+codegen-units = 1
 strip = true
 
 [package.metadata.docs.rs]
