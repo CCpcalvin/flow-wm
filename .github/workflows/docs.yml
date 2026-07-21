@@ -1,0 +1,64 @@
+name: Deploy docs
+
+# Builds the mdBook site under docs/ and deploys it to GitHub Pages.
+# Site URL after first run: https://ccpcalvin.github.io/flow-wm/
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment at a time; let the newest run cancel older ones.
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-mdbook-v1
+
+      - name: Install mdBook and mdbook-mermaid
+        run: |
+          if ! command -v mdbook >/dev/null 2>&1; then
+            cargo install mdbook mdbook-mermaid
+          fi
+
+      - name: Build the book
+        run: mdbook build docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
