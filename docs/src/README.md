@@ -34,7 +34,6 @@ The project ships as two binaries inside a single Cargo package:
 ## Building From Source
 
 For the full build walkthrough — prerequisites, MSVC setup, cloning, and the
-contributor gates (`cargo test` / `clippy` / `fmt`, `mdbook build`,
-`cargo doc`) — see the dedicated
+contributor gates (`cargo test` / `clippy` / `fmt`, `mdbook build`) — see the dedicated
 [Building from Source](./dev-guide/building-from-source.md) page in the
 Developer Guide.

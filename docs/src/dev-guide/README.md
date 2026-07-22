@@ -4,19 +4,6 @@ This guide is the canonical narrative reference for `flow`. It explains *why*
 the system is shaped the way it is, *how* the pieces fit together, and *where*
 to look in the source for each concern.
 
-## How This Relates to `cargo doc`
-
-| Layer | Audience | Question it answers |
-|-------|----------|---------------------|
-| **This mdBook** | Humans (and AI context) | *Why & how it fits* — architecture, design trade-offs, lifecycles, algorithms |
-| **`///` docstrings** (`cargo doc`) | API consumers | *What & contract* — one-line summary, `# Errors`, `# Panics`, `# Safety` |
-| **`//` inline comments** | Code readers | *Why here* — local decisions the code can't express |
-
-If you find yourself writing narrative prose ("we chose X over Y because…",
-"the lifecycle of a window is…", a multi-step algorithm walkthrough) it belongs
-**here**, not in a docstring. Docstrings cross-link into this book when deeper
-context exists.
-
 ## Suggested Reading Order
 
 If you haven't built FlowWM yet, start with [Building from Source](./building-from-source.md).
@@ -42,8 +29,6 @@ If you haven't built FlowWM yet, start with [Building from Source](./building-fr
   trade-offs (single package, pixel widths, TOML, etc.).
 - **[Roadmap](./roadmap.md)** — what's implemented, what's stubbed, what's
   next.
-- **`cargo doc --open`** — generated API reference for every public item.
-
 ## Repository Layout
 
 ```text

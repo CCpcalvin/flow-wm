@@ -79,7 +79,6 @@ Documentation builds:
 
 ```powershell
 mdbook build docs                                  # the mdBook you are reading
-cargo doc --no-deps --document-private-items       # API docs (rustdoc)
 ```
 
 When adding or changing a config field, update **both** the `Default` impl in
