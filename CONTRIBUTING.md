@@ -76,8 +76,7 @@ A few project-wide conventions:
     rationale, don't duplicate it.
   - **`//` inline comments** — only the local *why* a reader can't reconstruct
     from the code.
-- **Build the docs** with `mdbook build docs/`, and the API reference with
-  `cargo doc --no-deps --document-private-items`.
+- **Build the docs** with `mdbook build docs/`.
 - **Adding dependencies:** use `cargo add <crate>` rather than hand-editing
   `Cargo.toml`, so versions and the lockfile stay consistent.
 

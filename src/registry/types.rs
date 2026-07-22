@@ -358,7 +358,7 @@ pub enum FloatingState {
 /// Reason why a window is ignored by flow.
 ///
 /// Ignored windows are excluded from all layout operations. The reason is
-/// tracked for diagnostic purposes (e.g., `cargo doc` queries can show *why*
+/// tracked for diagnostic purposes (e.g., logs can show *why*
 /// a window is not being tiled).
 ///
 /// # Override Priority

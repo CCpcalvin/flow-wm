@@ -192,7 +192,7 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-If you're working on the docs, build the mdBook with `mdbook build docs/` and the API docs with `cargo doc --no-deps --document-private-items`.
+If you're working on the docs, build the mdBook with `mdbook build docs/`.
 
 ## License
 
