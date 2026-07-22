@@ -18,7 +18,7 @@
 //! removal pipeline: remove from the virtual layout → push OS-level focus to
 //! the successor window if focus changed → animate the resulting layout diff.
 //! The successor window is chosen by [`ScrollingSpace::remove_window`](crate::workspace::ScrollingSpace::remove_window) via
-//! [`mutations::next_available_window`] (left column, then right).
+//! [`mutations::next_available_window`] (same-column sibling first, then left, then right).
 
 use crate::common::WindowId;
 use crate::registry::hooks::remove_float_hwnd;
@@ -247,7 +247,7 @@ impl FlowWM {
     /// 2. [`ScrollingSpace::remove_window`](crate::workspace::ScrollingSpace::remove_window) — removes the window from the virtual
     ///    layout, resolving a focus successor via
     ///    [`mutations::next_available_window`] when the removed window was
-    ///    focused (left column preferred, then right).
+    ///    focused (same-column sibling preferred, then left, then right).
     /// 3. **Push OS focus** — if the layout focus changed as a result of the
     ///    removal, call [`registry_win32::set_foreground_window`] on the
     ///    successor so the OS actually foregrounds it, then sync the registry's

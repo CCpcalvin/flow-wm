@@ -7,7 +7,7 @@
 //!
 //! 1. Finds the to-be-removed window's position in the virtual layout.
 //! 2. If it was the focused window, picks the successor via
-//!    `next_available_window` (left neighbour preferred, else right).
+//!    `next_available_window` (same-column sibling first, else left, else right).
 //! 3. Removes the window from the virtual layout (natural compression shifts
 //!    right-side columns leftward by one slot).
 //! 4. Ensures the successor column is visible (`ensure_column_visible`).

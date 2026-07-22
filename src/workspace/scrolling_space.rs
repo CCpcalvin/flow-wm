@@ -595,8 +595,9 @@ impl ScrollingSpace {
     /// 1. **Locate** the window's `(col, row)` in the virtual layout (before
     ///    removal).
     /// 2. **Focus resolution** — if the removed window was the focused window,
-    ///    pick a successor via [`mutations::next_available_window`] (left
-    ///    column preferred, then right). Otherwise focus is unchanged.
+    ///    pick a successor via [`mutations::next_available_window`] (same-column
+    ///    sibling preferred, then left column, then right). Otherwise focus is
+    ///    unchanged.
     /// 3. **Remove** the window from the virtual layout. Because projection
     ///    computes canvas positions cumulatively (a running `canvas_x`
     ///    accumulator), deleting a column naturally shifts every window to its
@@ -611,10 +612,12 @@ impl ScrollingSpace {
     ///
     /// # Focus fallback
     ///
-    /// When the focused window is removed, focus moves to the **left** adjacent
-    /// column's closest-row window, or — if there is no left column — the
-    /// **right** adjacent column's closest-row window. If the removed window
-    /// was the only one in the layout, focus becomes `None`.
+    /// When the focused window is removed, focus moves to a **sibling in the
+    /// same column** first — the window directly below (which slides into the
+    /// closed slot), or the one above if it was the bottom of the stack. Only
+    /// when the column had no other rows does focus move to the **left**
+    /// adjacent column's closest-row window, then the **right**. If the removed
+    /// window was the only one in the layout, focus becomes `None`.
     ///
     /// # Arguments
     ///
@@ -1534,11 +1537,12 @@ mod tests {
             WindowId(1)
         );
         // Focus was on W2 (removed). next_available_window at (col 0, row 1):
-        // no left, no right → None. Focus becomes None.
+        // no row below, so the same-column sibling above (W1) is chosen.
         assert_eq!(
             engine.last_focused_window(),
-            None,
-            "focus should be None after removing the focused window from a single-column multi-row layout"
+            Some(WindowId(1)),
+            "focus should move to the same-column sibling (W1) after removing \
+             the focused bottom window from a single-column multi-row layout"
         );
     }
 
