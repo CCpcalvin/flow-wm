@@ -5,7 +5,7 @@ for contributors, or anyone who wants to build locally instead of installing
 from crates.io with `cargo install flow-wm`.
 
 > If you only want to *use* FlowWM, the high-level overview lives in the
-> project [`README.md`](../../../README.md). This page is the build detail.
+> [User Guide](../user-guide/index.md). This page is the build detail.
 
 ## Prerequisites
 
@@ -63,7 +63,7 @@ chain.
 
 Once the daemon is running, start your hotkey daemon (`flow start --ahk`, or
 `flow enable-autostart --ahk` to auto-launch both at login) and you're tiling.
-See the [`README.md`](../../../README.md) for usage.
+See the [User Guide](../user-guide/index.md) for everyday usage.
 
 ## Contributor Gates
 

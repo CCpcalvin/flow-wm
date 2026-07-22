@@ -1,20 +1,13 @@
 # User Guide
 
 FlowWM is a scrolling tiling window manager for Windows. This guide covers the
-day-to-day surface: the binaries, how to start, and the full command reference.
+day-to-day surface: how to install it, the full command reference, and how to
+configure and extend it.
 
-> **New here?** Start with the README's
-> [*Getting started*](https://github.com/CCpcalvin/flow-wm#getting-started) — a
-> 60-second guided tour (install AutoHotkey, `flow config init --ahk`,
+> **New here?** The [Installation](./installation.md) page walks through the
+> 60-second setup (install AutoHotkey, `flow config init --ahk`,
 > `flow start --ahk`, and the default hotkeys). Then come back here for the
-> complete command list.
-
-## Binaries
-
-| Binary | Purpose |
-|--------|---------|
-| `flowd` | The daemon. Run in the background via `flow start` (or foreground for debugging). |
-| `flow` | The CLI client. Sends commands to the daemon over a named pipe. |
+> complete command and config reference.
 
 ## Quick start
 
@@ -27,11 +20,16 @@ flow stop                # shut it down
 
 ## Where to go next
 
-- **[Command Reference](./dispatch-reference.md)** — every `flow dispatch` action,
-  annotated, with its default hotkey.
-- **Hotkeys** — `flow.ahk` is yours to edit. The modifier is one `ModKey` line at
-  the top; see the README's *Why ScrollLock?* section.
-- **Configuration** — [`flow.toml` and `flow-rules.toml`](../dev-guide/config-and-persistence.md).
+- **[Installation](./installation.md)** — prerequisites, the two install paths
+  (crates.io or from source), and first-run setup.
+- **[Command Reference](./dispatch-reference.md)** — every `flow dispatch`
+  action, annotated, with its default hotkey.
+- **[Config Reference](./config-reference.md)** — every `flow.toml` and
+  `flow-rules.toml` field, its default, and what it does.
+- **[Contributing & Reporting Issues](./contributing.md)** — how to file a
+  useful bug report, send a patch, or request a feature.
+- **Hotkeys** — `flow.ahk` is yours to edit. The modifier is one `ModKey` line
+  at the top; see the README's *Why ScrollLock?* section.
 
 For architecture, the layout pipeline, and subsystem deep dives, see the
-[Developer Guide](../dev-guide/README.md).
+[Developer Guide](../dev-guide/index.md).

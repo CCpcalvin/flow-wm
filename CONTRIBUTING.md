@@ -3,7 +3,8 @@
 Contributions are welcome — bug reports, feature ideas, and pull requests all help.
 This file is the short version: how to file a useful bug report, and what a pull
 request needs to land. For understanding how the codebase fits together, read the
-[Developer Guide](docs/src/dev-guide/README.md) (build it with `mdbook build docs/`).
+[Developer Guide](https://ccpcalvin.github.io/flow-wm/dev-guide/index.html) (also
+available locally via `mdbook build docs/`).
 
 ## Reporting bugs
 
@@ -67,8 +68,9 @@ A few project-wide conventions:
   `default_config_toml_matches_compiled_defaults` test enforces that they stay in
   sync.
 - **Documentation follows a 3-layer model:**
-  - **mdBook** (`docs/src/dev-guide/*.md`) — the *why* and *how it fits*:
-    architecture, design decisions, data flow, diagrams (Mermaid).
+  - **mdBook** (`docs/src/dev-guide/*.md`, rendered at
+    <https://ccpcalvin.github.io/flow-wm/dev-guide/index.html>) — the *why* and
+    *how it fits*: architecture, design decisions, data flow, diagrams (Mermaid).
   - **`///` docstrings** — the *what*: a one-line summary plus the contract
     (`# Errors` / `# Panics` / `# Safety` where relevant). Link to mdBook for
     rationale, don't duplicate it.
@@ -82,7 +84,8 @@ A few project-wide conventions:
 ## Understanding the codebase
 
 For architecture, threading, the layout engine, and subsystem write-ups, see the
-[Developer Guide](docs/src/dev-guide/README.md). Build it locally:
+[Developer Guide](https://ccpcalvin.github.io/flow-wm/dev-guide/index.html). Build
+it locally:
 
 ```
 mdbook build docs/

@@ -121,7 +121,7 @@ flowchart TD
     AUTH -->|"flow.toml Err in race window"| DIE["exit 1: pipe never created"]
 ```
 
-`flow config reload` reuses these same loaders to hot-reload a running daemon (see §5 *Hot-reload* below).
+`flow config reload` reuses these same loaders to hot-reload a running daemon (see [Hot-reload](#hot-reload--flow-config-reload) below).
 
 After loading `flow.toml`, the daemon calls `FlowConfig::validate()` to catch semantically invalid values (negative padding, `min_column_width_px` exceeding `column_width`). Validation failures produce warnings but do not prevent the daemon from running.
 
@@ -140,15 +140,15 @@ flowchart TD
     LOAD --> USE["Daemon subsystems<br/>Layout engine, animation, registry"]
 ```
 
-### 5. Hot-reload -- `flow config reload`
+## Hot-reload -- `flow config reload`
 
 `flow config reload` sends a `ReloadConfig` IPC message to the running daemon, which reloads `flow.toml` (and `flow-rules.toml`) from disk and applies the **live-reloadable** fields to the running daemon **without disturbing runtime window/workspace state**.
 
-#### Validate-before-apply
+### Validate-before-apply
 
 The handler loads + validates the new config *before* touching any state. A broken file or a validation failure (e.g. `columns_per_screen = 0`) returns a `SocketResponse::Error` immediately -- the running daemon keeps its current config untouched, so there is nothing to roll back. The error message surfaces on the user's terminal via `flow`'s `send_command`.
 
-#### Live-reloadable vs. structural fields
+### Live-reloadable vs. structural fields
 
 Not every field can change at runtime. Reload applies **live** fields in place; **structural** fields require a daemon restart.
 
@@ -161,11 +161,11 @@ Not every field can change at runtime. Reload applies **live** fields in place; 
 | `animation.*` | `WindowAnimator::update_config` for the new duration/easing/enabled |
 | **Workspace count (10), monitor geometry** | **structural** -- not reloadable |
 
-#### What is preserved
+### What is preserved
 
 Reload touches *only* the geometry constants + borders + the animation config. The user's arranged layout is untouched: per-`ScrollingSpace` virtual layout (columns, rows, window order), focus, scroll viewport, monocle state; plus the daemon's registry (window slots/states), learned history rules, and float positions. Concretely, `ScrollingSpace::reconfigure` rebuilds the cached `MutationConfig` and re-projects `actual` from the **same** `virtual_layout` -- windows keep their column/row assignment and slide to their new pixel positions.
 
-#### Rules reload is non-fatal
+### Rules reload is non-fatal
 
 `flow-rules.toml` (classification) is reloaded in the same operation via `registry.set_user_rules`. It affects only **new** windows, so it never disrupts existing layout. Consistent with startup policy, a rules failure is **non-fatal**: the daemon warns and keeps the current rules; `flow.toml` (if valid) still reloads. This is the per-file-independent policy chosen at design time.
 
@@ -178,10 +178,10 @@ sequenceDiagram
     C->>D: ReloadConfig (IPC)
     D->>D: load_app_config + validate (no state touched)
     alt load/validate Err
-        D-->>C: SocketResponse::Error{message}
+        D-->>C: SocketResponse::Error(message)
         C-->>U: print error (nothing applied)
     else Ok
-        D->>D: store config; reconfigure all workspaces; animate active; refresh borders; reload rules (non-fatal)
+        D->>D: store config<br/>reconfigure all workspaces<br/>animate active<br/>refresh borders<br/>reload rules (non-fatal)
         D-->>C: SocketResponse::Ok
         C-->>U: "configuration reloaded"
     end

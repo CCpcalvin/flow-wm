@@ -7,7 +7,10 @@
 # User Guide
 
 - [Overview](./user-guide/README.md)
+- [Installation](./user-guide/installation.md)
 - [Command Reference](./user-guide/dispatch-reference.md)
+- [Config Reference](./user-guide/config-reference.md)
+- [Contributing & Reporting Issues](./user-guide/contributing.md)
 
 # Developer Guide
 

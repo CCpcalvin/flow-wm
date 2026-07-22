@@ -8,7 +8,9 @@ Windows live as **columns on a canvas** that stretches wider than your monitor. 
   Your browser can't render embedded MP4 — <a href="https://github.com/user-attachments/assets/80d1c69e-df6e-4c83-9364-ed86c8635f44">download the demo clip</a>.
 </video>
 
-> **Status:** early, in active development — see [Getting started](#getting-started) to try it today, and the [roadmap](docs/src/dev-guide/roadmap.md) for what's done and what's next.
+> **Status:** early, in active development — see [Getting started](#getting-started) to try it today, and the [roadmap](https://ccpcalvin.github.io/flow-wm/dev-guide/roadmap.html) for what's done and what's next.
+>
+> **Docs:** The full [User Guide](https://ccpcalvin.github.io/flow-wm/user-guide/index.html) and [Developer Guide](https://ccpcalvin.github.io/flow-wm/dev-guide/index.html) are also published as a searchable mdBook at <https://ccpcalvin.github.io/flow-wm/>.
 
 ## How it compares
 
@@ -44,9 +46,9 @@ cd flow-wm
 cargo build --release
 ```
 
-Both paths produce `flow.exe` (the CLI you drive) and `flowd.exe` (the daemon). `cargo install` puts them on your `PATH` automatically; a source build writes them to `target\release\` — see [Building from Source](docs/src/dev-guide/building-from-source.md) for adding that to `PATH`.
+Both paths produce `flow.exe` (the CLI you drive) and `flowd.exe` (the daemon). `cargo install` puts them on your `PATH` automatically; a source build writes them to `target\release\` — see [Building from Source](https://ccpcalvin.github.io/flow-wm/dev-guide/building-from-source.html) for adding that to `PATH`.
 
-FlowWM also ships **no keybinder of its own** — on purpose. Every hotkey is just a `flow` CLI call, so anything that can run a command on a keypress will do. The recommended companion is [AutoHotkey v2](https://www.autohotkey.com/), and `flow config init --ahk` writes a ready-to-use `flow.ahk` for it. (See [Design Decisions → Keybindings removed](docs/src/dev-guide/design-decisions.md) for the why.)
+FlowWM also ships **no keybinder of its own** — on purpose. Every hotkey is just a `flow` CLI call, so anything that can run a command on a keypress will do. The recommended companion is [AutoHotkey v2](https://www.autohotkey.com/), and `flow config init --ahk` writes a ready-to-use `flow.ahk` for it. (See [Design Decisions → Keybindings removed](https://ccpcalvin.github.io/flow-wm/dev-guide/design-decisions.html) for the why.)
 
 ### TL;DR
 
@@ -86,7 +88,7 @@ The daemon launches in the background, and once it's listening your `flow.ahk` f
 | `q` | **Close** the focused window |
 | `p` | **Stop** the daemon (and exit the script) |
 
-That's the whole game. For the complete, annotated list, see the [Command Reference](docs/src/user-guide/dispatch-reference.md).
+That's the whole game. For the complete, annotated list, see the [Command Reference](https://ccpcalvin.github.io/flow-wm/user-guide/dispatch-reference.html).
 
 ### Why ScrollLock? (and how to change it)
 
@@ -124,7 +126,7 @@ flow dispatch help     # list every dispatch action
 flow --help            # top-level commands (start, stop, config, query, ...)
 ```
 
-For the full annotated reference — what each dispatch command does, its arguments, and the default hotkey it's bound to — see the [Command Reference](docs/src/user-guide/dispatch-reference.md).
+For the full annotated reference — what each dispatch command does, its arguments, and the default hotkey it's bound to — see the [Command Reference](https://ccpcalvin.github.io/flow-wm/user-guide/dispatch-reference.html).
 
 ## Motivation
 
@@ -172,15 +174,15 @@ FlowWM flips it: **everything floats by default.** When you decide a window shou
 
 ## Contributing
 
-Contributions are welcome — bug reports, fixes, features, docs. The best starting point is the [Developer Guide](docs/src/dev-guide/README.md), which covers the architecture, the layout pipeline, the threading model, subsystem deep dives, and the design decisions behind the current shape of the code. To build FlowWM locally, see [Building from Source](docs/src/dev-guide/building-from-source.md).
+Contributions are welcome — bug reports, fixes, features, docs. The best starting point is the [Developer Guide](https://ccpcalvin.github.io/flow-wm/dev-guide/index.html), which covers the architecture, the layout pipeline, the threading model, subsystem deep dives, and the design decisions behind the current shape of the code. To build FlowWM locally, see [Building from Source](https://ccpcalvin.github.io/flow-wm/dev-guide/building-from-source.html). For how to file a useful bug report or send a patch, see [Contributing](https://ccpcalvin.github.io/flow-wm/user-guide/contributing.html).
 
 Quick references:
 
-- [Architecture overview](docs/src/dev-guide/architecture.md)
-- [Layout: virtual canvas & camera model](docs/src/dev-guide/layout/overview.md)
-- [Classification & learned rules](docs/src/dev-guide/classification.md)
-- [Design decisions](docs/src/dev-guide/design-decisions.md)
-- [Roadmap](docs/src/dev-guide/roadmap.md)
+- [Architecture overview](https://ccpcalvin.github.io/flow-wm/dev-guide/architecture.html)
+- [Layout: virtual canvas & camera model](https://ccpcalvin.github.io/flow-wm/dev-guide/layout/overview.html)
+- [Classification & learned rules](https://ccpcalvin.github.io/flow-wm/dev-guide/classification.html)
+- [Design decisions](https://ccpcalvin.github.io/flow-wm/dev-guide/design-decisions.html)
+- [Roadmap](https://ccpcalvin.github.io/flow-wm/dev-guide/roadmap.html)
 
 Before sending a patch, please make sure the usual gates pass:
 
