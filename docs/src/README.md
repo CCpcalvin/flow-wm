@@ -10,25 +10,26 @@ The project ships as two binaries inside a single Cargo package:
 
 | Binary | Role |
 |--------|------|
-| `flowd` | The daemon process. Runs in the background and owns all state. |
-| `flow` | The CLI client. Sends commands to the daemon, queries state, edits config. |
+| `flowd` | The daemon. Runs in the background (via `flow start`), owns all state, and accepts IPC commands. |
+| `flow` | The CLI client. Sends commands to the daemon over a named pipe. |
 
 ## How to Use This Book
 
-- **[User Guide](./user-guide/README.md)** — for people who want to *run* `flow`.
-  Currently a stub: features are still being finalised.
-- **[Developer Guide](./dev-guide/README.md)** — for contributors and anyone who
+- **[User Guide](./user-guide/index.md)** — for people who want to *run* `flow`:
+  installation, the command reference, the configuration reference, and how to
+  get help or report an issue.
+- **[Developer Guide](./dev-guide/index.md)** — for contributors and anyone who
   wants to understand how the system works inside. Covers architecture, the
   layout pipeline, threading model, subsystem deep dives, design decisions, and
   the roadmap.
 
 ## Quick Links
 
-- [Architecture overview](./dev-guide/architecture.md)
-- [Layout: virtual canvas & camera model](./dev-guide/layout/overview.md)
-- [Window classification algorithm](./dev-guide/window-registry.md)
-- [Threading model (no `Arc<Mutex>`)](./dev-guide/threading-model.md)
-- [Roadmap](./dev-guide/roadmap.md)
+- [Installation](./user-guide/installation.md) — get FlowWM running in a few minutes.
+- [Command Reference](./user-guide/dispatch-reference.md) — every `flow` command, annotated, with its default hotkey.
+- [Config Reference](./user-guide/config-reference.md) — every `flow.toml` and `flow-rules.toml` field, its default, and what it does.
+- [Contributing & Reporting Issues](./user-guide/contributing.md) — how to file a useful bug report, send a patch, or request a feature.
+- [Report an Issue](https://github.com/CCpcalvin/flow-wm/issues) — open an issue directly on GitHub.
 
 ## Building From Source
 

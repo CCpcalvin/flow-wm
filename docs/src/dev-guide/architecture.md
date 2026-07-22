@@ -7,14 +7,8 @@ view. The entire system is a single Cargo package containing two binaries that s
 one library crate, coordinated by a top-level orchestrator struct called
 `FlowWM`.
 
-## Binaries
-
-| Binary | Role |
-|--------|------|
-| `flowd` | Background daemon — owns all state, manages windows, accepts IPC commands |
-| `flow` | CLI client — sends commands to the daemon over a named pipe |
-
-Both binaries share the library crate rooted at [`src/lib.rs`](../../src/lib.rs).
+The two binaries — `flowd` (the background daemon that owns all state) and `flow`
+(the CLI client) — share the library crate rooted at [`src/lib.rs`](../../src/lib.rs).
 The daemon entry point is [`src/main.rs`](../../src/main.rs); the CLI lives in
 [`src/bin/flow.rs`](../../src/bin/flow.rs).
 
@@ -197,7 +191,7 @@ For the full explanation, see [Layout Overview](./layout/overview.md) and
 
 ## Repository Layout
 
-The repository layout is covered in the [Developer Guide introduction](./README.md).
+The repository layout is covered in the [Developer Guide introduction](./index.md).
 The two big ideas to internalise before reading any source file:
 
 1. **The layout pipeline is pure.** `src/layout/` has zero Win32 dependencies and is
