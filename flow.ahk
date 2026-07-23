@@ -12,17 +12,20 @@
 ; This file is yours. Edit it freely — FlowWM never overwrites it once it
 ; exists. Two things you may want to customise (both at the top of the file):
 ;
-;   1. ModKey    — the modifier every binding is held with. ScrollLock is the
-;                 default because it almost never clashes with other apps, but
-;                 many compact/laptop keyboards lack it. To switch, change the
-;                 one line below, e.g. ModKey := "CapsLock", "F13", or "LWin".
+;   1. ModKey    — the modifier every binding is held with. Alt is the default
+;                 (it's on every keyboard and matches other Windows tiling
+;                 managers), but Alt+<letter> can collide with an app's menu
+;                 shortcuts. To switch, change the one line below, e.g.
+;                 ModKey := "ScrollLock", "CapsLock", "F13", or "LWin".
 ;                 Key list: https://www.autohotkey.com/docs/v2/KeyList.htm
 ;
-;                 A note on the Windows key: "LWin" is tempting, but Windows
-;                 special-cases it everywhere (Start menu, Win+D, Win+L, …) and
-;                 swallows many shortcuts before AutoHotkey ever sees them, so
-;                 bindings frequently misfire. See the README's
-;                 "Why ScrollLock?" section for the full story.
+;                 Want the Windows key? ModKey := "LWin" works, but Windows
+;                 swallows some Win+<key> shortcuts (Start menu, Win+D, Win+L, …)
+;                 before AutoHotkey sees them, so a few chords may misfire. The
+;                 zero-compromise path: set ModKey to a sacrificial key (e.g.
+;                 "ScrollLock") and hardware-remap LWin to it in your keyboard
+;                 firmware — physically you press Win, the OS sees the sacrificial
+;                 key. See the README's "Can I use the Win key?" section.
 ;
 ;   2. flowExe  — path to flow.exe. Defaults to "flow" (resolved from PATH).
 ;                 If FlowWM isn't on your PATH, set the full path, e.g.
@@ -46,7 +49,7 @@
 ; ════════════════════════════════════════════════════════════════════════════
 
 ; --- Config ------------------------------------------------------------------
-ModKey   := "ScrollLock"          ; the modifier every binding is held with
+ModKey   := "Alt"                 ; the modifier every binding is held with
 flowExe := "flow"                ; path to flow.exe (PATH by default)
 
 ; --- Flow command helpers ----------------------------------------------------
@@ -114,7 +117,7 @@ WorkspaceAction(n) {
 
 ; --- Register every binding --------------------------------------------------
 ; Done dynamically so ModKey is one changeable line: swap the modifier above and
-; every chord below follows. Custom combos (e.g. "ScrollLock & h") are passed
+; every chord below follows. Custom combos (e.g. "Alt & h") are passed
 ; to Hotkey() as a single string built from ModKey.
 Hotkey(ModKey " & p", Act_Stop)
 Hotkey(ModKey " & h", Act_Left)

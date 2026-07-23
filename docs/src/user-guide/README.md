@@ -29,7 +29,7 @@ flow stop                # shut it down
 - **[Contributing & Reporting Issues](./contributing.md)** — how to file a
   useful bug report, send a patch, or request a feature.
 - **Hotkeys** — `flow.ahk` is yours to edit. The modifier is one `ModKey` line
-  at the top; see the README's *Why ScrollLock?* section.
+  at the top; see the README's *Can I use the Win key?* section.
 
 For architecture, the layout pipeline, and subsystem deep dives, see the
 [Developer Guide](../dev-guide/index.md).
