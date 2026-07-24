@@ -37,6 +37,7 @@
 - [Borders](./dev-guide/borders.md)
 - [IPC](./dev-guide/ipc-and-watchdog.md)
 - [Config & Persistence](./dev-guide/config-and-persistence.md)
+- [Self-Update](./dev-guide/updater.md)
 
 ## Reference
 
