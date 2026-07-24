@@ -142,6 +142,9 @@ pub struct FlowConfig {
 
     /// Focus reconciliation configuration.
     pub focus: FocusConfig,
+
+    /// Tile-drag configuration.
+    pub drag: DragConfig,
 }
 
 fn default_window_action() -> WindowAction {
@@ -161,6 +164,7 @@ impl Default for FlowConfig {
             borders: BorderConfig::default(),
             floating: FloatingConfig::default(),
             focus: FocusConfig::default(),
+            drag: DragConfig::default(),
         }
     }
 }
@@ -742,6 +746,53 @@ pub struct FloatingConfig {
     pub default_height: Option<i32>,
 }
 
+/// Tile-drag configuration.
+///
+/// Controls the behavior of drag-and-drop repositioning of tiled windows.
+/// When a user drags a tiled window by its title bar, drop zones appear
+/// around each visible window. After a dwell period, the layout commits
+/// the move and other windows animate to their new positions.
+///
+/// # Example
+///
+/// ```toml
+/// [drag]
+/// dwell_time_ms = 50
+/// left_right_zone_ratio = 0.25
+/// upper_lower_zone_ratio = 0.35
+/// edge_scroll_width = 30
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct DragConfig {
+    /// How long (ms) the cursor must hover over a drop zone before the
+    /// layout commits the move. Prevents accidental drops during fast drags.
+    pub dwell_time_ms: u64,
+    /// Fraction of each window's width (0.0–1.0) occupied by the Left and
+    /// Right column-insert zones on each side. E.g. `0.25` means the left
+    /// 25% is Left zone, the right 25% is Right zone.
+    pub left_right_zone_ratio: f32,
+    /// Fraction of each window's height (0.0–1.0) occupied by the Upper and
+    /// Lower row-insert zones on each side. E.g. `0.35` means the top 35%
+    /// is Upper zone, the bottom 35% is Lower zone.
+    pub upper_lower_zone_ratio: f32,
+    /// Width in pixels of the left/right edge-scroll zones. When the cursor
+    /// enters this band at the screen edge during a drag, the viewport
+    /// scrolls by one column.
+    pub edge_scroll_width: i32,
+}
+
+impl Default for DragConfig {
+    fn default() -> Self {
+        Self {
+            dwell_time_ms: 50,
+            left_right_zone_ratio: 0.25,
+            upper_lower_zone_ratio: 0.35,
+            edge_scroll_width: 30,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,6 +978,12 @@ strategy = "original_slot"
             focus: FocusConfig {
                 foreground_sync_interval_ms: 400,
             },
+            drag: DragConfig {
+                dwell_time_ms: 150,
+                left_right_zone_ratio: 0.3,
+                upper_lower_zone_ratio: 0.2,
+                edge_scroll_width: 25,
+            },
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
@@ -955,6 +1012,10 @@ strategy = "original_slot"
         assert_eq!(parsed.floating.default_width, Some(1200));
         assert_eq!(parsed.floating.default_height, Some(800));
         assert_eq!(parsed.focus.foreground_sync_interval_ms, 400);
+        assert_eq!(parsed.drag.dwell_time_ms, 150);
+        assert_eq!(parsed.drag.left_right_zone_ratio, 0.3);
+        assert_eq!(parsed.drag.upper_lower_zone_ratio, 0.2);
+        assert_eq!(parsed.drag.edge_scroll_width, 25);
     }
 
     #[test]

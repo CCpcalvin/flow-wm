@@ -780,6 +780,19 @@ impl ScrollingSpace {
             .and_then(|w| self.virtual_layout.find_window(w).map(|(c, _)| c))
             .unwrap_or(0)
     }
+
+    /// Replace the committed virtual layout with a pre-computed one and
+    /// re-project.
+    ///
+    /// This is the escape hatch for operations that need to apply a
+    /// mutation that doesn't map to a single `ScrollingSpace` method
+    /// (e.g. tile-drag commit which inserts at an arbitrary column index).
+    /// The caller is responsible for ensuring the new layout is valid.
+    ///
+    /// Returns the resulting [`AppliedLayout`].
+    pub(crate) fn commit_layout(&mut self, new_layout: VirtualLayout) -> AppliedLayout {
+        self.apply_mutation(new_layout)
+    }
 }
 
 #[cfg(test)]

@@ -99,3 +99,19 @@ floating_color = "#AA00FF"
 #   The common (in-sync) pass is a single microsecond-scale read that no-ops.
 [focus]
 foreground_sync_interval_ms = 250
+
+# Tile-drag configuration.
+#
+# When a user drags a tiled window by its title bar, drop zones appear around
+# each visible window. After a dwell period, the layout commits the move and
+# other windows animate to their new positions.
+#
+# - dwell_time_ms:           how long the cursor must hover before commit
+# - left_right_zone_ratio:   fraction of window width for Left/Right zones (each side)
+# - upper_lower_zone_ratio:  fraction of window height for Upper/Lower zones (each side)
+# - edge_scroll_width:       px band at screen edge that triggers viewport scroll
+[drag]
+dwell_time_ms = 50
+left_right_zone_ratio = 0.25
+upper_lower_zone_ratio = 0.35
+edge_scroll_width = 30

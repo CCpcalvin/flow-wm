@@ -84,6 +84,21 @@ impl FlowWM {
             return;
         }
 
+        // Safety net: during a tile drag, exclude the dragged window and its
+        // border overlay from animation targets so the animator doesn't fight
+        // the user's mouse. This covers code paths (e.g. window Created/
+        // Destroyed hooks) that call animate_layout while a drag is active.
+        // When on_drag_end calls animate_layout, drag_state has already been
+        // take()n so the filter does not trigger — the dragged window animates
+        // to its final position as intended.
+        let excluded_id = self.drag_state.as_ref().map(|ds| ds.dragged_id);
+        let excluded_border_hwnd = self.drag_state.as_ref().and_then(|ds| {
+            self.registry
+                .get_window(HWND(ds.dragged_hwnd as *mut _))
+                .and_then(|w| w.border.as_ref())
+                .map(|b| b.hwnd())
+        });
+
         // Effective border inset. Each window's rect shrinks by
         // (thickness - overlap) px per edge so the overlay ring (the outer
         // `thickness` px of the layout slot) overlaps the visible content by
@@ -92,67 +107,73 @@ impl FlowWM {
         let border_thickness = self.config.borders.thickness as i32;
         let border_overlap = self.config.borders.overlap as i32;
 
-        let targets: Vec<WindowTarget> = layout
-            .actual_layout
-            .entries
-            .iter()
-            .flat_map(|entry| {
-                // Look up the window once; extract invisible bounds and the
-                // border overlay HWND from the shared reference. Option<&Window>
-                // is Copy (all &T are Copy), so both .map calls below take
-                // independent copies without invalidating `window`.
-                let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
-                let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
-                let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
+        let mut targets: Vec<WindowTarget> = Vec::new();
+        for entry in &layout.actual_layout.entries {
+            // Skip the dragged window during an active drag.
+            if Some(entry.window_id) == excluded_id {
+                continue;
+            }
 
-                // Translate the layout engine's visible rect into a Win32
-                // window rect. This compensates for invisible borders so
-                // that SetWindowPos places the window's visible content
-                // exactly where the layout engine intended. Then shrink by
-                // the configured border thickness to leave room for the
-                // colored overlay ring.
-                let window_rect = invisible_bounds
-                    .visible_to_window(entry.rect)
-                    .inset(border_thickness - border_overlap);
+            // Look up the window once; extract invisible bounds and the
+            // border overlay HWND from the shared reference. Option<&Window>
+            // is Copy (all &T are Copy), so both .map calls below take
+            // independent copies without invalidating `window`.
+            let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+            let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+            let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
 
-                log::debug!(
-                    "animate: hwnd={} target ({},{},{},{}) [visible] \
-                     → ({},{},{},{}) [window]",
-                    entry.window_id.0,
-                    entry.rect.x,
-                    entry.rect.y,
-                    entry.rect.width,
-                    entry.rect.height,
-                    window_rect.x,
-                    window_rect.y,
-                    window_rect.width,
-                    window_rect.height,
-                );
+            // Skip the dragged window's border overlay.
+            if let Some(eb) = excluded_border_hwnd
+                && border_hwnd == Some(eb)
+            {
+                continue;
+            }
 
-                let window_target = WindowTarget::new(
-                    WindowRef(entry.window_id.0),
-                    IVec2::new(window_rect.x, window_rect.y),
-                    IVec2::new(window_rect.width, window_rect.height),
-                );
+            // Translate the layout engine's visible rect into a Win32
+            // window rect. This compensates for invisible borders so
+            // that SetWindowPos places the window's visible content
+            // exactly where the layout engine intended. Then shrink by
+            // the configured border thickness to leave room for the
+            // colored overlay ring.
+            let window_rect = invisible_bounds
+                .visible_to_window(entry.rect)
+                .inset(border_thickness - border_overlap);
 
-                // Flatten the border overlay into the same target list so
-                // the animator moves it in lockstep with the window. Border
-                // overlays sit at the layout engine's visible rect — no
-                // invisible-bounds translation, no thickness inset — because
-                // the ring occupies the gap between entry.rect and the
-                // inset window_rect. The animator's SetWindowPos-based
-                // backend treats the overlay HWND like any other window.
-                let border_target = border_hwnd.map(|b_hwnd| {
-                    WindowTarget::new(
-                        WindowRef(b_hwnd),
-                        IVec2::new(entry.rect.x, entry.rect.y),
-                        IVec2::new(entry.rect.width, entry.rect.height),
-                    )
-                });
+            log::debug!(
+                "animate: hwnd={} target ({},{},{},{}) [visible] \
+                 → ({},{},{},{}) [window]",
+                entry.window_id.0,
+                entry.rect.x,
+                entry.rect.y,
+                entry.rect.width,
+                entry.rect.height,
+                window_rect.x,
+                window_rect.y,
+                window_rect.width,
+                window_rect.height,
+            );
 
-                std::iter::once(window_target).chain(border_target)
-            })
-            .collect();
+            targets.push(WindowTarget::new(
+                WindowRef(entry.window_id.0),
+                IVec2::new(window_rect.x, window_rect.y),
+                IVec2::new(window_rect.width, window_rect.height),
+            ));
+
+            // Flatten the border overlay into the same target list so
+            // the animator moves it in lockstep with the window. Border
+            // overlays sit at the layout engine's visible rect — no
+            // invisible-bounds translation, no thickness inset — because
+            // the ring occupies the gap between entry.rect and the
+            // inset window_rect. The animator's SetWindowPos-based
+            // backend treats the overlay HWND like any other window.
+            if let Some(b_hwnd) = border_hwnd {
+                targets.push(WindowTarget::new(
+                    WindowRef(b_hwnd),
+                    IVec2::new(entry.rect.x, entry.rect.y),
+                    IVec2::new(entry.rect.width, entry.rect.height),
+                ));
+            }
+        }
 
         log::debug!(
             "animate_layout: submitting {} targets to animator",

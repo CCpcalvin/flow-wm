@@ -33,7 +33,7 @@ use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
     DWMWA_WINDOW_CORNER_PREFERENCE, DwmGetWindowAttribute,
@@ -43,11 +43,12 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetShellWindow,
-    GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -193,6 +194,22 @@ pub fn get_window_rect(hwnd: HWND) -> Result<Rect, String> {
         width: rect.right - rect.left,
         height: rect.bottom - rect.top,
     })
+}
+
+/// Retrieves the current cursor (mouse pointer) position in screen coordinates.
+///
+/// The returned `(x, y)` is in the same coordinate space as [`get_window_rect`] —
+/// physical screen pixels — so no translation is needed when comparing against
+/// layout rects.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if `GetCursorPos` fails (extremely rare;
+/// typically only when the calling thread lacks a desktop).
+pub fn get_cursor_pos() -> Result<(i32, i32), String> {
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point) }.map_err(|e| format!("GetCursorPos failed: {e}"))?;
+    Ok((point.x, point.y))
 }
 
 /// Retrieves the window's **visible** screen rectangle via DWM extended frame bounds.

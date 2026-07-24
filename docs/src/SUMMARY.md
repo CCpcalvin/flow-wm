@@ -19,6 +19,7 @@
 - [Architecture](./dev-guide/architecture.md)
 - [Threading Model](./dev-guide/threading-model.md)
 - [Event Pipelines](./dev-guide/event-pipelines.md)
+- [Tile Drag](./dev-guide/tile-drag.md)
 
 ## Layout Engine
 
