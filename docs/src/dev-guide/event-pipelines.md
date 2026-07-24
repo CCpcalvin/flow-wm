@@ -252,7 +252,8 @@ above.
 | Was tiling (active or minimized) | `remove_window()` with focus successor resolution, `remove_from_layout_and_registry()`, animate |
 | Was floating or ignored | `registry.remove_window()` only |
 
-The successor window is chosen by `next_available_window`: prefer the left
+The successor window is chosen by `next_available_window`: prefer a sibling in
+the same column (the window directly below, else the one above), then the left
 column, then the right. If the removed window was focused, the successor gets
 OS-level foreground via `SetForegroundWindow` and registry focus tracking is
 synced.

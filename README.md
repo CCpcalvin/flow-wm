@@ -72,9 +72,9 @@ The daemon launches in the background, and once it's listening your `flow.ahk` f
 
 **4. Everything floats — until you say so.** Open a few windows. Notice that *nothing looks tiled yet*. That's deliberate: most apps are written to float, so FlowWM floats them by default and only tiles what you tell it to. Click one window to focus it.
 
-**5. Tile a window.** Press `ScrollLock + T`. The focused window snaps into the scrolling column layout. Press it again to float it back. FlowWM even *remembers* your choice — next time you open that app, it tiles automatically.
+**5. Tile a window.** Press `Alt + T`. The focused window snaps into the scrolling column layout. Press it again to float it back. FlowWM even *remembers* your choice — next time you open that app, it tiles automatically.
 
-**6. Drive the layout, vim-style.** Now that you have tiled columns, here's the whole move set (hold `ScrollLock`):
+**6. Drive the layout, vim-style.** Now that you have tiled columns, here's the whole move set (hold `Alt`):
 
 | Key | What it does |
 |---|---|
@@ -88,29 +88,33 @@ The daemon launches in the background, and once it's listening your `flow.ahk` f
 | `q` | **Close** the focused window |
 | `p` | **Stop** the daemon (and exit the script) |
 
-That's the whole game. For the complete, annotated list, see the [Command Reference](https://ccpcalvin.github.io/flow-wm/user-guide/dispatch-reference.html).
+That's the whole game. FlowWM uses `Alt` by default; if it collides with an app's menu shortcuts, see [Can I use the Win key?](#can-i-use-the-win-key) below. For the complete, annotated list, see the [Command Reference](https://ccpcalvin.github.io/flow-wm/user-guide/dispatch-reference.html).
 
-### Why ScrollLock? (and how to change it)
+### Can I use the Win key?
 
-`ScrollLock` is the default modifier for one reason: it almost never clashes with anything. If your keyboard lacks it, swap it — open `%USERPROFILE%\.config\flow\flow.ahk` and change the single `ModKey` line at the top:
+FlowWM defaults to `Alt` — it's on every keyboard and matches what other Windows tiling managers (Komorebi, GlazeWM) use. The catch: `Alt+<letter>` is also the menu-shortcut prefix in many apps, so a chord like `Alt + h` can collide with an app that wanted `Alt+H` for itself. If that bothers you, swap the modifier — open `%USERPROFILE%\.config\flow\flow.ahk` and change the single `ModKey` line at the top:
 
 ```ahk
-ModKey := "ScrollLock"   ; try "CapsLock", "F13", or any key from
-                         ; https://www.autohotkey.com/docs/v2/KeyList.htm
+ModKey := "Alt"   ; or "ScrollLock", "CapsLock", "F13", …
+                  ; full list: https://www.autohotkey.com/docs/v2/KeyList.htm
 ```
 
 Change that one line and every chord follows.
 
-> **A note on the Windows key (`LWin`).** It's tempting to set `ModKey := "LWin"`, but Windows special-cases the Win key everywhere — Start menu, `Win+D`, `Win+L`, shortcuts the OS swallows before AutoHotkey ever sees them — so bindings frequently misfire. (This isn't AutoHotkey's fault; the key is intercepted at the system level.) The author daily-drives a keyboard that *hardware*-remaps `LWin` to `ScrollLock` for exactly this reason. The cleanest path is usually a dedicated modifier key.
+A lot of people want the **Windows key** (`LWin`) instead, since it's the "super" key on every other OS. Two ways to get there:
+
+**1. Set `ModKey := "LWin"` directly.** Simplest, and most chords work. But Windows special-cases the Win key — Start menu, `Win+D`, `Win+L`, and friends are swallowed by the OS before AutoHotkey ever sees them — so any chord that clashes with a reserved Win shortcut will misfire. This isn't AutoHotkey's fault; the key is intercepted at the system level.
+
+**2. Hardware-remap `LWin` to a sacrificial key.** This is the zero-compromise path. Pick a key nothing else uses (`ScrollLock`, `F13`, `CapsLock`), set `ModKey` to it in `flow.ahk`, then remap `LWin → <that key>` in your keyboard's firmware (QMK / VIA / the keyboard's config tool). Physically you press `Win + h`; the OS sees `ScrollLock + h` and never triggers a reserved shortcut. The author daily-drives exactly this setup (`LWin` firmware-remapped to `ScrollLock`).
 
 ### Driving it (CLI or hotkeys)
 
 Here's the secret: **every binding above is just a `flow` CLI call.** AutoHotkey runs `flow dispatch <command>` under the hood — which means you can drive FlowWM from any terminal, script, or tool that can run a command:
 
 ```powershell
-flow dispatch focus right          # same as ScrollLock + l
-flow dispatch move-window left     # same as ScrollLock + Shift + h
-flow dispatch expand-column        # same as ScrollLock + .
+flow dispatch focus right          # same as Alt + l
+flow dispatch move-window left     # same as Alt + Shift + h
+flow dispatch expand-column        # same as Alt + .
 flow dispatch set-window tile      # tile the focused window directly
 flow dispatch switch-workspace 2   # jump to workspace 2
 flow query all                     # see what the daemon sees

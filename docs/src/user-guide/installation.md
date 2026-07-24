@@ -68,7 +68,7 @@ This writes two files into your config directory:
 | File | Purpose |
 |------|---------|
 | `%USERPROFILE%\.config\flow\flow.toml` | Application config — column counts, padding, animation, borders, etc. Sensible defaults; heavily commented. |
-| `%USERPROFILE%\.config\flow\flow.ahk` | A ready-to-use AutoHotkey v2 script binding every command to a `ScrollLock + <key>` chord. |
+| `%USERPROFILE%\.config\flow\flow.ahk` | A ready-to-use AutoHotkey v2 script binding every command to a `Alt + <key>` chord. |
 
 > **Existing files are never overwritten.** Re-running `flow config init --ahk`
 > is safe — it only writes files that don't yet exist. To regenerate, delete
@@ -91,7 +91,7 @@ flow start --ahk
 
 This launches the `flowd` daemon in the background, and once it's listening,
 starts your `flow.ahk` script alongside it. You should now be able to press
-`ScrollLock + T` to tile the focused window.
+`Alt + T` to tile the focused window.
 
 Want this on every login? Run this once:
 
@@ -106,7 +106,7 @@ It registers both the daemon and the hotkey script to launch at logon. (Use
 
 ```powershell
 flow query all     # dump the daemon's view of every window/workspace (JSON)
-flow dispatch focus right    # same as ScrollLock + l
+flow dispatch focus right    # same as Alt + l
 flow stop          # shut it down
 ```
 
