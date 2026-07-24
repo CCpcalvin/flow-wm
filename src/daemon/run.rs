@@ -478,11 +478,25 @@ impl FlowWM {
                     self.on_window_name_change(hwnd);
                 }
                 HookEvent::LocationChange { hwnd } => {
-                    // A tracked active-workspace float moved. Store its new
-                    // rect so workspace round-trips restore the dragged
-                    // position. The handler re-checks the tracking flag and
-                    // float-set membership to close the flow-animation race.
-                    self.on_float_location_changed(hwnd);
+                    // During a tile drag, LOCATIONCHANGE for the dragged window
+                    // goes to the drag-move handler; all other LOCATIONCHANGE
+                    // events (floats) go to the float sync path as before.
+                    let is_dragged = self
+                        .drag_state
+                        .as_ref()
+                        .map(|ds| ds.dragged_hwnd == hwnd)
+                        .unwrap_or(false);
+                    if is_dragged {
+                        self.on_drag_move(hwnd);
+                    } else {
+                        self.on_float_location_changed(hwnd);
+                    }
+                }
+                HookEvent::MoveSizeStart { hwnd } => {
+                    self.on_drag_start(hwnd);
+                }
+                HookEvent::MoveSizeEnd { hwnd } => {
+                    self.on_drag_end(hwnd);
                 }
             }
         }

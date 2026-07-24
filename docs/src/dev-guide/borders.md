@@ -188,10 +188,10 @@ the registry.
 Setting `window.border = None` is the canonical "detach" operation — there is no
 separate `detach` method. The old `BorderManager::detach(HWND)` is gone.
 
-## Three Movement Paths
+## Four Movement Paths
 
-Borders move via three different mechanisms depending on the window's state.
-All three share the same repaint mechanism: when `SetWindowPos` changes the
+Borders move via four different mechanisms depending on the window's state.
+All four share the same repaint mechanism: when `SetWindowPos` changes the
 overlay's size, Win32 sends `WM_SIZE`, whose handler rebuilds the bitmap.
 Move-only `SetWindowPos` calls (same size) do not trigger `WM_SIZE` — the
 compositor simply translates the cached bitmap.
@@ -201,6 +201,12 @@ compositor simply translates the cached bitmap.
 | **Animator** | Tiled window animates | Border flattened into `Vec<WindowTarget>` alongside the window; `SetWindowPos` moves both in lockstep | Yes if size changes (`WM_SIZE` → `on_wm_size`); no for move-only frames |
 | **Float hook** | Floating window dragged | `store_float_rect` calls `set_geometry(visible_rect)` after updating the registry | Same: `set_geometry` calls `SetWindowPos`, which triggers `WM_SIZE` if resized |
 | **Teleport** | Bystander workspace switch | `teleport_workspaces` calls `set_geometry(visible_rect)` directly (instant, no animation) | Same |
+| **Tile drag** | Tiled window being title-bar dragged | `on_drag_move` calls `set_geometry(float_border_rect)` directly (same as float hook, not via animator) | Same |
+
+The tile-drag path bypasses the animator because the animator is busy
+reflowing *other* windows during the drag. The dragged window's position is
+controlled by the user's mouse, so sending it through the animator would fight
+the user's drag. See (tile-drag.md) for the full explanation.
 
 ### The overlay is self-sufficient: `WM_SIZE` drives repaint
 
@@ -448,6 +454,8 @@ compile-time test. See [config and persistence](./config-and-persistence.md).
   overlays as `WindowTarget`s (the animator doesn't know an HWND is an overlay).
 - [Event Pipelines](./event-pipelines.md) — the `EVENT_OBJECT_LOCATIONCHANGE`
   hook path that drives float borders.
+- [Tile Drag](./tile-drag.md) — the fourth border movement path used during
+  title-bar drags of tiled windows.
 - [Floating Space](./floating-space.md) — `store_float_rect`, where float
   borders get their geometry.
 - [Window Registry](./window-registry.md) — `InvisibleBounds`, the `Window`

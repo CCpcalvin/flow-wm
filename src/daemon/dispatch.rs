@@ -75,8 +75,19 @@ impl FlowWM {
     /// - **Layout commands**: call layout engine methods and animate the result.
     /// - **Query commands**: return registry data as JSON.
     /// - **Unimplemented commands**: return an error response.
+    ///
+    /// When a tile drag is in progress, layout-mutating commands return
+    /// [`SocketResponse::Busy`] to prevent layout conflicts.
     pub(super) fn dispatch(&mut self, msg: &SocketMessage) -> SocketResponse {
         log::debug!("ipc: dispatching {msg:?}");
+
+        // Reject layout-mutating commands while a tile drag is active — the
+        // layout is in a transient state and concurrent mutations would
+        // corrupt it.
+        if self.drag_state.is_some() && msg.is_layout_mutating() {
+            return SocketResponse::Busy;
+        }
+
         match msg {
             // --- Shutdown ---
             SocketMessage::Stop => {

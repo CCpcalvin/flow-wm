@@ -45,6 +45,7 @@ mod animation;
 mod borders;
 mod config_derive;
 mod dispatch;
+mod drag;
 mod floating_sync;
 mod hooks;
 mod new;

@@ -652,6 +652,7 @@ fn cmd_query_all() -> Result<(), String> {
             println!("flow: ok");
             Ok(())
         }
+        SocketResponse::Busy => Err("daemon is busy (drag in progress), retry shortly".to_string()),
     }
 }
 
@@ -809,8 +810,10 @@ fn grant_foreground_permission() {
 /// activation permission (see [`grant_foreground_permission`]) so the
 /// daemon's `SetForegroundWindow` calls aren't blocked by the Windows
 /// foreground lock. Handles the three response variants:
-/// [`SocketResponse::Ok`], [`SocketResponse::Error`], and
-/// [`SocketResponse::Data`].
+/// Sends a command and maps the response to a [`Result`].
+///
+/// Handles [`SocketResponse::Ok`], [`SocketResponse::Error`],
+/// [`SocketResponse::Data`], and [`SocketResponse::Busy`].
 fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
     grant_foreground_permission();
 
@@ -827,6 +830,7 @@ fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
             println!("flow: {success_msg}");
             Ok(())
         }
+        SocketResponse::Busy => Err("daemon is busy (drag in progress), retry shortly".to_string()),
     }
 }
 
