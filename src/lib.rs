@@ -45,4 +45,5 @@ pub mod ipc;
 pub mod layout;
 pub mod logging;
 pub mod registry;
+pub mod updater;
 pub mod workspace;

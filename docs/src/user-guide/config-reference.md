@@ -322,7 +322,7 @@ When a new window appears, FlowWM checks, in order:
 
 1. **User rules** — your `flow-rules.toml`, top-to-bottom, first match wins.
 2. **Learned rules** — machine-written to `history-flow-rules.toml`. Whenever
-   you press `ScrollLock + T` on a floating window (or float a tiled one),
+   you press `Alt + T` on a floating window (or float a tiled one),
    FlowWM records your choice and applies it automatically next time you open
    that app.
 3. **Bundled defaults** — `default-flow-rules.toml`, embedded in the binary.

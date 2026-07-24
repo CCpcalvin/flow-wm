@@ -22,26 +22,26 @@ flowchart LR
 ```
 
 > **The modifier is configurable.** The default `flow.ahk` holds every chord with
-> `ScrollLock`. That's a single `ModKey` line at the top of the file — change it
+> `Alt`. That's a single `ModKey` line at the top of the file — change it
 > and every chord below follows. The hotkey column below assumes the default
-> `ScrollLock`; your setup may differ.
+> `Alt`; your setup may differ. (If `Alt` clashes with an app's menu shortcuts, see the README's *Can I use the Win key?* section.)
 
 ## Default hotkey map (quick reference)
 
 | Hotkey (default) | Command |
 |---|---|
-| `ScrollLock + h` / `j` / `k` / `l` | `focus left` / `down` / `up` / `right` |
-| `ScrollLock + Shift + h` / `j` / `k` / `l` | `move-window left` / `down` / `up` / `right` |
-| `ScrollLock + Ctrl + h` / `l` | `merge-column left` / `right` |
-| `ScrollLock + Ctrl + Shift + h` / `l` | `promote left` / `right` |
-| `ScrollLock + ,` | `shrink-column` |
-| `ScrollLock + .` | `expand-column` |
-| `ScrollLock + c` | `center` |
-| `ScrollLock + t` | `set-window cycle` |
-| `ScrollLock + q` | `close-window` |
-| `ScrollLock + 1`…`9`, `0` | `switch-workspace 1`…`10` |
-| `ScrollLock + Shift + 1`…`9`, `0` | `move-to-workspace 1`…`10` |
-| `ScrollLock + p` | `flow stop` (shuts the daemon down) |
+| `Alt + h` / `j` / `k` / `l` | `focus left` / `down` / `up` / `right` |
+| `Alt + Shift + h` / `j` / `k` / `l` | `move-window left` / `down` / `up` / `right` |
+| `Alt + Ctrl + h` / `l` | `merge-column left` / `right` |
+| `Alt + Ctrl + Shift + h` / `l` | `promote left` / `right` |
+| `Alt + ,` | `shrink-column` |
+| `Alt + .` | `expand-column` |
+| `Alt + c` | `center` |
+| `Alt + t` | `set-window cycle` |
+| `Alt + q` | `close-window` |
+| `Alt + 1`…`9`, `0` | `switch-workspace 1`…`10` |
+| `Alt + Shift + 1`…`9`, `0` | `move-to-workspace 1`…`10` |
+| `Alt + p` | `flow stop` (shuts the daemon down) |
 
 Commands with **no default hotkey** (run them from the terminal, or bind them
 yourself): `swap-column`, `swap-workspace`.
@@ -64,7 +64,7 @@ flow dispatch focus right
 flow dispatch focus up
 ```
 
-Default hotkey: `ScrollLock + h/j/k/l` (vim-style: h=left, j=down, k=up, l=right).
+Default hotkey: `Alt + h/j/k/l` (vim-style: h=left, j=down, k=up, l=right).
 
 ## Moving & rearranging windows
 
@@ -83,7 +83,7 @@ flow dispatch move-window left
 flow dispatch move-window down
 ```
 
-Default hotkey: `ScrollLock + Shift + h/j/k/l`.
+Default hotkey: `Alt + Shift + h/j/k/l`.
 
 ### `swap-column <direction>`
 
@@ -108,7 +108,7 @@ Hyprland move that makes scrolling feel better than a fixed grid.
 flow dispatch merge-column right
 ```
 
-Default hotkey: `ScrollLock + Ctrl + h` (left) / `ScrollLock + Ctrl + l` (right).
+Default hotkey: `Alt + Ctrl + h` (left) / `Alt + Ctrl + l` (right).
 
 ### `promote <direction>`
 
@@ -119,7 +119,7 @@ column on the chosen side. No-op when the window is already alone in its column.
 flow dispatch promote right
 ```
 
-Default hotkey: `ScrollLock + Ctrl + Shift + h` (left) / `ScrollLock + Ctrl + Shift + l` (right).
+Default hotkey: `Alt + Ctrl + Shift + h` (left) / `Alt + Ctrl + Shift + l` (right).
 
 ## Column sizing & the viewport
 
@@ -132,7 +132,7 @@ column to its right slides further along the canvas.
 flow dispatch expand-column
 ```
 
-Default hotkey: `ScrollLock + .`
+Default hotkey: `Alt + .`
 
 ### `shrink-column`
 
@@ -142,7 +142,7 @@ Narrow the focused column to the previous `column_width` boundary and animate.
 flow dispatch shrink-column
 ```
 
-Default hotkey: `ScrollLock + ,`
+Default hotkey: `Alt + ,`
 
 ### `center`
 
@@ -154,7 +154,7 @@ columns.
 flow dispatch center
 ```
 
-Default hotkey: `ScrollLock + c`
+Default hotkey: `Alt + c`
 
 ## Window mode (float ↔ tile)
 
@@ -176,7 +176,7 @@ flow dispatch set-window tile
 flow dispatch set-window cycle
 ```
 
-Default hotkey: `ScrollLock + t` (cycle).
+Default hotkey: `Alt + t` (cycle).
 
 ## Workspaces
 
@@ -195,7 +195,7 @@ animation. `<id>` is a positive integer (1-based).
 flow dispatch switch-workspace 2
 ```
 
-Default hotkey: `ScrollLock + 1`…`9`, `0` (0 = workspace 10).
+Default hotkey: `Alt + 1`…`9`, `0` (0 = workspace 10).
 
 ### `swap-workspace <id>`
 
@@ -222,7 +222,7 @@ the source workspace.
 flow dispatch move-to-workspace 4
 ```
 
-Default hotkey: `ScrollLock + Shift + 1`…`9`, `0` (0 = workspace 10).
+Default hotkey: `Alt + Shift + 1`…`9`, `0` (0 = workspace 10).
 
 ## Window & daemon lifecycle
 
@@ -238,7 +238,7 @@ destruction.
 flow dispatch close-window
 ```
 
-Default hotkey: `ScrollLock + q`
+Default hotkey: `Alt + q`
 
 ---
 
