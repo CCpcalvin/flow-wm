@@ -109,6 +109,19 @@ enum Commands {
     },
     /// Remove the login autostart shortcut from `shell:startup`.
     DisableAutostart,
+    /// Check for a newer release, or download and install it.
+    ///
+    /// Without `--check`: refuses to proceed while the daemon is running (run
+    /// `flow stop` first), downloads the latest GitHub release, verifies the
+    /// SHA256 sidecar, stages the new binaries, then spawns a detached shim
+    /// that swaps them in after this process exits.
+    Update {
+        /// Only report whether an update is available; do not install. Safe to
+        /// run while the daemon is up. Exits 0 if up to date, non-zero
+        /// otherwise.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// Configuration management subcommands.
@@ -348,6 +361,7 @@ fn main() {
         Commands::Dispatch { command } => cmd_dispatch(command),
         Commands::EnableAutostart { ahk } => cmd_enable_autostart(ahk),
         Commands::DisableAutostart => cmd_disable_autostart(),
+        Commands::Update { check } => cmd_update(check),
     };
 
     if let Err(e) = result {
@@ -505,6 +519,42 @@ fn cmd_disable_autostart() -> Result<(), String> {
     let report = autostart::disable_autostart()?;
     println!("flow: autostart disabled ({})", report.shortcut.display());
     Ok(())
+}
+
+/// Check for an update (`check == true`) or perform an update.
+///
+/// `--check` is always safe: it only queries GitHub and compares versions,
+/// printing the result and exiting non-zero when an update is available.
+///
+/// Without `--check`, refuses to proceed while the daemon is running (its
+/// `flowd.exe` would be locked by Windows and the swap would fail). On success
+/// the new binaries have been staged and a detached shim has been spawned to
+/// swap them in once this process exits.
+fn cmd_update(check: bool) -> Result<(), String> {
+    if check {
+        match flow_wm::updater::check_for_update() {
+            Ok(Some(tag)) => {
+                println!("flow: update available ({tag}) — run \"flow update\" to install");
+                std::process::exit(1);
+            }
+            Ok(None) => {
+                println!("flow: up to date");
+                Ok(())
+            }
+            Err(e) => Err(format!("update check failed: {e}")),
+        }
+    } else {
+        if transport::is_daemon_running() {
+            return Err("daemon is running — run \"flow stop\" first".into());
+        }
+        match flow_wm::updater::perform_update() {
+            Ok(tag) => {
+                println!("flow: updated to {tag} — run \"flow start\" to launch the daemon");
+                Ok(())
+            }
+            Err(e) => Err(format!("update failed: {e}")),
+        }
+    }
 }
 
 /// Dispatch a configuration subcommand.
@@ -1162,6 +1212,48 @@ mod tests {
             result.is_err(),
             "'flow disable-autostart' with a positional arg should fail"
         );
+    }
+
+    // --- update parsing ---
+    //
+    // `flow update` has one optional flag (`--check`). The three cases below
+    // pin both flag states and that no positional or unknown flag is accepted.
+
+    #[test]
+    fn parse_update_default() {
+        // Positive: `flow update` parses with check = false (the install path).
+        let cli = Cli::try_parse_from(["flow", "update"]).unwrap();
+        match cli.command {
+            Commands::Update { check: false } => {}
+            other => panic!("expected Update {{ check: false }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_update_check_flag() {
+        // Positive: `flow update --check` parses with check = true.
+        let cli = Cli::try_parse_from(["flow", "update", "--check"]).unwrap();
+        match cli.command {
+            Commands::Update { check: true } => {}
+            other => panic!("expected Update {{ check: true }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_update_extra_arg_fails() {
+        // Negative: update takes no positional args.
+        let result = Cli::try_parse_from(["flow", "update", "unexpected"]);
+        assert!(
+            result.is_err(),
+            "'flow update' with a positional arg should fail"
+        );
+    }
+
+    #[test]
+    fn parse_update_unknown_flag_fails() {
+        // Negative: only --check is accepted.
+        let result = Cli::try_parse_from(["flow", "update", "--bogus"]);
+        assert!(result.is_err(), "unknown flag should fail");
     }
 
     #[test]
