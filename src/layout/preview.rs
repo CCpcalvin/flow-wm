@@ -1,8 +1,11 @@
 //! Drop-zone preview: pure computation of a layout after a drag-and-drop move.
 //!
-//! Provides [`preview_move`] which clones the virtual layout, applies a
-//! move operation, and projects to actual coordinates — all without touching
-//! any live state or Win32 APIs.
+//! Provides [`preview_move`] (move a window already in the layout),
+//! [`preview_insert`] (insert a window not yet in the layout — e.g. a float
+//! being dragged into the grid), and [`preview_gap_close`] (preview the
+//! remaining tiles filling the gap a dragged tile would leave behind). All
+//! three clone the virtual layout, apply their operation, and project to
+//! actual coordinates — without touching any live state or Win32 APIs.
 //!
 //! (`docs/src/dev-guide/tile-drag.md`)
 
@@ -101,6 +104,117 @@ pub fn preview_move(
     }
 
     // Step 4: Project to actual screen coordinates.
+    let actual = projection::project(&layout, monitor, &config.padding);
+
+    Some(AppliedLayout {
+        virtual_layout: layout,
+        actual_layout: actual,
+    })
+}
+
+/// Computes the layout that would result from inserting `dragged_id` (not
+/// currently in the layout) into `zone`.
+///
+/// Unlike [`preview_move`], this is an **insert-only** operation: it assumes
+/// `dragged_id` is NOT in `virtual_layout` (e.g. a float window being dragged
+/// back into the tiling grid). The window is inserted at the target zone
+/// without any prior removal step, and no source-column shift adjustment is
+/// applied (nothing was removed).
+///
+/// Returns `None` if:
+/// - the zone is `ScrollLeft` or `ScrollRight` (not a layout mutation),
+/// - `dragged_id` is already present in the layout (caller error — use
+///   [`preview_move`] instead, since this function refuses to create a
+///   duplicate),
+/// - the target column is out of bounds for a `Row` zone.
+///
+/// # Zone → mutation mapping
+///
+/// - `Column { col }` → new single-row column at index `col` (clamped to append)
+/// - `Row { col, row }` → new row at position `row` in column `col`
+/// - `ScrollLeft` / `ScrollRight` → `None` (not a layout mutation)
+#[must_use]
+pub fn preview_insert(
+    virtual_layout: &VirtualLayout,
+    dragged_id: WindowId,
+    zone: DropZone,
+    config: &MutationConfig,
+    monitor: &MonitorInfo,
+) -> Option<AppliedLayout> {
+    // Scroll zones are not layout mutations.
+    if matches!(zone, DropZone::ScrollLeft | DropZone::ScrollRight) {
+        return None;
+    }
+
+    // This function is for windows NOT yet in the layout. If the id is already
+    // present, the caller should have used preview_move; bail out rather than
+    // risk a duplicate insertion.
+    if virtual_layout.find_window(dragged_id).is_some() {
+        return None;
+    }
+
+    // Preserve the original viewport offset (no removal step to clamp it).
+    let original_offset = virtual_layout.viewport_offset;
+
+    let mut layout = virtual_layout.clone();
+
+    match zone {
+        DropZone::Column { col } => {
+            // No source removal → no index shift. Clamp to append at the end.
+            let pos = col.min(layout.columns.len());
+            let new_col = make_single_row_column(dragged_id, config.column_width as i32, config);
+            layout.columns.insert(pos, new_col);
+        }
+        DropZone::Row { col, row } => {
+            if col >= layout.columns.len() {
+                return None;
+            }
+            insert_row_at(&mut layout, col, row, dragged_id, config);
+        }
+        DropZone::ScrollLeft | DropZone::ScrollRight => return None,
+    }
+
+    layout.viewport_offset = original_offset;
+
+    let actual = projection::project(&layout, monitor, &config.padding);
+
+    Some(AppliedLayout {
+        virtual_layout: layout,
+        actual_layout: actual,
+    })
+}
+
+/// Computes the layout that would result from removing `dragged_id` — i.e.
+/// the remaining tiles closing the gap it leaves behind.
+///
+/// Used for the **center gap-closing preview**: while a tile is dragged over
+/// the center (uncovered) region, this shows the user where the remaining
+/// windows would land if the dragged window were promoted to float on release.
+/// The preview is computed without committing, so the actual tiling state is
+/// untouched until the user releases.
+///
+/// Unlike the removal inside [`preview_move`], this preserves the original
+/// viewport offset so the preview does not pan the camera.
+///
+/// Returns `None` if `dragged_id` is not in the layout (e.g. a float source,
+/// for which there is no gap to close).
+#[must_use]
+pub fn preview_gap_close(
+    virtual_layout: &VirtualLayout,
+    dragged_id: WindowId,
+    config: &MutationConfig,
+    monitor: &MonitorInfo,
+) -> Option<AppliedLayout> {
+    // The dragged window must exist in the layout for there to be a gap.
+    virtual_layout.find_window(dragged_id)?;
+
+    let original_offset = virtual_layout.viewport_offset;
+
+    let mut layout = remove_window(virtual_layout, dragged_id, config);
+
+    // Preserve the original viewport offset so the preview does not pan.
+    layout.viewport_offset = original_offset;
+
     let actual = projection::project(&layout, monitor, &config.padding);
 
     Some(AppliedLayout {
@@ -669,5 +783,289 @@ mod tests {
             .is_none(),
             "dropping a window back into its own row slot should be a no-op"
         );
+    }
+
+    // ── preview_insert (float-source: window NOT in layout) ────────────────
+
+    #[test]
+    fn insert_column_at_index_zero() {
+        // Layout [A], [B, C]. Insert W99 (absent) as Column{col:0} →
+        // [W99], [A], [B, C]. No removal, so no shift adjustment.
+        let layout = two_col_layout();
+        let applied = preview_insert(
+            &layout,
+            WindowId(99),
+            DropZone::Column { col: 0 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("should produce layout");
+        assert_eq!(applied.virtual_layout.columns.len(), 3);
+        assert_eq!(
+            applied.virtual_layout.columns[0].rows[0].window_id,
+            WindowId(99)
+        );
+        assert_eq!(
+            applied.virtual_layout.columns[1].rows[0].window_id,
+            WindowId(1)
+        ); // A unmoved
+    }
+
+    #[test]
+    fn insert_column_clamps_to_append() {
+        // Out-of-range col index clamps to append at the end.
+        let layout = two_col_layout();
+        let applied = preview_insert(
+            &layout,
+            WindowId(99),
+            DropZone::Column { col: 99 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("should produce layout");
+        assert_eq!(applied.virtual_layout.columns.len(), 3);
+        assert_eq!(
+            applied.virtual_layout.columns[2].rows[0].window_id,
+            WindowId(99)
+        );
+    }
+
+    #[test]
+    fn insert_row_into_column() {
+        // Layout [A], [B, C]. Insert W99 as Row{col:0,row:0} → [W99, A], [B, C].
+        let layout = two_col_layout();
+        let applied = preview_insert(
+            &layout,
+            WindowId(99),
+            DropZone::Row { col: 0, row: 0 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("should produce layout");
+        assert_eq!(applied.virtual_layout.columns.len(), 2);
+        let col = &applied.virtual_layout.columns[0];
+        assert_eq!(col.rows.len(), 2);
+        assert_eq!(col.rows[0].window_id, WindowId(99));
+        assert_eq!(col.rows[1].window_id, WindowId(1));
+    }
+
+    #[test]
+    fn insert_row_out_of_bounds_returns_none() {
+        let layout = two_col_layout();
+        assert!(
+            preview_insert(
+                &layout,
+                WindowId(99),
+                DropZone::Row { col: 5, row: 0 },
+                &test_config(),
+                &test_monitor(),
+            )
+            .is_none(),
+            "Row zone on a non-existent column should return None"
+        );
+    }
+
+    #[test]
+    fn insert_refuses_window_already_in_layout() {
+        // W1 is in the layout — preview_insert must refuse to duplicate it.
+        let layout = two_col_layout();
+        assert!(
+            preview_insert(
+                &layout,
+                WindowId(1),
+                DropZone::Column { col: 0 },
+                &test_config(),
+                &test_monitor(),
+            )
+            .is_none(),
+            "preview_insert must return None when the window is already in the layout"
+        );
+    }
+
+    #[test]
+    fn insert_scroll_zone_returns_none() {
+        let layout = two_col_layout();
+        assert!(
+            preview_insert(
+                &layout,
+                WindowId(99),
+                DropZone::ScrollRight,
+                &test_config(),
+                &test_monitor(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn insert_preserves_viewport_offset() {
+        let h1 = distribute_heights(1, 1080, 4)[0];
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_row(960, Row::new(WindowId(1), h1)),
+                Column::with_row(960, Row::new(WindowId(2), h1)),
+            ],
+            960, // scrolled one column right
+        );
+        let applied = preview_insert(
+            &layout,
+            WindowId(99),
+            DropZone::Column { col: 0 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("should produce layout");
+        assert_eq!(
+            applied.virtual_layout.viewport_offset, 960,
+            "preview_insert must preserve the viewport offset"
+        );
+    }
+
+    #[test]
+    fn insert_grows_window_count_by_one() {
+        let layout = three_col_layout(); // 4 windows
+        let applied = preview_insert(
+            &layout,
+            WindowId(99),
+            DropZone::Column { col: 1 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("should produce layout");
+        assert_eq!(applied.virtual_layout.window_count(), 5);
+        assert_eq!(applied.actual_layout.entries.len(), 5);
+    }
+
+    #[test]
+    fn insert_column_into_empty_layout() {
+        // Empty grid + float→tile drop → the float becomes the only column.
+        // This is the zero-state edge case for preview_insert
+        // (every pure fn needs an empty-layout case).
+        let empty = VirtualLayout::new();
+        let applied = preview_insert(
+            &empty,
+            WindowId(99),
+            DropZone::Column { col: 0 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("empty layout should accept a Column-zone insert");
+        assert_eq!(applied.virtual_layout.columns.len(), 1);
+        assert_eq!(
+            applied.virtual_layout.columns[0].rows[0].window_id,
+            WindowId(99)
+        );
+        assert_eq!(applied.virtual_layout.window_count(), 1);
+        assert_eq!(applied.actual_layout.entries.len(), 1);
+
+        // Row zone on an empty layout has no target column (0 >= 0) → None.
+        assert!(
+            preview_insert(
+                &empty,
+                WindowId(99),
+                DropZone::Row { col: 0, row: 0 },
+                &test_config(),
+                &test_monitor(),
+            )
+            .is_none(),
+            "Row zone on an empty layout must return None (no column to insert into)"
+        );
+    }
+
+    #[test]
+    fn insert_row_clamps_row_index_to_append() {
+        // Row index beyond the column's row count must clamp to append at the
+        // bottom of the target column. Exercises insert_row_at's row_idx.min
+        // clamp on the preview_insert path.
+        // [A], [B, C] → insert W99 as Row{col:1, row:99} → [A], [B, C, W99].
+        let layout = two_col_layout();
+        let applied = preview_insert(
+            &layout,
+            WindowId(99),
+            DropZone::Row { col: 1, row: 99 },
+            &test_config(),
+            &test_monitor(),
+        )
+        .expect("valid column with overflowing row index should clamp");
+        let col = &applied.virtual_layout.columns[1];
+        assert_eq!(col.rows.len(), 3);
+        assert_eq!(col.rows.last().unwrap().window_id, WindowId(99));
+        // Original rows keep their relative order.
+        assert_eq!(col.rows[0].window_id, WindowId(2));
+        assert_eq!(col.rows[1].window_id, WindowId(3));
+    }
+
+    // ── preview_gap_close (center gap-closing preview) ─────────────────────
+
+    #[test]
+    fn gap_close_removes_window_and_keeps_others() {
+        // [A], [B, C] → remove A → [B, C] (col 0).
+        let layout = two_col_layout();
+        let applied = preview_gap_close(&layout, WindowId(1), &test_config(), &test_monitor())
+            .expect("should produce layout");
+        assert_eq!(applied.virtual_layout.columns.len(), 1);
+        let col = &applied.virtual_layout.columns[0];
+        assert_eq!(col.rows.len(), 2);
+        assert_eq!(col.rows[0].window_id, WindowId(2));
+        assert_eq!(col.rows[1].window_id, WindowId(3));
+    }
+
+    #[test]
+    fn gap_close_removes_middle_window_of_multi_row_column() {
+        // remove C (col 1, row 1) → [A], [B]. Col 1 survives with one row.
+        let layout = two_col_layout();
+        let applied = preview_gap_close(&layout, WindowId(3), &test_config(), &test_monitor())
+            .expect("should produce layout");
+        assert_eq!(applied.virtual_layout.columns.len(), 2);
+        assert_eq!(
+            applied.virtual_layout.columns[1].rows[0].window_id,
+            WindowId(2)
+        );
+        assert_eq!(applied.virtual_layout.columns[1].rows.len(), 1);
+    }
+
+    #[test]
+    fn gap_close_not_in_layout_returns_none() {
+        // A float-source drag has no gap to close.
+        let layout = two_col_layout();
+        assert!(
+            preview_gap_close(&layout, WindowId(99), &test_config(), &test_monitor()).is_none(),
+            "preview_gap_close must return None when the window is not in the layout"
+        );
+    }
+
+    #[test]
+    fn gap_close_preserves_viewport_offset() {
+        let h1 = distribute_heights(1, 1080, 4)[0];
+        let h2 = distribute_heights(2, 1080, 4);
+        let layout = VirtualLayout::with_columns(
+            vec![
+                Column::with_row(960, Row::new(WindowId(1), h1)),
+                Column::with_rows(
+                    960,
+                    vec![Row::new(WindowId(2), h2[0]), Row::new(WindowId(3), h2[1])],
+                ),
+            ],
+            960, // scrolled one column right
+        );
+        let applied = preview_gap_close(&layout, WindowId(2), &test_config(), &test_monitor())
+            .expect("should produce layout");
+        assert_eq!(
+            applied.virtual_layout.viewport_offset, 960,
+            "preview_gap_close must preserve the viewport offset (no camera pan during preview)"
+        );
+    }
+
+    #[test]
+    fn gap_close_single_window_yields_empty_layout() {
+        // Removing the only window leaves an empty layout — a valid (Some)
+        // result; the animation layer no-ops on empty actual layouts.
+        let h1 = distribute_heights(1, 1080, 4)[0];
+        let layout =
+            VirtualLayout::with_columns(vec![Column::with_row(960, Row::new(WindowId(1), h1))], 0);
+        let applied = preview_gap_close(&layout, WindowId(1), &test_config(), &test_monitor())
+            .expect("should produce layout");
+        assert!(applied.virtual_layout.columns.is_empty());
+        assert!(applied.actual_layout.entries.is_empty());
     }
 }
