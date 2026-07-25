@@ -21,27 +21,45 @@ use windows::Win32::Foundation::HWND;
 
 use crate::borders::{BorderState, style_for_state};
 use crate::common::{Rect, WindowId};
-use crate::layout::mutations::ensure_column_visible;
-use crate::layout::preview::{DropZone, preview_move};
+use crate::layout::mutations::{MutationConfig, ensure_column_visible};
+use crate::layout::preview::{DropZone, preview_gap_close, preview_insert, preview_move};
 use crate::layout::types::{AppliedLayout, MonitorInfo};
-use crate::registry::hooks::{clear_dragged_hwnd, set_dragged_hwnd};
-use crate::registry::types::{TilingState, WindowState};
+use crate::registry::hooks::{clear_dragged_hwnd, remove_float_hwnd, set_dragged_hwnd};
+use crate::registry::types::{FloatingState, TilingState, WindowState};
 use crate::registry::win32 as registry_win32;
 
 use super::borders::float_border_rect;
 use super::types::FlowWM;
 
-/// State held while the user is dragging a tiled window.
+/// Which kind of window started the drag, recorded at `MoveSizeStart`.
 ///
-/// Entered on `MoveSizeStart` for a `Tiling::Active` window and dropped on
-/// `MoveSizeEnd`. The drag handler reads this to know which window is being
-/// dragged and what drop zone it's currently over.
+/// Drives the small behavioral differences between the two sources: a tile
+/// sources lives in the virtual layout (so moves use [`preview_move`] and a
+/// center dwell fires the gap-closing preview), while a float source is NOT in
+/// the layout (so inserts use [`preview_insert`] and the center region is a
+/// no-op — there is no gap to close). (`docs/src/dev-guide/tile-drag.md`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DragSource {
+    /// Drag began on a `Tiling(Active)` window.
+    Tile,
+    /// Drag began on a `Floating(Active)` window.
+    Float,
+}
+
+/// State held while the user is dragging a window.
+///
+/// Entered on `MoveSizeStart` for a `Tiling::Active` or `Floating::Active`
+/// window and dropped on `MoveSizeEnd`. The drag handler reads this to know
+/// which window is being dragged, where it came from ([`DragSource`]), and
+/// what drop zone it is currently over.
 ///
 /// # Dwell timer
 ///
 /// Zone activation is **dwell-based**: the cursor must rest inside a zone for
 /// `config.drag.dwell_time_ms` before the zone "fires" (commits a preview or
 /// scrolls). This prevents accidental activations while sweeping across zones.
+/// The same dwell applies to the center (uncovered) region for tile sources,
+/// firing the gap-closing preview.
 ///
 /// # Animation lock
 ///
@@ -52,6 +70,8 @@ pub(super) struct DragState {
     pub(super) dragged_id: WindowId,
     /// The raw HWND value (for `GetWindowRect`, `DRAGGED_HWND` global).
     pub(super) dragged_hwnd: isize,
+    /// Whether the drag started on a tile or a float.
+    pub(super) source: DragSource,
     /// The drop zone currently under the cursor, or `None` if in center/uncovered.
     pub(super) current_zone: Option<DropZone>,
     /// When the cursor entered `current_zone` (for dwell timing).
@@ -59,6 +79,11 @@ pub(super) struct DragState {
     pub(super) zone_entered_at: Option<Instant>,
     /// When the animation lock expires (`None` = not locked).
     pub(super) unlock_at: Option<Instant>,
+    /// Whether the non-committing center gap-closing preview is currently
+    /// showing. Set when a tile source dwells in the center; cleared (and the
+    /// intact layout re-animated) as soon as the cursor leaves the center or a
+    /// directional zone fires. Always `false` for float sources.
+    pub(super) center_preview_active: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,28 +318,34 @@ fn visible_column_rects(layout: &AppliedLayout, monitor: &MonitorInfo) -> Vec<(u
 // and LocationChange events during a tile drag.
 
 impl FlowWM {
-    /// Begin a tile-window drag.
+    /// Begin a window drag (tile or float source).
     ///
-    /// Called on `MoveSizeStart` for a tiled window. If the window is
-    /// `Tiling(TilingState::Active)`, records its origin state and signals
-    /// the hook thread to forward its `LOCATIONCHANGE` events.
+    /// Called on `MoveSizeStart` for any tracked window. Enters the drag state
+    /// machine when the window is `Tiling(Active)` or `Floating(Active)`, and
+    /// signals the hook thread to forward the window's `LOCATIONCHANGE` events
+    /// to [`on_drag_move`](Self::on_drag_move) for the duration of the drag
+    /// (the float sync path is bypassed while `drag_state` is `Some`).
     ///
-    /// No-op if the window is not found or not in `Tiling::Active` state.
+    /// No-op if the window is not found or is in neither active state.
     pub(super) fn on_drag_start(&mut self, hwnd: isize) {
         let hwnd_handle = HWND(hwnd as *mut _);
         let Some(window) = self.registry.get_window(hwnd_handle) else {
             return;
         };
-        let WindowState::Tiling(TilingState::Active { col, row }) = window.state else {
-            return;
+        let source = match window.state {
+            WindowState::Tiling(TilingState::Active { .. }) => DragSource::Tile,
+            WindowState::Floating(FloatingState::Active { .. }) => DragSource::Float,
+            _ => return,
         };
 
         self.drag_state = Some(DragState {
             dragged_id: WindowId(hwnd),
             dragged_hwnd: hwnd,
+            source,
             current_zone: None,
             zone_entered_at: None,
             unlock_at: None,
+            center_preview_active: false,
         });
 
         set_dragged_hwnd(hwnd);
@@ -327,7 +358,7 @@ impl FlowWM {
             border.set_style(focused_style);
         }
 
-        log::debug!("drag start: hwnd={hwnd} col={col} row={row}");
+        log::debug!("drag start: hwnd={hwnd} source={source:?}");
     }
 
     /// Update the drag position — border follows, zones re-evaluated with dwell.
@@ -338,17 +369,29 @@ impl FlowWM {
     /// # Flow
     ///
     /// 1. Border follows the window (direct `set_geometry`, not animator).
-    /// 2. If animation-locked (previous activation still animating), skip.
+    /// 2. If animation-locked (previous directional activation still
+    ///    animating), skip.
     /// 3. Compute zones for current layout, find zone at cursor.
-    /// 4. If zone changed → store it, start dwell timer, return.
-    /// 5. If zone same + dwell expired → activate (commit + animate others),
-    ///    set animation lock.
+    /// 4. If zone changed → cancel any live center preview, store the new
+    ///    zone, start its dwell timer, return.
+    /// 5. If same zone + dwell expired → activate:
+    ///    - **Center** (tile source only) → fire the non-committing
+    ///      gap-closing preview (float sources do nothing in the center).
+    ///    - **Scroll** → scroll the viewport, animate.
+    ///    - **Row / Column** → move (if the window is in the layout) or insert
+    ///      (float source not yet promoted), commit, animate. A float source
+    ///      is finalized to a tile on its first directional activation.
     pub(super) fn on_drag_move(&mut self, hwnd: isize) {
         let now = Instant::now();
 
         let Some(dragged_id) = self.drag_state.as_ref().map(|d| d.dragged_id) else {
             return;
         };
+        let source = self
+            .drag_state
+            .as_ref()
+            .map(|d| d.source)
+            .unwrap_or(DragSource::Tile);
 
         let hwnd_handle = HWND(hwnd as *mut _);
 
@@ -427,9 +470,15 @@ impl FlowWM {
         );
         let new_zone = find_zone_at_point(&zones, cx, cy);
 
-        // 4. Zone change → start dwell timer.
+        // 4. Zone change → cancel any center preview, start dwell timer.
         let current_zone = self.drag_state.as_ref().and_then(|d| d.current_zone);
         if new_zone != current_zone {
+            // Leaving the center while the gap-closing preview is showing →
+            // snap the remaining tiles back to the intact (committed) layout.
+            // The preview is non-committing, so the real layout is unchanged.
+            if current_zone.is_none() {
+                self.cancel_center_preview();
+            }
             if let Some(drag) = self.drag_state.as_mut() {
                 drag.current_zone = new_zone;
                 drag.zone_entered_at = Some(now);
@@ -438,16 +487,30 @@ impl FlowWM {
         }
 
         // 5. Same zone — check dwell timer.
-        let Some(zone) = new_zone else {
-            return; // No zone (center/uncovered).
-        };
-
         let dwell_expired = self
             .drag_state
             .as_ref()
             .and_then(|d| d.zone_entered_at)
             .map(|t| now.duration_since(t) >= dwell)
             .unwrap_or(false);
+
+        let Some(zone) = new_zone else {
+            // Center (uncovered) region. Tile sources fire the non-committing
+            // gap-closing preview on dwell so the user sees where a release
+            // would promote the window to float. Float sources have no gap to
+            // close, so the center is inert for them — the border just follows
+            // the mouse.
+            if dwell_expired && source == DragSource::Tile {
+                self.fire_center_preview(dragged_id, &applied, &config, &monitor);
+                // Consume the dwell so the preview fires once per center entry.
+                // Do NOT arm the animation lock — the preview must remain
+                // interruptible the instant the cursor re-enters a zone.
+                if let Some(drag) = self.drag_state.as_mut() {
+                    drag.zone_entered_at = None;
+                }
+            }
+            return;
+        };
 
         if !dwell_expired {
             return;
@@ -470,12 +533,27 @@ impl FlowWM {
             }
             DropZone::Row { .. } | DropZone::Column { .. } => {
                 let vl = self.active_scrolling().virtual_layout().clone();
-                if let Some(preview) = preview_move(&vl, dragged_id, zone, &config, &monitor) {
+                let in_layout = vl.find_window(dragged_id).is_some();
+                // Tile source (or a float already promoted by an earlier
+                // dwell-fire) → move within the layout. Float source not yet
+                // promoted → insert-only.
+                let preview = if in_layout {
+                    preview_move(&vl, dragged_id, zone, &config, &monitor)
+                } else {
+                    preview_insert(&vl, dragged_id, zone, &config, &monitor)
+                };
+                if let Some(preview) = preview {
                     // Commit internally — subsequent zone detection sees the
                     // new layout and the dragged window's new column exclusion.
                     let applied = self
                         .active_scrolling_mut()
                         .commit_layout(preview.virtual_layout);
+                    // A float source just inserted → finalize float→tile: drop
+                    // it from the floating space + float-tracking set. The
+                    // registry tiling state is assigned by animate_layout below.
+                    if !in_layout {
+                        self.finalize_float_to_tile(dragged_id);
+                    }
                     self.animate_layout(&applied);
                     activated = true;
                 }
@@ -488,6 +566,9 @@ impl FlowWM {
             drag.zone_entered_at = None;
             if activated {
                 drag.unlock_at = Some(now + anim_dur);
+                // Defensive: a directional commit fully overrides any lingering
+                // center preview state.
+                drag.center_preview_active = false;
             }
         }
 
@@ -496,20 +577,105 @@ impl FlowWM {
         }
     }
 
-    /// End the tile-window drag.
+    /// Fire the center gap-closing preview for a tile-source drag if it is not
+    /// already showing.
     ///
-    /// Called on `MoveSizeEnd`. Two outcomes depending on cursor position at
-    /// release:
+    /// Computes the layout with the dragged window removed and animates the
+    /// remaining tiles to their gap-closed positions **without committing** —
+    /// the preview is fully reversed by [`cancel_center_preview`](Self::cancel_center_preview)
+    /// when the cursor leaves the center. The dragged window's border keeps
+    /// following the mouse via the animator exclusion filter.
+    fn fire_center_preview(
+        &mut self,
+        dragged_id: WindowId,
+        applied: &AppliedLayout,
+        config: &MutationConfig,
+        monitor: &MonitorInfo,
+    ) {
+        let already_active = self
+            .drag_state
+            .as_ref()
+            .map(|d| d.center_preview_active)
+            .unwrap_or(true);
+        if already_active {
+            return;
+        }
+        if let Some(gap_closed) =
+            preview_gap_close(&applied.virtual_layout, dragged_id, config, monitor)
+        {
+            if let Some(drag) = self.drag_state.as_mut() {
+                drag.center_preview_active = true;
+            }
+            self.animate_gap_close_preview(&gap_closed);
+        }
+    }
+
+    /// Reverse the center gap-closing preview (if active) by re-animating the
+    /// intact committed layout.
     ///
-    /// - **On a zone** (`current_zone` is `Some`) → snap to committed tile.
-    ///   The layout was already committed during dwell activations (or unchanged
-    ///   if no dwell fired). Animates ALL windows — the dragged window snaps
-    ///   from its physical position to its tiled slot.
+    /// No-op when no preview is showing. Safe to call unconditionally on every
+    /// zone change away from the center: [`animate_layout`](Self::animate_layout)
+    /// re-syncs the registry (a no-op here, since the preview never desynced
+    /// it) and animates the remaining tiles back to their intact positions.
+    fn cancel_center_preview(&mut self) {
+        let was_active = self
+            .drag_state
+            .as_ref()
+            .map(|d| d.center_preview_active)
+            .unwrap_or(false);
+        if !was_active {
+            return;
+        }
+        let intact = {
+            let space = self.active_scrolling();
+            AppliedLayout {
+                virtual_layout: space.virtual_layout().clone(),
+                actual_layout: space.actual_layout().clone(),
+            }
+        };
+        if let Some(drag) = self.drag_state.as_mut() {
+            drag.center_preview_active = false;
+        }
+        self.animate_layout(&intact);
+    }
+
+    /// Finalize a float→tile promotion triggered by a drop-zone dwell-fire.
     ///
-    /// - **Center/uncovered** (`current_zone` is `None`) → promote to float.
+    /// Removes the window from the active workspace's `FloatingSpace` and the
+    /// float-tracking set. The registry state is flipped to `Tiling(Active)`
+    /// by the surrounding [`animate_layout`](Self::animate_layout) call's
+    /// `update_tiling_slots_from_layout`, which assigns col/row from the
+    /// just-committed virtual layout.
+    fn finalize_float_to_tile(&mut self, dragged_id: WindowId) {
+        self.active_workspace_mut().floating.remove(dragged_id);
+        remove_float_hwnd(dragged_id.0);
+    }
+
+    /// End the window drag (tile or float source).
+    ///
+    /// Called on `MoveSizeEnd`. The outcome depends on the drag source and the
+    /// cursor position at release:
+    ///
+    /// **Tile source**
+    ///
+    /// - **On a directional zone** (`current_zone` is `Some`) → snap to its
+    ///   committed tile. The layout was already committed during dwell
+    ///   activations (or unchanged if no dwell fired). Animates ALL windows so
+    ///   the dragged window visibly snaps from its physical position to its
+    ///   tiled slot.
+    /// - **Center / uncovered** (`current_zone` is `None`) → promote to float.
     ///   Removes the window from the tiling layout, registers it in
     ///   [`FloatingSpace`](crate::workspace::FloatingSpace) at the drop
     ///   position, and animates remaining tiled windows to fill the gap.
+    ///
+    /// **Float source**
+    ///
+    /// - **Promoted by a directional dwell-fire** (already in the layout) →
+    ///   snap to its committed tile (same as a tile-source zone drop).
+    /// - **Center / uncovered** (never promoted) → persist the float at its
+    ///   dropped rect. The OS moved the window during the drag and the float
+    ///   sync path was bypassed, so [`store_float_rect`](Self::store_float_rect)
+    ///   records the final rect here.
     pub(super) fn on_drag_end(&mut self, _hwnd: isize) {
         let Some(drag) = self.drag_state.take() else {
             return;
@@ -532,10 +698,31 @@ impl FlowWM {
             return;
         }
 
-        if drag.current_zone.is_some() {
-            self.snap_dragged_to_tile(&drag);
-        } else {
-            self.promote_dragged_to_float(&drag);
+        match drag.source {
+            DragSource::Tile => {
+                if drag.current_zone.is_some() {
+                    self.snap_dragged_to_tile(&drag);
+                } else {
+                    self.promote_dragged_to_float(&drag);
+                }
+            }
+            DragSource::Float => {
+                // A directional dwell-fire already committed the float into the
+                // tiling layout (and finalize_float_to_tile removed it from the
+                // floating space). Otherwise the window stayed a float — its
+                // LOCATIONCHANGE sync was bypassed during the drag, so persist
+                // the dropped rect here.
+                let in_layout = self
+                    .active_scrolling()
+                    .virtual_layout()
+                    .find_window(drag.dragged_id)
+                    .is_some();
+                if in_layout {
+                    self.snap_dragged_to_tile(&drag);
+                } else {
+                    self.store_float_rect(drag.dragged_hwnd);
+                }
+            }
         }
 
         // Re-resolve border style + position for the new window state.
