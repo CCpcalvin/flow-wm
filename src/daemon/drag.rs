@@ -384,14 +384,11 @@ impl FlowWM {
     pub(super) fn on_drag_move(&mut self, hwnd: isize) {
         let now = Instant::now();
 
-        let Some(dragged_id) = self.drag_state.as_ref().map(|d| d.dragged_id) else {
+        let Some(drag) = self.drag_state.as_ref() else {
             return;
         };
-        let source = self
-            .drag_state
-            .as_ref()
-            .map(|d| d.source)
-            .unwrap_or(DragSource::Tile);
+        let dragged_id = drag.dragged_id;
+        let source = drag.source;
 
         let hwnd_handle = HWND(hwnd as *mut _);
 
@@ -592,12 +589,10 @@ impl FlowWM {
         config: &MutationConfig,
         monitor: &MonitorInfo,
     ) {
-        let already_active = self
-            .drag_state
-            .as_ref()
-            .map(|d| d.center_preview_active)
-            .unwrap_or(true);
-        if already_active {
+        let Some(drag) = self.drag_state.as_ref() else {
+            return;
+        };
+        if drag.center_preview_active {
             return;
         }
         if let Some(gap_closed) =
@@ -618,12 +613,10 @@ impl FlowWM {
     /// re-syncs the registry (a no-op here, since the preview never desynced
     /// it) and animates the remaining tiles back to their intact positions.
     fn cancel_center_preview(&mut self) {
-        let was_active = self
-            .drag_state
-            .as_ref()
-            .map(|d| d.center_preview_active)
-            .unwrap_or(false);
-        if !was_active {
+        let Some(drag) = self.drag_state.as_ref() else {
+            return;
+        };
+        if !drag.center_preview_active {
             return;
         }
         let intact = {
