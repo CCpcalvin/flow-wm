@@ -79,6 +79,36 @@ choice rather than a technical limitation:
 GitHub releases API and never touches local files — it is safe to run any time,
 including while the daemon is actively tiling.
 
+## Start-Time Notification
+
+`flow start` can optionally check GitHub for a newer release on each launch and
+print a one-line notification prompting `flow update` when one exists. It is
+**on by default** and controlled by the top-level `check_for_updates` field in
+`flow.toml` (see [Config Reference](../user-guide/config-reference.md)):
+
+```toml
+check_for_updates = true   # set to false to silence the start-time notification
+```
+
+The notification is deliberately non-intrusive:
+
+- **Non-blocking** — the check runs *after* the daemon reports ready, so a slow
+  network can never delay tiling. `flow start` prints `flow: daemon started`
+  first, then the notification if one applies.
+- **Bounded** — the network call is capped by a short timeout, so a dead or
+  unresponsive network resolves in seconds rather than hanging the command. The
+  same bound also applies to the metadata fetch in `flow update`; only the
+  multi-MB archive download is left unbounded.
+- **Best-effort** — every error (offline, parse failure, GitHub outage) is
+  silenced. The daemon always starts regardless of the outcome.
+- **Print-only** — it only echoes `flow: update available (<tag>) — run "flow
+  update" to install`; it never downloads or installs anything.
+
+This automatic check reuses [`check_for_update`](../../src/updater/mod.rs) — the
+same call behind `flow update --check`. That explicit command is **unaffected**
+by the `check_for_updates` flag: a user who disables the automatic notification
+can still ask for a version check on demand.
+
 ## Version Comparison
 
 Versions come from two sources:
