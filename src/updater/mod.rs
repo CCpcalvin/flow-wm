@@ -8,6 +8,7 @@ mod shim;
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -16,6 +17,15 @@ const GH_LATEST: &str = "https://api.github.com/repos/CCpcalvin/flow-wm/releases
 const USER_AGENT: &str = concat!("flow-wm/", env!("CARGO_PKG_VERSION"));
 const ZIP_SUFFIX: &str = "-x86_64.zip";
 const SHA_SUFFIX: &str = "-x86_64.zip.sha256";
+
+/// Upper bound on the version-check network call.
+///
+/// `check_for_update` can fire automatically from `flow start` (when
+/// `check_for_updates` is enabled). A bounded timeout guarantees a dead or slow
+/// network never blocks startup beyond this long. The download path in
+/// `perform_update` is intentionally left unbounded — that path is interactive
+/// and transfers a multi-MB archive.
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Errors that can occur during a self-update.
 #[derive(Debug, Error)]
@@ -95,7 +105,12 @@ fn is_newer(a: (u32, u32, u32), b: (u32, u32, u32)) -> bool {
 }
 
 fn fetch_latest() -> Result<Release, UpdateError> {
-    let mut resp = ureq::get(GH_LATEST)
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(UPDATE_CHECK_TIMEOUT))
+        .build()
+        .into();
+    let mut resp = agent
+        .get(GH_LATEST)
         .header("User-Agent", USER_AGENT)
         .call()?;
     let bytes = resp.body_mut().read_to_vec()?;
