@@ -424,7 +424,7 @@ fn cmd_start(
     // stdout/stderr are discarded. Reuses the daemon's own loaders (same crate),
     // so the verdict matches — no desync between client and daemon.
     let config_dir = config::dirs::resolve_config_dir(config_override.as_deref().map(Path::new));
-    preflight_config_check(&config_dir)?;
+    let config = preflight_config_check(&config_dir)?;
 
     spawn_daemon(log_file_override.as_deref())?;
     wait_for_daemon()?;
@@ -437,7 +437,26 @@ fn cmd_start(
         println!("flow: launched flow.ahk (pid {pid})");
     }
 
+    maybe_notify_update(&config);
+
     Ok(())
+}
+
+/// Best-effort start-time update notification, gated by `check_for_updates`.
+///
+/// Fires only when the user has not opted out. Runs *after* the daemon is ready
+/// so startup is never delayed by the network; the check is bounded by a short
+/// timeout and silences all errors — a missing or failed check never blocks or
+/// aborts startup. Prints nothing unless a strictly newer release is found, and
+/// never downloads or installs. Explicit `flow update --check` is unaffected by
+/// the flag and remains available regardless.
+fn maybe_notify_update(config: &config::FlowConfig) {
+    if !config.check_for_updates {
+        return;
+    }
+    if let Ok(Some(tag)) = flow_wm::updater::check_for_update() {
+        println!("flow: update available ({tag}) — run \"flow update\" to install");
+    }
 }
 
 /// Run a pre-flight config check on the user's terminal before spawning the daemon.
@@ -451,19 +470,22 @@ fn cmd_start(
 ///
 /// `Err(String)` only if `flow.toml` cannot be loaded (identifying file and
 /// cause). A `flow-rules.toml` failure is warned on stderr and does *not* error.
-fn preflight_config_check(config_dir: &Path) -> Result<(), String> {
+/// On success returns the parsed app config so the caller can reuse it without
+/// a second file read (e.g. for the start-time update-notification flag).
+fn preflight_config_check(config_dir: &Path) -> Result<config::FlowConfig, String> {
     let app_path = config::dirs::user_app_config_path_in(config_dir);
-    if let Err(e) = config::load_app_config(&app_path) {
+    let config = match config::load_app_config(&app_path) {
+        Ok(c) => c,
         // Fatal: surface why+where and refuse to spawn.
-        return Err(format!("flow: cannot start: {e}"));
-    }
+        Err(e) => return Err(format!("flow: cannot start: {e}")),
+    };
 
     let rules_path = config::dirs::user_rules_path_in(config_dir);
     if let Err(e) = config::load_rules_config(&rules_path) {
         // Non-fatal: warn on stderr but allow startup with default rules.
         eprintln!("flow: warning: {e}; using default window rules");
     }
-    Ok(())
+    Ok(config)
 }
 
 /// Send a Stop message to the daemon.
@@ -2034,5 +2056,78 @@ mod tests {
         assert!(result.is_ok(), "resolve_editor should always return Ok");
         let editor = result.unwrap();
         assert!(!editor.is_empty(), "editor command should not be empty");
+    }
+
+    // --- preflight_config_check tests ---
+    //
+    // `preflight_config_check` was changed in the start-time update-notification
+    // feature to RETURN the parsed `FlowConfig` (previously `Result<(), String>`)
+    // so `cmd_start` can reuse it for `maybe_notify_update` without a second file
+    // read. These tests pin that new contract: the returned config reflects the
+    // user's `flow.toml`, including the `check_for_updates` flag that gates the
+    // notification. All cases use temp dirs -- no network, no Win32, fully
+    // deterministic. `flow-rules.toml` is intentionally absent (benign -> default
+    // rules), matching the fresh-install path.
+    use std::fs;
+
+    /// Positive (nominal): a valid `flow.toml` that opts out of update checks is
+    /// parsed and returned with `check_for_updates = false`.
+    ///
+    /// This is the exact seam feeding `maybe_notify_update`: a regression that
+    /// discards the parsed config (e.g. returns `FlowConfig::default()`) would
+    /// flip this back to `true` and silently re-enable notifications despite the
+    /// user's opt-out.
+    #[test]
+    fn preflight_config_check_returns_parsed_check_for_updates_flag() {
+        // Arrange: valid flow.toml opting OUT of update checks.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("flow.toml"), "check_for_updates = false\n")
+            .expect("write flow.toml");
+
+        // Act: run the pre-flight check against the temp config dir.
+        let config = preflight_config_check(tmp.path()).expect("valid config should load");
+
+        // Assert: the returned config carries the file's flag through.
+        assert!(
+            !config.check_for_updates,
+            "preflight_config_check must return the parsed config, not a default"
+        );
+    }
+
+    /// Positive (edge): an empty config dir (fresh install, no `flow.toml`) yields
+    /// the compiled defaults, so `check_for_updates` is ON and the notification
+    /// fires by default. Confirms the feature is opt-out, not opt-in, on a clean
+    /// install.
+    #[test]
+    fn preflight_config_check_missing_flow_toml_yields_default_enabled() {
+        // Arrange: empty config dir (neither config file present).
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Act: pre-flight on a dir with no config files at all.
+        let config = preflight_config_check(tmp.path()).expect("missing flow.toml is benign");
+
+        // Assert: compiled defaults apply verbatim.
+        assert!(config.check_for_updates);
+        assert_eq!(config, config::FlowConfig::default());
+    }
+
+    /// Negative: a `flow.toml` that exists but cannot parse is fatal -- startup
+    /// must be refused with the canonical prefix so the user sees why on their
+    /// terminal (the detached daemon's own error output is discarded).
+    #[test]
+    fn preflight_config_check_rejects_malformed_flow_toml() {
+        // Arrange: a flow.toml that exists but is unparseable.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("flow.toml"), "not toml {{{{").expect("write flow.toml");
+
+        // Act: pre-flight must refuse to start.
+        let result = preflight_config_check(tmp.path());
+
+        // Assert: fatal error with the canonical prefix.
+        assert!(result.is_err(), "malformed flow.toml must be fatal");
+        assert!(
+            result.unwrap_err().starts_with("flow: cannot start:"),
+            "error must use the canonical 'flow: cannot start:' prefix"
+        );
     }
 }
