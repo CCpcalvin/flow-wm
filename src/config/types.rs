@@ -145,6 +145,14 @@ pub struct FlowConfig {
 
     /// Tile-drag configuration.
     pub drag: DragConfig,
+    /// Whether `flow start` should query GitHub for a newer release and print a
+    /// one-line notification prompting `flow update` when one exists.
+    ///
+    /// On by default. The check runs *after* the daemon is ready, is bounded by
+    /// a short network timeout, and silences all errors — it never blocks or
+    /// aborts startup. The explicit `flow update --check` command is unaffected
+    /// by this flag. See (`docs/src/dev-guide/updater.md`).
+    pub check_for_updates: bool,
 }
 
 fn default_window_action() -> WindowAction {
@@ -165,6 +173,7 @@ impl Default for FlowConfig {
             floating: FloatingConfig::default(),
             focus: FocusConfig::default(),
             drag: DragConfig::default(),
+            check_for_updates: true,
         }
     }
 }
@@ -984,6 +993,7 @@ strategy = "original_slot"
                 upper_lower_zone_ratio: 0.2,
                 edge_scroll_width: 25,
             },
+            check_for_updates: false,
         };
 
         let toml_str = toml::to_string(&config).expect("serialize all fields");
@@ -1016,6 +1026,17 @@ strategy = "original_slot"
         assert_eq!(parsed.drag.left_right_zone_ratio, 0.3);
         assert_eq!(parsed.drag.upper_lower_zone_ratio, 0.2);
         assert_eq!(parsed.drag.edge_scroll_width, 25);
+        assert!(!parsed.check_for_updates);
+    }
+
+    /// Positive: `check_for_updates` ships enabled by default so the start-time
+    /// notification is opt-out, not opt-in. Mirrors the focused
+    /// default-value guards (`focus_config_default_interval_is_250ms`,
+    /// `border_config_default_overlap_is_one`); the `default-config.toml` sync
+    /// test covers the example-file side.
+    #[test]
+    fn check_for_updates_defaults_to_true() {
+        assert!(FlowConfig::default().check_for_updates);
     }
 
     #[test]

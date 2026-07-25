@@ -88,6 +88,7 @@ in the repo root — `flow config init` copies it verbatim.
 | `column_width` | `Option<u32>` | `None` | Optional fixed pixel width per column. When set, ignores `columns_per_screen`. Useful on ultrawide monitors where you want consistent column sizes regardless of monitor count. |
 | `min_column_width_px` | `u32` | `640` | Floor for column width in pixels. Columns cannot be resized below this. |
 | `min_window_height_px` | `u32` | `100` | Minimum row height in pixels — the floor for any single window's allocated height inside a column. Bounds the maximum number of rows that can stack inside one column. |
+| `check_for_updates` | `bool` | `true` | Whether `flow start` checks GitHub for a newer release and prints a one-line notification prompting `flow update` when one exists. Runs after the daemon is ready, is bounded by a short timeout, and never blocks startup. The explicit `flow update --check` command is unaffected by this flag. |
 
 Example:
 
@@ -96,6 +97,7 @@ columns_per_screen = 4
 # column_width = 1280          # optional fixed width; ignores columns_per_screen
 min_column_width_px = 640
 min_window_height_px = 100
+check_for_updates = true       # set false to silence the start-time update notification
 ```
 
 ### `[padding]` — spacing
