@@ -99,3 +99,13 @@ floating_color = "#AA00FF"
 #   The common (in-sync) pass is a single microsecond-scale read that no-ops.
 [focus]
 foreground_sync_interval_ms = 250
+
+# Loadout save/restore settings.
+#
+# - default_path:  file name (relative to config dir) used by
+#                   `flow loadout save` and `flow loadout restore`
+# - max_age_secs:  seconds before a saved loadout is considered stale;
+#                   set to 0 to disable staleness checks
+[loadout]
+default_path = "loadout.json"
+max_age_secs = 60

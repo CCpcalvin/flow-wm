@@ -687,6 +687,29 @@ impl ScrollingSpace {
         self.apply_mutation(new_layout)
     }
 
+    /// Swap in an entire layout wholesale — the loadout restore primitive.
+    ///
+    /// Builds a new [`VirtualLayout`] from `columns` (each `(width_px, Vec<WindowId>)`
+    /// is one column; rows share equal heights) and `viewport_offset` via the pure
+    /// [`mutations::set_layout`], updates `last_focused_window` to `focus`, then runs
+    /// the standard [`apply_mutation`](Self::apply_mutation) pipeline so the returned
+    /// [`AppliedLayout`] is ready for the animation system. Used by the loadout load
+    /// path to rearrange windows into a previously-saved arrangement.
+    ///
+    /// Unlike [`initialize_windows`](Self::initialize_windows) (one column per window),
+    /// this can express multi-row merged columns.
+    #[must_use]
+    pub fn set_layout(
+        &mut self,
+        columns: Vec<(u32, Vec<WindowId>)>,
+        focus: Option<WindowId>,
+        viewport_offset: i32,
+    ) -> AppliedLayout {
+        let new_layout = mutations::set_layout(&self.config, columns, viewport_offset);
+        self.last_focused_window = focus;
+        self.apply_mutation(new_layout)
+    }
+
     // -----------------------------------------------------------------------
     // Viewport center operations (prefix-sum, variable-width aware)
     // -----------------------------------------------------------------------
@@ -2566,5 +2589,145 @@ mod tests {
             before,
             "no shift when col 0 is already visible"
         );
+    }
+
+    // --- set_layout tests (loadout restore primitive) ---
+
+    #[test]
+    fn set_layout_single_column_single_window() {
+        // Positive: single column with one window — verify column count, focus,
+        // viewport_offset echoed back, entries present.
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let result = engine.set_layout(vec![(960, vec![WindowId(1)])], Some(WindowId(1)), 0);
+        assert_eq!(result.virtual_layout.columns.len(), 1);
+        assert_eq!(result.virtual_layout.columns[0].rows.len(), 1);
+        assert_eq!(
+            result.virtual_layout.columns[0].rows[0].window_id,
+            WindowId(1)
+        );
+        assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
+        assert_eq!(result.virtual_layout.viewport_offset, 0);
+        assert!(!result.actual_layout.entries.is_empty());
+    }
+
+    #[test]
+    fn set_layout_multi_column_one_window_each() {
+        // Positive: multi-column, one window each — verify column order + widths + focus set.
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let result = engine.set_layout(
+            vec![
+                (960, vec![WindowId(10)]),
+                (800, vec![WindowId(20)]),
+                (960, vec![WindowId(30)]),
+            ],
+            Some(WindowId(20)),
+            -100,
+        );
+        assert_eq!(result.virtual_layout.columns.len(), 3);
+        // Column order preserved (widths quantized but IDs order intact).
+        assert_eq!(
+            result.virtual_layout.columns[0].rows[0].window_id,
+            WindowId(10)
+        );
+        assert_eq!(
+            result.virtual_layout.columns[1].rows[0].window_id,
+            WindowId(20)
+        );
+        assert_eq!(
+            result.virtual_layout.columns[2].rows[0].window_id,
+            WindowId(30)
+        );
+        assert_eq!(engine.last_focused_window(), Some(WindowId(20)));
+        assert_eq!(result.virtual_layout.viewport_offset, -100);
+    }
+
+    #[test]
+    fn set_layout_multirow_column() {
+        // Positive: multi-row column (960, vec![W1, W2]) — verify 2 rows in one
+        // column (the key capability initialize_windows can't express).
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let result = engine.set_layout(
+            vec![(960, vec![WindowId(1), WindowId(2)])],
+            Some(WindowId(1)),
+            0,
+        );
+        assert_eq!(result.virtual_layout.columns.len(), 1);
+        assert_eq!(
+            result.virtual_layout.columns[0].rows.len(),
+            2,
+            "multi-row column must have 2 rows"
+        );
+        assert_eq!(
+            result.virtual_layout.columns[0].rows[0].window_id,
+            WindowId(1)
+        );
+        assert_eq!(
+            result.virtual_layout.columns[0].rows[1].window_id,
+            WindowId(2)
+        );
+    }
+
+    #[test]
+    fn set_layout_focus_threaded_through() {
+        // Positive: focus param threaded through — last_focused_window reflects
+        // the passed focus even when it's not the last window.
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let _ = engine.set_layout(
+            vec![
+                (960, vec![WindowId(1)]),
+                (960, vec![WindowId(2)]),
+                (960, vec![WindowId(3)]),
+            ],
+            Some(WindowId(1)), // focus first, not last
+            0,
+        );
+        assert_eq!(
+            engine.last_focused_window(),
+            Some(WindowId(1)),
+            "focus should be WindowId(1), not the last window"
+        );
+    }
+
+    #[test]
+    fn set_layout_viewport_offset_honored() {
+        // Positive: viewport_offset honored — pass a non-zero offset, assert
+        // it's in the returned virtual_layout.viewport_offset.
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let result = engine.set_layout(vec![(960, vec![WindowId(1)])], Some(WindowId(1)), 500);
+        assert_eq!(
+            result.virtual_layout.viewport_offset, 500,
+            "viewport_offset must be passed through verbatim"
+        );
+    }
+
+    #[test]
+    fn set_layout_overwrites_existing_layout() {
+        // Positive: overwrites existing layout — build an engine with add_window
+        // a few times, then set_layout with a different arrangement, assert the
+        // new arrangement replaced the old (column count/contents changed).
+        let mut engine = engine_with_three_columns(); // [W1][W2][W3]
+        assert_eq!(engine.virtual_layout().columns.len(), 3);
+
+        // Replace with a single multi-row column.
+        let result = engine.set_layout(
+            vec![(960, vec![WindowId(10), WindowId(20)])],
+            Some(WindowId(10)),
+            -200,
+        );
+        assert_eq!(
+            result.virtual_layout.columns.len(),
+            1,
+            "old 3-column layout replaced by single column"
+        );
+        assert_eq!(
+            result.virtual_layout.columns[0].rows[0].window_id,
+            WindowId(10)
+        );
+        assert_eq!(
+            result.virtual_layout.columns[0].rows[1].window_id,
+            WindowId(20)
+        );
+        assert_eq!(engine.last_focused_window(), Some(WindowId(10)));
+        assert_eq!(result.virtual_layout.viewport_offset, -200);
     }
 }
