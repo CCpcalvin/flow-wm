@@ -47,6 +47,7 @@ mod config_derive;
 mod dispatch;
 mod floating_sync;
 mod hooks;
+mod loadout;
 mod new;
 mod query;
 mod run;

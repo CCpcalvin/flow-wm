@@ -44,6 +44,13 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     log_file: Option<String>,
 
+    /// Skip auto-restore of the last loadout at startup. Forwarded by
+    /// `flow start --no-restore`. When absent, the daemon restores the
+    /// config-default loadout after initialization (honoring `max_age_secs`);
+    /// a missing or stale loadout silently starts fresh.
+    #[arg(long)]
+    no_restore: bool,
+
     /// Desktop name for test mode (opens and switches to this desktop).
     /// Only available in debug builds.
     #[cfg(debug_assertions)]
@@ -79,7 +86,8 @@ fn main() {
 /// 2. Resolve and initialize the config directory.
 /// 3. Load application config and window rules.
 /// 4. Construct [`FlowWM`] (performs all subsystem init).
-/// 5. Call `flow.run()` to enter the IPC event loop.
+/// 5. Unless `--no-restore`, auto-restore the last loadout (best-effort).
+/// 6. Call `flow.run()` to enter the IPC event loop.
 ///
 /// Returns on `Stop` command or fatal error.
 fn run(args: Args) -> Result<(), String> {
@@ -126,7 +134,7 @@ fn run(args: Args) -> Result<(), String> {
     #[cfg(not(debug_assertions))]
     let desktop_name = None;
 
-    // 5. Build and run — flow owns everything from here.
+    // 5. Build the daemon — flow owns everything from here.
     let mut flow = FlowWM::new(
         app_config,
         user_rules,
@@ -134,6 +142,16 @@ fn run(args: Args) -> Result<(), String> {
         config_dir,
         desktop_name,
     )?;
+
+    // 6. Auto-restore the last loadout unless the user opted out. Runs
+    //    in-process (not via IPC), after the registry + layout are
+    //    initialized and before the event loop starts, so there is no
+    //    startup pipe race. Best-effort: a missing/stale/unmatched loadout
+    //    never blocks startup.
+    if !args.no_restore {
+        flow.try_restore_loadout_default();
+    }
+
     flow.run();
 
     // Graceful exit (Stop command or fatal wait error): rescue any windows
