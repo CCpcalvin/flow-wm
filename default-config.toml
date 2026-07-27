@@ -109,16 +109,15 @@ foreground_sync_interval_ms = 250
 
 # Tile-drag configuration.
 #
-# When a user drags a tiled window by its title bar, drop zones appear around
-# each visible window. After a dwell period, the layout commits the move and
-# other windows animate to their new positions.
+# When a user drags a tiled window by its title bar, a live non-committing
+# preview reflows the other windows to the prospective layout on each zone
+# change; on release the move commits and the dragged window snaps into its
+# slot. Floating windows never enter the drag state machine.
 #
-# - dwell_time_ms:           how long the cursor must hover before commit
-# - left_right_zone_ratio:   fraction of window width for Left/Right zones (each side)
-# - upper_lower_zone_ratio:  fraction of window height for Upper/Lower zones (each side)
-# - edge_scroll_width:       px band at screen edge that triggers viewport scroll
+# - edge_scroll_width:  px band at screen edge that triggers viewport scroll
+# - col_edge_ratio:     fraction of column width for column-insert edge band
+# - col_edge_max_px:    pixel cap on the column-insert hit band
 [drag]
-dwell_time_ms = 50
-left_right_zone_ratio = 0.25
-upper_lower_zone_ratio = 0.35
 edge_scroll_width = 30
+col_edge_ratio = 0.18
+col_edge_max_px = 72
