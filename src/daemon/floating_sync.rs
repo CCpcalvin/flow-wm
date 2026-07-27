@@ -59,9 +59,7 @@ impl FlowWM {
     /// Unlike [`on_float_location_changed`](Self::on_float_location_changed),
     /// this does NOT check `FLOAT_TRACKING_ACTIVE` — the caller gates that.
     /// The resume poll uses this entry point so it can store rects while the
-    /// flag is intentionally off (poll-then-enable ordering). The float-source
-    /// drag-cancel path in `drag::on_drag_end` also uses this to persist the
-    /// drop rect after the drag bypassed the float sync path.
+    /// flag is intentionally off (poll-then-enable ordering).
     ///
     /// Skips silently if `hwnd` is untracked, not an active float, or not in
     /// the active workspace's `FloatingSpace`.

@@ -404,9 +404,10 @@ fn start_batch(
         );
     }
 
-    // All tweens are no-ops — nothing to animate.
+    // All tweens are no-ops — nothing to animate. This is normal during
+    // continuous drag-preview (resubmitting an unchanged layout), so trace.
     if tweens.is_empty() {
-        log::warn!("start_batch: all tweens are no-ops, skipping animation");
+        log::trace!("start_batch: all tweens are no-ops, skipping animation");
         return;
     }
 

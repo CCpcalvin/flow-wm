@@ -86,8 +86,8 @@ impl FlowWM {
     /// committing to [`ScrollingSpace`](crate::workspace::ScrollingSpace).
     ///
     /// The pure-animation core shared by [`animate_layout`] (which syncs the
-    /// registry first) and [`animate_gap_close_preview`] (which must not touch
-    /// the registry, since the preview is non-committing and reversible).
+    /// registry first) and [`animate_preview`] (which must not touch the
+    /// registry, since the preview is non-committing and reversible).
     ///
     /// Honors the active-drag exclusion filter: while `drag_state` is `Some`,
     /// the dragged window and its border overlay are omitted from the target
@@ -201,19 +201,21 @@ impl FlowWM {
         }
     }
 
-    /// Preview-only animation for the center gap-closing hint.
+    /// Non-committing preview animation for a tile drag.
     ///
-    /// During a tile drag, when the cursor dwells in the center (uncovered)
-    /// region, this animates the remaining tiles to the gap-closed positions to
-    /// show the user where they would land on a float-promoting release. It is
+    /// During a tile drag, `on_drag_move` calls this to reflow the *other*
+    /// tiled windows toward their prospective landing positions so the user can
+    /// see where a release would drop the dragged window. It is
     /// **non-committing**: neither the registry nor
     /// [`ScrollingSpace`](crate::workspace::ScrollingSpace) is touched, so the
-    /// preview is fully reversed by calling [`animate_layout`] with the intact
-    /// (committed) layout when the cursor leaves the center. The dragged
-    /// window's border keeps following the mouse via the exclusion filter.
+    /// next preview (or the final commit in
+    /// [`on_drag_end`](super::drag::FlowWM::on_drag_end)) supersedes it. The
+    /// dragged window is omitted from the target list by [`submit_animation`]'s
+    /// active-drag exclusion filter, so it keeps following the mouse via the
+    /// direct `border.set_geometry` calls in `on_drag_move`.
     /// (`docs/src/dev-guide/tile-drag.md`)
-    pub(super) fn animate_gap_close_preview(&mut self, gap_closed: &AppliedLayout) {
-        self.submit_animation(gap_closed);
+    pub(super) fn animate_preview(&mut self, preview: &AppliedLayout) {
+        self.submit_animation(preview);
     }
 
     /// Submit a single combined animation batch spanning multiple workspaces.
