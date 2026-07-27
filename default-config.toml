@@ -33,6 +33,13 @@ min_column_width_px = 640
 # height adjustment of individual rows.
 min_window_height_px = 100
 
+# Whether `flow start` checks GitHub for a newer release and, if one exists,
+# prints a one-line notification prompting `flow update`. The check runs after
+# the daemon is ready, is bounded by a short timeout, and never blocks or
+# aborts startup. Explicit `flow update --check` is always available regardless
+# of this flag. Set to false to silence the start-time notification.
+check_for_updates = true
+
 # Padding / spacing settings in pixels.
 #
 # - window_gap: uniform gap between all elements (windows and screen edges)
