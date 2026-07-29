@@ -6,26 +6,34 @@
 //! [`FlowWM::dispatch`] and share a single save code path so that
 //! `flow loadout save` and the save-on-stop hook behave identically.
 //!
+//! # Window identity: HWND-exact
+//!
+//! The matcher keys each saved slot to its stored `HWND` (see [`WindowRef`]) —
+//! an exact, unambiguous lookup with no scoring or tie-breaking. `exe`/`title`
+//! ride along as diagnostic-only fields so a failed restore can name the
+//! missing window. The rationale for HWND-exact matching (and the rejected
+//! fuzzy alternative) is in the dev guide (`docs/src/dev-guide/loadout.md`).
+//!
 //! # Save algorithm
 //!
 //! Walk every monitor → workspace → join the virtual layout (columns, rows,
-//! viewport offset, focus) with per-window registry metadata (exe, class,
-//! title). Swap `WindowId` for [`WindowRef`] triples. Serialize as JSON.
+//! viewport offset, focus) with per-window registry metadata (HWND, exe,
+//! title). Swap `WindowId` for [`WindowRef`]. Serialize as JSON.
 //!
 //! # Load algorithm (no-partial guarantee)
 //!
-//! 1. Parse the file; reject on stale timestamp (unless `force`).
-//! 2. Build a `HashMap<(exe,class,title), Vec<WindowId>>` pool of live
-//!    tiling/floating windows (skipping `Ignored`).
-//! 3. **Phase B (resolve, no mutation):** greedily pop from each triple's
-//!    pool. If any slot finds a dry pool → abort with error, zero state
-//!    touched.
+//! 1. Parse the file; reject on a non-current `version`; reject on a stale
+//!    timestamp (unless `force`).
+//! 2. Collect the set of live managed windows' `HWND`s (skipping `Ignored`).
+//! 3. **Phase B (resolve, no mutation):** for each loadout slot, pop its
+//!    stored `HWND` from the live set. If any slot's `HWND` is not live →
+//!    abort with a diagnostic error naming `exe`/`title`, zero state touched.
 //! 4. **Phase D (apply):** per-workspace `set_layout` + `replace_all`, then
 //!    sync registry slots/rects.
-//! 5. Leftover tiling windows (still in the pool) are appended as new
-//!    columns on the active workspace.
+//! 5. Leftover tiling windows (still live but unreferenced by the loadout)
+//!    are appended as new columns on the active workspace.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::common::{Rect, WindowId};
@@ -44,16 +52,6 @@ use super::types::FlowWM;
 
 // ── Pure helpers (unit-testable without FlowWM) ────────────────────
 
-/// Build the strict-match triple key for a window identity.
-///
-/// The triple `(exe, class, title)` is the unique identifier used to
-/// match loadout entries to live windows across daemon restarts.
-/// Two windows with the same triple are treated as interchangeable.
-#[must_use]
-fn build_triple(exe: &str, class: &str, title: &str) -> (String, String, String) {
-    (exe.to_string(), class.to_string(), title.to_string())
-}
-
 /// Convert a [`RectJson`] (loadout file format, `w`/`h` fields) to a
 /// [`Rect`] (project-wide format, `width`/`height` fields).
 #[must_use]
@@ -63,6 +61,27 @@ fn rect_json_to_rect(rj: &RectJson) -> Rect {
         y: rj.y,
         width: rj.w,
         height: rj.h,
+    }
+}
+
+/// Resolve a loadout slot's stored [`WindowRef`] against the live set.
+///
+/// On a hit, removes the slot's `HWND` from `live` (so each live window is
+/// claimed by at most one slot) and returns the matching [`WindowId`]. On a
+/// miss, returns an error naming the slot's diagnostic `exe`/`title` so a
+/// failed restore can identify which application did not come back — that
+/// identity is only known at save time, which is why `exe`/`title` are
+/// persisted in the file despite never driving the match.
+///
+/// This is the whole matcher: a single exact `HWND` lookup, no scoring.
+fn resolve_hwnd(live: &mut HashSet<isize>, window: &WindowRef) -> Result<WindowId, String> {
+    if live.remove(&window.hwnd) {
+        Ok(WindowId(window.hwnd))
+    } else {
+        Err(format!(
+            "window not currently open: \"{}\" ({}, hwnd {:#x}) — aborting load (no-partial)",
+            window.title, window.exe, window.hwnd as u64
+        ))
     }
 }
 
@@ -120,7 +139,7 @@ impl FlowWM {
     /// Called from the daemon's boot sequence (see `main::run`) right after
     /// [`FlowWM::new`](Self::new) finishes initializing the registry and
     /// layout, and before the IPC event loop starts. Runs the same code path
-    /// as [`Self::dispatch_loadout_load`] with `force: false`, so the
+    /// as `dispatch_loadout_load` with `force: false`, so the
     /// `max_age_secs` staleness guard applies.
     ///
     /// Never blocks startup: a missing file (first run), a stale loadout
@@ -161,7 +180,18 @@ impl FlowWM {
         let file: LoadoutFile = serde_json::from_str(&raw)
             .map_err(|e| format!("loadout load: failed to parse {resolved:?}: {e}"))?;
 
-        // 2. Staleness guard (silent skip, NOT an error)
+        // 2. Version guard: reject any non-current schema up front. A legacy
+        //    pre-`HWND` file cannot be migrated (HWND can't be synthesized),
+        //    so it is rejected with a reason rather than silently misread.
+        if file.version != LoadoutFile::CURRENT_VERSION {
+            return Err(format!(
+                "unsupported file version {} (expected {}) — rejecting {resolved:?}",
+                file.version,
+                LoadoutFile::CURRENT_VERSION
+            ));
+        }
+
+        // 3. Staleness guard (silent skip, NOT an error)
         if !force && is_stale(&file.saved_at, self.config.loadout.max_age_secs) {
             log::info!(
                 "loadout load: skipping stale loadout from {}",
@@ -170,20 +200,21 @@ impl FlowWM {
             return Ok(());
         }
 
-        // 3. Build pool from live windows
-        let mut pool: HashMap<(String, String, String), Vec<WindowId>> = HashMap::new();
+        // 4. Phase B: resolve every loadout slot's HWND against the live set
+        //    (NO mutation of daemon state). Collect live managed windows by
+        //    HWND first (skip Ignored — they belong to no loadout), then pop
+        //    each slot's stored HWND from that set. `HWND` is the sole identity
+        //    key — a singleton entry per live window — so matching is a trivial
+        //    membership check; the first slot whose HWND is not live aborts the
+        //    entire load (no partial application).
+        let mut live: HashSet<isize> = HashSet::new();
         for win in self.registry.windows() {
-            // Skip Ignored windows — they are not part of any loadout.
             if matches!(win.state, WindowState::Ignored(_)) {
                 continue;
             }
-            let hwnd_isize = win.hwnd.0 as isize;
-            let wid = WindowId(hwnd_isize);
-            let triple = build_triple(&win.exe, &win.class, &win.title);
-            pool.entry(triple).or_default().push(wid);
+            live.insert(win.hwnd.0 as isize);
         }
 
-        // 4. Phase B: resolve all loadout slots (NO mutation)
         struct ResolvedWorkspace {
             workspace_id: u32,
             columns: Vec<(u32, Vec<WindowId>)>,
@@ -199,57 +230,30 @@ impl FlowWM {
             for col_snap in &ws_snap.scrolling.columns {
                 let mut rows = Vec::new();
                 for row_snap in &col_snap.rows {
-                    let triple = build_triple(
-                        &row_snap.window.exe,
-                        &row_snap.window.class,
-                        &row_snap.window.title,
-                    );
-                    let assigned =
-                        pool.get_mut(&triple).and_then(|v| v.pop()).ok_or_else(|| {
-                            "loadout references a window that is not currently open".to_string()
-                        })?;
-                    rows.push(assigned);
+                    rows.push(resolve_hwnd(&mut live, &row_snap.window)?);
                 }
                 columns.push((col_snap.width_px, rows));
             }
 
-            // Resolve floating entries
+            // Resolve floating entries by HWND.
             let mut floating = Vec::new();
             for float_entry in &ws_snap.floating {
-                let triple = build_triple(
-                    &float_entry.window.exe,
-                    &float_entry.window.class,
-                    &float_entry.window.title,
-                );
-                let assigned = pool.get_mut(&triple).and_then(|v| v.pop()).ok_or_else(|| {
-                    "loadout references a window that is not currently open".to_string()
-                })?;
+                let hwnd = resolve_hwnd(&mut live, &float_entry.window)?;
                 let rect = rect_json_to_rect(&float_entry.rect);
-                floating.push((assigned, rect));
+                floating.push((hwnd, rect));
             }
 
-            // Resolve focus: find the already-assigned tiled window whose
-            // original WindowRef matches the snapshot's focus ref. Do NOT
-            // pop from the pool (focus is a tiled window already assigned
-            // above). Walk columns by index to map the matching row ref to
-            // its resolved WindowId.
+            // Focus resolves directly by stored HWND: it must be one of the
+            // tiled windows already assigned to a column above. (The focus
+            // window was popped from `live` as a column row, so we look it up
+            // among the resolved columns rather than re-querying `live`.)
             let focus = ws_snap.scrolling.focus.as_ref().and_then(|focus_ref| {
-                let focus_triple = build_triple(&focus_ref.exe, &focus_ref.class, &focus_ref.title);
-                for (col_idx, col_snap) in ws_snap.scrolling.columns.iter().enumerate() {
-                    for (row_idx, row_snap) in col_snap.rows.iter().enumerate() {
-                        let row_triple = build_triple(
-                            &row_snap.window.exe,
-                            &row_snap.window.class,
-                            &row_snap.window.title,
-                        );
-                        if row_triple == focus_triple
-                            && let Some(wid) = columns.get(col_idx).and_then(|c| c.1.get(row_idx))
-                        {
-                            return Some(*wid);
-                        }
-                    }
-                }
-                None
+                let focus_hwnd = focus_ref.hwnd;
+                columns
+                    .iter()
+                    .flat_map(|(_, rows)| rows.iter())
+                    .find(|wid| wid.0 == focus_hwnd)
+                    .copied()
             });
 
             resolved_workspaces.push(ResolvedWorkspace {
@@ -261,32 +265,19 @@ impl FlowWM {
             });
         }
 
-        // 5. Phase C: identify assigned vs leftover windows
-        let mut all_assigned: HashSet<WindowId> = HashSet::new();
-        for rw in &resolved_workspaces {
-            for (_, rows) in &rw.columns {
-                for wid in rows {
-                    all_assigned.insert(*wid);
-                }
-            }
-            for (wid, _) in &rw.floating {
-                all_assigned.insert(*wid);
-            }
-        }
-
-        // Leftover tiling windows: registry windows in Tiling state (not
-        // Ignored, not Floating) whose id is not in all_assigned.
+        // 5. Leftover tiling windows: live windows still in `live` (not claimed
+        //    by any slot) that are in the Tiling state. These are appended as
+        //    new columns on the active workspace below. Floating leftovers are
+        //    handled per-workspace by `replace_all`; Ignored windows never
+        //    entered `live`.
         let mut leftovers: Vec<WindowId> = Vec::new();
         for win in self.registry.windows() {
-            let is_floating = matches!(win.state, WindowState::Floating(_));
-            let is_ignored = matches!(win.state, WindowState::Ignored(_));
-            if is_ignored || is_floating || !matches!(win.state, WindowState::Tiling(_)) {
+            if !matches!(win.state, WindowState::Tiling(_)) {
                 continue;
             }
-            let hwnd_isize = win.hwnd.0 as isize;
-            let wid = WindowId(hwnd_isize);
-            if !all_assigned.contains(&wid) {
-                leftovers.push(wid);
+            let hwnd = win.hwnd.0 as isize;
+            if live.contains(&hwnd) {
+                leftovers.push(WindowId(hwnd));
             }
         }
 
@@ -388,7 +379,7 @@ impl FlowWM {
     fn build_and_write_loadout(&self, path: &PathBuf) -> Result<(), String> {
         let workspaces = self.snapshot_workspaces();
         let file = LoadoutFile {
-            version: 1,
+            version: LoadoutFile::CURRENT_VERSION,
             saved_at: chrono::Utc::now().to_rfc3339(),
             workspaces,
         };
@@ -477,17 +468,17 @@ impl FlowWM {
             .collect()
     }
 
-    /// Translate a [`WindowId`] to a [`WindowRef`] (exe, class, title) by
-    /// looking up the window in the registry.
+    /// Translate a [`WindowId`] to a [`WindowRef`] keyed by its `HWND`, with
+    /// `exe`/`title` carried as diagnostics.
     ///
-    /// Returns `None` if the window is not found in the registry and logs
-    /// a warning.
+    /// The matcher reads only `hwnd`; `exe`/`title` are persisted so a failed
+    /// restore can name the missing window. Returns `None` (with a warning) if
+    /// the window is not found in the registry.
     fn window_ref_for(&self, wid: WindowId) -> Option<WindowRef> {
-        let hwnd = HWND(wid.0 as *mut _);
-        let win = self.registry.get_window(hwnd)?;
+        let win = self.registry.get_window(HWND(wid.0 as *mut _))?;
         Some(WindowRef {
+            hwnd: wid.0,
             exe: win.exe.clone(),
-            class: win.class.clone(),
             title: win.title.clone(),
         })
     }
@@ -496,30 +487,6 @@ impl FlowWM {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── build_triple: pure helper ────────────────────────────────────
-
-    /// Positive: triple construction produces correct tuple.
-    #[test]
-    fn build_triple_correct() {
-        let t = build_triple("code.exe", "Chrome_WidgetWin_1", "main.rs");
-        assert_eq!(
-            t,
-            (
-                "code.exe".into(),
-                "Chrome_WidgetWin_1".into(),
-                "main.rs".into()
-            )
-        );
-    }
-
-    /// Positive: distinct triples are distinct keys.
-    #[test]
-    fn distinct_triples_are_distinct() {
-        let a = build_triple("a.exe", "cls", "title");
-        let b = build_triple("b.exe", "cls", "title");
-        assert_ne!(a, b);
-    }
 
     // ── rect_json_to_rect: pure conversion ───────────────────────────
 
@@ -565,58 +532,6 @@ mod tests {
         );
     }
 
-    // ── Greedy pool assignment logic ──────────────────────────────────
-
-    /// Positive: every slot matches when the pool has exactly one per triple.
-    #[test]
-    fn greedy_assign_all_match() {
-        let mut pool: HashMap<(String, String, String), Vec<WindowId>> = HashMap::new();
-        let t1 = build_triple("a.exe", "cls", "win1");
-        let t2 = build_triple("a.exe", "cls", "win2");
-        pool.insert(t1.clone(), vec![WindowId(100)]);
-        pool.insert(t2.clone(), vec![WindowId(200)]);
-
-        // Simulate popping for t1 and t2
-        let id1 = pool.get_mut(&t1).and_then(|v| v.pop());
-        let id2 = pool.get_mut(&t2).and_then(|v| v.pop());
-        assert_eq!(id1, Some(WindowId(100)));
-        assert_eq!(id2, Some(WindowId(200)));
-    }
-
-    /// Negative: dry pool triggers abort (no partial).
-    #[test]
-    fn greedy_assign_dry_pool_aborts() {
-        let mut pool: HashMap<(String, String, String), Vec<WindowId>> = HashMap::new();
-        let t = build_triple("a.exe", "cls", "win1");
-        pool.insert(t.clone(), vec![WindowId(100)]);
-
-        // First pop succeeds
-        let id1 = pool.get_mut(&t).and_then(|v| v.pop());
-        assert_eq!(id1, Some(WindowId(100)));
-
-        // Second pop (same triple, pool now empty) → abort
-        let id2 = pool.get_mut(&t).and_then(|v| v.pop());
-        assert_eq!(id2, None, "dry pool must return None (abort signal)");
-    }
-
-    /// Positive: two identical triples are handled correctly (one per pop).
-    #[test]
-    fn greedy_assign_identical_triples() {
-        let mut pool: HashMap<(String, String, String), Vec<WindowId>> = HashMap::new();
-        let t = build_triple("chrome.exe", "cls", "tab");
-        pool.insert(t.clone(), vec![WindowId(10), WindowId(20)]);
-
-        let id1 = pool.get_mut(&t).and_then(|v| v.pop());
-        let id2 = pool.get_mut(&t).and_then(|v| v.pop());
-        assert!(id1.is_some());
-        assert!(id2.is_some());
-        assert_ne!(id1, id2);
-
-        // Third pop → dry
-        let id3 = pool.get_mut(&t).and_then(|v| v.pop());
-        assert_eq!(id3, None);
-    }
-
     // ── is_stale delegation ──────────────────────────────────────────
 
     /// Positive: is_stale is callable from loadout module.
@@ -624,58 +539,5 @@ mod tests {
     fn is_stale_callable() {
         let old = "2020-01-01T00:00:00Z";
         assert!(is_stale(old, 60));
-    }
-
-    // ── Leftover detection (basis for append-as-columns) ──────────────
-
-    /// After greedy assignment, any window still in the pool is a "leftover"
-    /// — a live tiling window not referenced by any loadout slot. The daemon
-    /// appends these as new columns on the active workspace.
-    ///
-    /// This test exercises the pure pool mechanics that
-    /// `dispatch_loadout_load` relies on (FlowWM itself can't be constructed
-    /// in unit tests): build a pool, pop one match per loadout slot, then
-    /// assert the remaining pool entries are exactly the leftovers.
-    // Positive: leftover tiling windows remain in pool after greedy assign.
-    #[test]
-    fn greedy_assign_leftovers_remain_in_pool() {
-        let mut pool: HashMap<(String, String, String), Vec<WindowId>> = HashMap::new();
-        // Loadout references one slot for this triple; the live desktop has
-        // three windows sharing it (e.g. three chrome.exe tabs).
-        let t = build_triple("chrome.exe", "Chrome_WidgetWin_1", "tab");
-        let extra_a = build_triple("code.exe", "Chrome_WidgetWin_1", "main.rs");
-        let extra_b = build_triple("slack.exe", "Slack_Window", "Slack");
-        pool.insert(t.clone(), vec![WindowId(10), WindowId(20), WindowId(30)]);
-        pool.insert(extra_a.clone(), vec![WindowId(40)]);
-        pool.insert(extra_b.clone(), vec![WindowId(50)]);
-
-        // Phase B: resolve the single loadout slot for `t`.
-        let assigned = pool.get_mut(&t).and_then(|v| v.pop());
-        assert_eq!(
-            assigned,
-            Some(WindowId(30)),
-            "pop returns the last pushed id"
-        );
-
-        // Phase C: collect every window still in the pool — these are the
-        // leftovers the daemon appends as columns. Sort by the inner id so the
-        // assertion is order-independent (`WindowId` is a frozen contract that
-        // does not derive `Ord`).
-        let mut leftovers: Vec<WindowId> = pool
-            .values()
-            .flat_map(std::ops::Deref::deref)
-            .copied()
-            .collect();
-        leftovers.sort_by_key(|w| w.0);
-        assert_eq!(
-            leftovers,
-            vec![WindowId(10), WindowId(20), WindowId(40), WindowId(50)],
-            "leftovers must be the two remaining chrome tabs plus code + slack"
-        );
-        // The assigned window must NOT appear in the leftovers.
-        assert!(
-            !leftovers.contains(&WindowId(30)),
-            "assigned window must not be a leftover (no double-placement)"
-        );
     }
 }
