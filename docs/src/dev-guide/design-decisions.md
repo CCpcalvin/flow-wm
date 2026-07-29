@@ -153,3 +153,55 @@ configurable hotkey bindings. This was removed because:
 
 The IPC protocol surface (focus, swap, scroll, resize, etc.) is fully defined and
 stable — any external tool that can write JSON to a named pipe can drive `flow`.
+
+## Loadout Window Identity: HWND-Exact (Not Fuzzy Matching)
+
+The loadout feature (saving and restoring workspace arrangements across
+daemon restarts) identifies windows by their **Win32 `HWND`**, stored directly
+in the loadout file. On load, each saved slot is matched to the live window with
+the identical HWND. If any saved HWND is not currently live, the **entire** load
+aborts and the daemon falls back to its fresh init layout — a strict no-partial
+guarantee.
+
+The alternative considered was **fuzzy similarity matching**: score each candidate
+live window on a combination of exe, class, title, and HWND, then assign the
+best-scoring window to each slot. This was rejected for three reasons.
+
+First, the loadout's job is **resilience, not desired-state declaration**. Its
+purpose is to recover the exact arrangement that existed when the daemon was
+stopped, restarted, or crashed — a window of seconds during which the target
+applications keep running and their HWNDs are stable. HWND is therefore a
+unique, exact, unambiguous key for the only case that actually matters. The
+"save a canonical layout and restore it after a reboot" use case is better
+served by classification config rules (declarative and durable) than by a
+snapshot tied to specific window instances.
+
+Second, fuzzy matching is **information-theoretically unsolvable for the very
+windows that motivated the feature**. Windows Terminal instances share one
+executable and one window class, and their titles (which encode the active
+tab or working directory) are volatile. After a reboot, several identical
+Terminal windows are genuinely indistinguishable — their original slot
+assignments are lost forever. HWND is the only signal that could disambiguate
+them, and across a reboot HWND is meaningless. Fuzzy matching would therefore
+offer to "restore" a layout it cannot restore correctly, failing silently.
+
+Third, fuzzy matching **destroys the no-partial guarantee and drags in a
+layout-simplification algorithm**. "Best match" always returns a candidate, so
+a slot whose window is genuinely absent would be silently force-paired with the
+least-bad survivor, misplacing windows. Applying a partial layout well (skip the
+missing slot, collapse the gap) requires recomputing column and row geometry —
+real layout work for a case that, in the resilience window, essentially never
+occurs, because target applications are independent processes that do not close
+during a daemon restart. Aborting the whole load on any missing HWND avoids both
+the silent-misplacement danger and the simplification algorithm entirely.
+
+Stored alongside the HWND are `exe` and `title`, retained as **diagnostic-only**
+fields: they make the loadout file self-describing at the moment a restore fails
+(a missing window's identity is only known at save time, so it must be persisted
+to be useful at load time). They are never consulted by the matcher. The window
+`class` is dropped as low-value (opaque Win32 identifiers of no use to a human
+reader).
+
+This extends the `WindowId`-as-bridge decision above: `WindowId` bridges the
+registry and layout engine *at runtime*; the stored HWND bridges the same
+identity *across daemon restarts*.
