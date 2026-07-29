@@ -48,8 +48,8 @@ use super::types::FlowWM;
 /// HWND (for `GetWindowRect` and the `DRAGGED_HWND` global), and the drop zone
 /// currently under the cursor (`None` until the first move, and for the
 /// empty-workspace degenerate where [`resolve_drop_zone`] returns `None`).
-/// There is no dwell timer and no animation lock — the preview is continuous
-/// and the commit happens once, on release.
+/// There is no dwell timer. The preview is gated on zone change (see
+/// [`should_submit_preview`]); the commit happens once, on release.
 pub(super) struct DragState {
     /// The layout-engine ID of the dragged window.
     pub(super) dragged_id: WindowId,
@@ -123,17 +123,23 @@ impl FlowWM {
     /// 2. Read the cursor position.
     /// 3. Snapshot the committed layout and resolve the pure drop zone via
     ///    [`resolve_drop_zone`].
-    /// 4. Act on every move (no zone-change gate):
+    /// 4. Act on the resolved zone, gating the preview on zone change:
     ///    - `ScrollLeft` / `ScrollRight` → commit the viewport scroll live and
     ///      animate the (non-dragged) windows to their scrolled slots. Each move
     ///      in the band scrolls one more column, naturally bounded because
-    ///      scroll_left/right return `None` at the content edge.
+    ///      scroll_left/right return None at the content edge. Fires every move
+    ///      (not gated) because scroll is cumulative.
     ///    - `Row` / `Column` → submit a **non-committing** preview
     ///      ([`preview_move`] + [`Self::animate_preview`]) so the other windows
     ///      reflow toward the prospective layout. The committed
     ///      `ScrollingSpace` layout is untouched until [`on_drag_end`].
-    ///      Re-submitting the same zone is harmless: `preview_move` returns the
-    ///      same layout and the animator no-ops on identical targets.
+    ///      Gated on zone change via [`should_submit_preview`]: the animator's
+    ///      `RetargetFromCurrent` policy samples the interpolated position as
+    ///      the new `from` on every submit, so resubmitting an identical target
+    ///      while windows are mid-flight resets the batch and the reflow never
+    ///      completes under continuous cursor movement. Passing through a scroll
+    ///      band (a distinct zone value) naturally invalidates the gate, so the
+    ///      next preview after a scroll always fires.
     ///    - `None` → empty workspace; nothing to preview.
     ///
     /// NOTE: continuous *stationary* edge-scroll (cursor held still at the edge)
@@ -203,12 +209,19 @@ impl FlowWM {
             drag_cfg.col_edge_max_px,
         );
 
-        // 4. Update the tracked zone (used by on_drag_end). There is
-        //    intentionally NO zone-change gate: `preview_move` is idempotent per
-        //    zone (the animator no-ops on identical targets), and scroll is
-        //    cumulative so it must fire on every move to scroll continuously —
-        //    naturally bounded because scroll_left/right return None at the
-        //    content edge.
+        // 4. Update the tracked zone (used by on_drag_end), then act — gating
+        //    the preview on zone change. We capture the previous move's zone
+        //    BEFORE overwriting it. The animator's `RetargetFromCurrent` policy
+        //    samples each window's current interpolated position as the new
+        //    `from` on every submit, so resubmitting an identical (stable)
+        //    target while windows are mid-flight resets the batch's progress to
+        //    zero and the reflow never completes under continuous cursor
+        //    movement. Scroll is exempt: it is cumulative and MUST fire every
+        //    move (advancing one column per move, bounded at the content edge).
+        //    Because a scroll band is itself a distinct zone value, passing
+        //    through it naturally invalidates this gate, so the next preview
+        //    after a scroll always fires.
+        let prev_zone = self.drag_state.as_ref().and_then(|ds| ds.current_zone);
         if let Some(drag) = self.drag_state.as_mut() {
             drag.current_zone = new_zone;
         }
@@ -221,7 +234,7 @@ impl FlowWM {
                 // Viewport commits LIVE during drag (a real view change the
                 // user expects to persist). The dragged window is excluded by
                 // submit_animation's filter; the others animate to their
-                // scrolled slots.
+                // scrolled slots. Not gated: scroll is cumulative.
                 if let Some(scrolled) = self.active_scrolling_mut().scroll_left() {
                     self.animate_layout(&scrolled);
                 }
@@ -231,17 +244,24 @@ impl FlowWM {
                     self.animate_layout(&scrolled);
                 }
             }
-            Some(zone @ (DropZone::Row { .. } | DropZone::Column { .. })) => {
-                // NON-COMMITTING preview — always submit a candidate. The
-                // animator filters from==to tweens and early-returns on an
-                // empty batch, so resubmitting an unchanged layout is free.
-                // On a no-op zone (None — window already at target) target the
-                // committed layout so a stale reflow from a prior zone resets.
+            // NON-COMMITTING preview, gated on zone change (the guard below).
+            // Resubmitting an identical target mid-flight resets the animator
+            // (see `should_submit_preview`), so this arm only fires when the
+            // zone changed. On a no-op move (`preview_move` returns None —
+            // window already at its target) target the committed layout so a
+            // stale reflow from a prior zone resets.
+            Some(zone @ (DropZone::Row { .. } | DropZone::Column { .. }))
+                if should_submit_preview(prev_zone, new_zone) =>
+            {
                 match preview_move(&applied.virtual_layout, dragged_id, zone, &config, &monitor) {
                     Some(preview) => self.animate_preview(&preview),
                     None => self.animate_preview(&applied),
                 }
             }
+            // Zone unchanged from the previous move — skip the preview so a
+            // stable target doesn't reset mid-flight animations. The trailing
+            // debug log still runs.
+            Some(DropZone::Row { .. } | DropZone::Column { .. }) => {}
         }
 
         if let Some(zone) = new_zone {
@@ -316,4 +336,79 @@ impl FlowWM {
 }
 
 // NOTE: drag lifecycle is Win32 orchestration; coverage via the pure
-// resolve_drop_zone tests in layout::preview and manual interactive testing.
+// resolve_drop_zone tests in layout::preview, the should_submit_preview unit
+// tests below, and manual interactive testing.
+
+/// Decide whether a new drop zone warrants a fresh preview animation during a
+/// tile drag.
+///
+/// The preview must be gated on zone change. The animator's default
+/// `RetargetFromCurrent` policy does NOT no-op on identical targets while a
+/// window is mid-flight: it samples the interpolated position as the new `from`
+/// and starts a fresh batch, resetting progress to zero. Resubmitting the same
+/// stable target on every `LOCATIONCHANGE` (which fires per pixel of mouse
+/// movement) therefore prevents the reflow from ever completing, producing the
+/// slow/janky preview symptom.
+///
+/// Only `Row` / `Column` consult this — scroll commits live every move and
+/// `None` previews nothing. Because a scroll band is a distinct zone value,
+/// transitioning through it changes the zone, so the next preview after a
+/// scroll always fires without a special reset.
+#[must_use]
+fn should_submit_preview(prev_zone: Option<DropZone>, new_zone: Option<DropZone>) -> bool {
+    prev_zone != new_zone
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_zone_is_skipped() {
+        // The bug case: cursor holds still inside one zone; resubmitting would
+        // reset mid-flight windows and stall the reflow.
+        let z = Some(DropZone::Column { col: 2 });
+        assert!(!should_submit_preview(z, z));
+    }
+
+    #[test]
+    fn different_column_zone_submits() {
+        assert!(should_submit_preview(
+            Some(DropZone::Column { col: 2 }),
+            Some(DropZone::Column { col: 3 }),
+        ));
+    }
+
+    #[test]
+    fn row_vs_column_zone_submits() {
+        assert!(should_submit_preview(
+            Some(DropZone::Column { col: 2 }),
+            Some(DropZone::Row { col: 2, row: 0 }),
+        ));
+    }
+
+    #[test]
+    fn first_preview_after_idle_submits() {
+        assert!(should_submit_preview(
+            None,
+            Some(DropZone::Column { col: 1 })
+        ));
+    }
+
+    #[test]
+    fn scroll_band_naturally_invalidates_gate() {
+        // Cursor was in a Column zone, passed through ScrollLeft, returned to
+        // the same Column zone — the gate must fire (the committed layout
+        // scrolled, so the preview target moved).
+        let col = Some(DropZone::Column { col: 2 });
+        assert!(should_submit_preview(col, Some(DropZone::ScrollLeft)));
+        assert!(should_submit_preview(Some(DropZone::ScrollLeft), col));
+    }
+
+    #[test]
+    fn leaving_to_none_and_back_submits() {
+        let col = Some(DropZone::Column { col: 2 });
+        assert!(should_submit_preview(col, None));
+        assert!(should_submit_preview(None, col));
+    }
+}
