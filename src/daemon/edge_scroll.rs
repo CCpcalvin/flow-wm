@@ -46,13 +46,7 @@
 //! [`EdgeScrollScheduler::on_scroll_outcome`]. That boolean drives the
 //! `Some`/`None` branching in the state machine (the content edge).
 //!
-//! Ticket 01 delivers this tested core; ticket 02 wires it into the live drag.
-
-// Ticket 01 delivers this tested core; ticket 02 (`edge-scroll-auto-repeat`
-// 02-live-wiring) wires it into the live drag. Until that wiring lands, the
-// public surface has no non-test callers — allow dead code here rather than
-// per-item, and remove this attribute once 02 consumes the module.
-#![allow(dead_code)]
+//! Ticket 01 delivered this tested core; ticket 02 wires it into the live drag.
 
 use std::time::{Duration, Instant};
 
@@ -135,6 +129,7 @@ impl EdgeScrollScheduler {
     }
 
     /// Current state-machine state (for introspection / assertions).
+    #[cfg(test)]
     pub(super) fn state(&self) -> EdgeScrollState {
         self.state
     }
