@@ -125,8 +125,8 @@ foreground_sync_interval_ms = 250
 [drag]
 edge_scroll_width = 30
 col_edge_ratio = 0.18
-col_edge_max_px = 72
-edge_scroll_initial_delay_ms = 400
+col_edge_max_px = 120
+edge_scroll_initial_delay_ms = 500
 edge_scroll_repeat_interval_ms = 240
 
 # Loadout save/restore settings.

@@ -432,7 +432,7 @@ knobs:
 |-------|---------|---------|
 | `edge_scroll_width` | `30` | Pixel width of the left/right monitor-edge scroll bands |
 | `col_edge_ratio` | `0.18` | Fraction of column width used as the column-insert band floor |
-| `col_edge_max_px` | `72` | Pixel cap on the column-insert band (`band = max(1, min(ratio · width, max_px))`) |
+| `col_edge_max_px` | `120` | Pixel cap on the column-insert band (`band = max(1, min(ratio · width, max_px))`) |
 
 Per the project's config-defaults rule, **code is the single source of
 truth**: the `Default` impl on `DragConfig` holds the authoritative defaults,

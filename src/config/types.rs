@@ -817,8 +817,8 @@ pub struct FloatingConfig {
 /// [drag]
 /// edge_scroll_width = 30
 /// col_edge_ratio = 0.18
-/// col_edge_max_px = 72
-/// edge_scroll_initial_delay_ms = 400
+/// col_edge_max_px = 120
+/// edge_scroll_initial_delay_ms = 500
 /// edge_scroll_repeat_interval_ms = 240
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -864,11 +864,11 @@ impl Default for DragConfig {
         Self {
             edge_scroll_width: 30,
             col_edge_ratio: 0.18,
-            col_edge_max_px: 72,
+            col_edge_max_px: 120,
             // The default repeat interval equals the default animation duration
             // (240 ms), so at the default each column's animation lands as the
             // next begins: a continuous glide with no gaps and no jank.
-            edge_scroll_initial_delay_ms: 400,
+            edge_scroll_initial_delay_ms: 500,
             edge_scroll_repeat_interval_ms: 240,
         }
     }
@@ -1173,13 +1173,13 @@ strategy = "original_slot"
     // --- Edge-scroll auto-repeat timing defaults & clamps ---
 
     /// Positive: the two new auto-repeat knobs ship at the design-session
-    /// defaults — a 400 ms first-gap and a 240 ms glide cadence (the latter
+    /// defaults — a 500 ms first-gap and a 240 ms glide cadence (the latter
     /// matching the default animation duration, so each column lands as the
     /// next begins). Mirrors the other focused default-value guards.
     #[test]
     fn drag_config_default_auto_repeat_timings() {
         let drag = DragConfig::default();
-        assert_eq!(drag.edge_scroll_initial_delay_ms, 400);
+        assert_eq!(drag.edge_scroll_initial_delay_ms, 500);
         assert_eq!(drag.edge_scroll_repeat_interval_ms, 240);
     }
 
