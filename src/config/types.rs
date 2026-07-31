@@ -289,6 +289,20 @@ impl FlowConfig {
                 self.min_column_width_px, cw
             ));
         }
+        // Edge-scroll repeat interval: warn (not fail) when the configured value
+        // sits below its effective floor. The runtime clamp via
+        // `effective_repeat_interval_ms` makes the value safe regardless; the
+        // warning tells the user why their value was not used as-is. The initial
+        // delay needs no warning — its floor makes unsafe values silently safe.
+        let effective_repeat = self.drag.effective_repeat_interval_ms(&self.animation);
+        if self.drag.edge_scroll_repeat_interval_ms < effective_repeat {
+            return Err(format!(
+                "drag.edge_scroll_repeat_interval_ms ({}) is below its effective floor ({} ms, \
+                 raised by the spam-guard floor or the enabled animation duration); \
+                 it will be clamped at runtime — set it to at least {} to silence this warning",
+                self.drag.edge_scroll_repeat_interval_ms, effective_repeat, effective_repeat
+            ));
+        }
         Ok(())
     }
 }
@@ -771,6 +785,8 @@ pub struct FloatingConfig {
 /// edge_scroll_width = 30
 /// col_edge_ratio = 0.18
 /// col_edge_max_px = 72
+/// edge_scroll_initial_delay_ms = 400
+/// edge_scroll_repeat_interval_ms = 240
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -786,7 +802,29 @@ pub struct DragConfig {
     /// Pixel cap on the column-insert hit band. The effective band is
     /// `min(col_edge_ratio * column_width, col_edge_max_px)`.
     pub col_edge_max_px: i32,
+    /// Edge-scroll auto-repeat **initial delay** in milliseconds — the gap
+    /// between the immediate scroll fired on entering the band and the first
+    /// repeat. Clamped up to the effective repeat interval at runtime, so `0`
+    /// cleanly means "glide at the normal cadence with no special pause."
+    pub edge_scroll_initial_delay_ms: u32,
+    /// Edge-scroll auto-repeat **repeat interval** in milliseconds — the gap
+    /// between successive column scrolls while the cursor is held in the band.
+    /// Clamped up to the enabled animation duration and the spam-guard floor at
+    /// runtime; a sub-floor value additionally logs a startup warning.
+    pub edge_scroll_repeat_interval_ms: u32,
 }
+
+/// Hardcoded floor on the edge-scroll repeat interval, applied **always** —
+/// even with animation disabled — so the timer can never spin fast enough to
+/// reintroduce the timer-driven "races to the edge" bug.
+///
+/// This is a private engine constant co-located with [`DragConfig`], deliberately
+/// not a user-facing field: shipping the guard and the knob to disable it
+/// together would defeat its purpose. At 80 ms it caps auto-repeat at ~12
+/// columns/second, well above the ~24+/second "dozens" rate that produced the
+/// original symptom. Both the validation warning and the runtime clamp route
+/// through [`DragConfig::effective_repeat_interval_ms`], so they cannot drift.
+const EDGE_SCROLL_SPAM_GUARD_FLOOR_MS: u32 = 80;
 
 impl Default for DragConfig {
     fn default() -> Self {
@@ -794,7 +832,45 @@ impl Default for DragConfig {
             edge_scroll_width: 30,
             col_edge_ratio: 0.18,
             col_edge_max_px: 72,
+            // The default repeat interval equals the default animation duration
+            // (240 ms), so at the default each column's animation lands as the
+            // next begins: a continuous glide with no gaps and no jank.
+            edge_scroll_initial_delay_ms: 400,
+            edge_scroll_repeat_interval_ms: 240,
         }
+    }
+}
+
+impl DragConfig {
+    /// Effective repeat interval the auto-repeat timer uses at runtime:
+    /// `max(configured, animation duration when enabled, spam-guard floor)`.
+    ///
+    /// This is the single source of truth for the repeat-interval floor — both
+    /// the runtime clamp and the validation warning call it, so they cannot
+    /// disagree. The animation-duration bound only applies while animation is
+    /// enabled (a sub-duration repeat would interrupt each animation mid-flight,
+    /// stuttering); the spam-guard floor applies always.
+    #[must_use]
+    pub fn effective_repeat_interval_ms(&self, animation: &AnimationConfig) -> u32 {
+        let mut floor = EDGE_SCROLL_SPAM_GUARD_FLOOR_MS;
+        if animation.enabled {
+            floor = floor.max(animation.duration_ms);
+        }
+        self.edge_scroll_repeat_interval_ms.max(floor)
+    }
+
+    /// Effective initial delay: `max(configured, effective repeat interval)`.
+    ///
+    /// Passing the already-computed effective repeat interval (from
+    /// [`Self::effective_repeat_interval_ms`]) keeps the two clamps in one
+    /// pipeline. A configured `0` therefore means "glide at the normal cadence
+    /// with no special pause" rather than a near-instant double-scroll on entry.
+    /// No warning is emitted for a sub-floor initial delay: its floor makes
+    /// unsafe values silently safe.
+    #[must_use]
+    pub fn effective_initial_delay_ms(&self, effective_repeat_interval_ms: u32) -> u32 {
+        self.edge_scroll_initial_delay_ms
+            .max(effective_repeat_interval_ms)
     }
 }
 
@@ -987,6 +1063,8 @@ strategy = "original_slot"
                 edge_scroll_width: 25,
                 col_edge_ratio: 0.3,
                 col_edge_max_px: 50,
+                edge_scroll_initial_delay_ms: 350,
+                edge_scroll_repeat_interval_ms: 200,
             },
             check_for_updates: false,
         };
@@ -1020,6 +1098,8 @@ strategy = "original_slot"
         assert_eq!(parsed.drag.edge_scroll_width, 25);
         assert_eq!(parsed.drag.col_edge_ratio, 0.3);
         assert_eq!(parsed.drag.col_edge_max_px, 50);
+        assert_eq!(parsed.drag.edge_scroll_initial_delay_ms, 350);
+        assert_eq!(parsed.drag.edge_scroll_repeat_interval_ms, 200);
         assert!(!parsed.check_for_updates);
     }
 
@@ -1031,6 +1111,165 @@ strategy = "original_slot"
     #[test]
     fn check_for_updates_defaults_to_true() {
         assert!(FlowConfig::default().check_for_updates);
+    }
+
+    // --- Edge-scroll auto-repeat timing defaults & clamps ---
+
+    /// Positive: the two new auto-repeat knobs ship at the design-session
+    /// defaults — a 400 ms first-gap and a 240 ms glide cadence (the latter
+    /// matching the default animation duration, so each column lands as the
+    /// next begins). Mirrors the other focused default-value guards.
+    #[test]
+    fn drag_config_default_auto_repeat_timings() {
+        let drag = DragConfig::default();
+        assert_eq!(drag.edge_scroll_initial_delay_ms, 400);
+        assert_eq!(drag.edge_scroll_repeat_interval_ms, 240);
+    }
+
+    /// Positive: at the default config the repeat interval equals the default
+    /// animation duration, so the effective value is unchanged (no clamp, no
+    /// warning). This is the "continuous glide" invariant.
+    #[test]
+    fn effective_repeat_interval_unchanged_at_default() {
+        let drag = DragConfig::default();
+        let anim = AnimationConfig::default();
+        assert_eq!(drag.effective_repeat_interval_ms(&anim), 240);
+    }
+
+    /// Positive: the initial delay floor is the effective repeat interval, so a
+    /// configured `0` cleanly means "no special pause" — it clamps up to the
+    /// repeat cadence rather than producing a near-instant double-scroll.
+    #[test]
+    fn effective_initial_delay_clamps_to_repeat_interval() {
+        let drag = DragConfig {
+            edge_scroll_initial_delay_ms: 0,
+            ..DragConfig::default()
+        };
+        // Effective repeat at default is 240; initial delay clamps up to it.
+        assert_eq!(drag.effective_initial_delay_ms(240), 240);
+        // A larger configured delay is respected as-is.
+        let drag = DragConfig {
+            edge_scroll_initial_delay_ms: 600,
+            ..DragConfig::default()
+        };
+        assert_eq!(drag.effective_initial_delay_ms(240), 600);
+    }
+
+    /// Positive: with animation enabled, a sub-duration repeat interval is
+    /// clamped up to the animation duration (each scroll must let the previous
+    /// animation land, or it retargets mid-flight and stutters).
+    #[test]
+    fn effective_repeat_interval_clamps_to_animation_duration_when_enabled() {
+        let drag = DragConfig {
+            edge_scroll_repeat_interval_ms: 100,
+            ..DragConfig::default()
+        };
+        let anim = AnimationConfig {
+            enabled: true,
+            duration_ms: 300,
+            ..AnimationConfig::default()
+        };
+        assert_eq!(drag.effective_repeat_interval_ms(&anim), 300);
+    }
+
+    /// Positive: with animation disabled, the animation-duration bound drops
+    /// away and only the spam-guard floor applies — so the no-animation path
+    /// still cannot fly to the far end.
+    #[test]
+    fn effective_repeat_interval_uses_spam_guard_floor_when_animation_disabled() {
+        let drag = DragConfig {
+            edge_scroll_repeat_interval_ms: 10,
+            ..DragConfig::default()
+        };
+        let anim = AnimationConfig {
+            enabled: false,
+            duration_ms: 300,
+            ..AnimationConfig::default()
+        };
+        // 10 ms would scroll 100 columns/second — clamped to the 80 ms floor
+        // (~12/second), well above the "dozens" rate that produced the bug.
+        assert_eq!(drag.effective_repeat_interval_ms(&anim), 80);
+    }
+
+    /// Positive: a configured repeat interval above both the animation duration
+    /// and the spam-guard floor is respected verbatim (the clamp only raises,
+    /// never lowers).
+    #[test]
+    fn effective_repeat_interval_respects_value_above_all_floors() {
+        let drag = DragConfig {
+            edge_scroll_repeat_interval_ms: 500,
+            ..DragConfig::default()
+        };
+        let anim = AnimationConfig::default();
+        assert_eq!(drag.effective_repeat_interval_ms(&anim), 500);
+    }
+
+    /// Positive: the default config validates cleanly — the default repeat
+    /// interval equals the default animation duration, so no warning fires.
+    #[test]
+    fn config_validate_accepts_default_drag_timings() {
+        assert!(FlowConfig::default().validate().is_ok());
+    }
+
+    /// Negative: a repeat interval below its effective floor warns. The warning
+    /// is returned as an `Err` (the loader logs it non-fatally at startup).
+    #[test]
+    fn config_validate_warns_on_sub_floor_repeat_interval() {
+        let config = FlowConfig {
+            drag: DragConfig {
+                edge_scroll_repeat_interval_ms: 50,
+                ..DragConfig::default()
+            },
+            ..FlowConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("drag.edge_scroll_repeat_interval_ms"),
+            "warning should name the field: {err}"
+        );
+        assert!(
+            err.contains("clamped at runtime"),
+            "warning should explain the clamp: {err}"
+        );
+    }
+
+    /// Positive: a sub-floor *initial delay* does NOT warn — its floor makes
+    /// unsafe values silently safe, so there is nothing to tell the user.
+    #[test]
+    fn config_validate_does_not_warn_for_initial_delay() {
+        let config = FlowConfig {
+            drag: DragConfig {
+                edge_scroll_initial_delay_ms: 0,
+                ..DragConfig::default()
+            },
+            ..FlowConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    /// Positive: with animation enabled and a repeat interval below the
+    /// animation duration, the warning fires (the floor is the animation
+    /// duration in that case, not the spam-guard constant).
+    #[test]
+    fn config_validate_warns_when_repeat_below_animation_duration() {
+        let config = FlowConfig {
+            animation: AnimationConfig {
+                enabled: true,
+                duration_ms: 350,
+                ..AnimationConfig::default()
+            },
+            drag: DragConfig {
+                edge_scroll_repeat_interval_ms: 200,
+                ..DragConfig::default()
+            },
+            ..FlowConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        // Effective floor is max(80, 350) = 350.
+        assert!(
+            err.contains("350"),
+            "warning should report floor 350: {err}"
+        );
     }
 
     #[test]

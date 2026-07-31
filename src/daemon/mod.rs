@@ -32,6 +32,7 @@
 //! - [`borders`] — border overlay lifecycle (attach/detach/recolor helpers)
 //! - [`dispatch`] — IPC command dispatch router and action handlers
 //! - [`query`] — query handlers (extracted from dispatch)
+//! - [`edge_scroll`] — pure, clock-injectable edge-scroll auto-repeat scheduler
 //! - [`animation`] — animation bridge ([`FlowWM::animate_layout`])
 //! - [`config_derive`] — configuration derivation helpers and tests
 //! - [`shutdown`] — graceful-shutdown window rescue
@@ -46,6 +47,7 @@ mod borders;
 mod config_derive;
 mod dispatch;
 mod drag;
+mod edge_scroll;
 mod floating_sync;
 mod hooks;
 mod new;
