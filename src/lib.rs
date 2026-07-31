@@ -43,6 +43,7 @@ pub mod config;
 pub mod daemon;
 pub mod ipc;
 pub mod layout;
+pub mod loadout;
 pub mod logging;
 pub mod registry;
 pub mod updater;

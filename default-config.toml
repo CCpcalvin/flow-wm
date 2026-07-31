@@ -128,3 +128,13 @@ col_edge_ratio = 0.18
 col_edge_max_px = 72
 edge_scroll_initial_delay_ms = 400
 edge_scroll_repeat_interval_ms = 240
+
+# Loadout save/restore settings.
+#
+# - default_path:  file name (relative to config dir) used by
+#                   `flow loadout save` and `flow loadout restore`
+# - max_age_secs:  seconds before a saved loadout is considered stale;
+#                   set to 0 to disable staleness checks
+[loadout]
+default_path = "loadout.json"
+max_age_secs = 60

@@ -91,6 +91,9 @@ impl FlowWM {
         match msg {
             // --- Shutdown ---
             SocketMessage::Stop => {
+                if let Err(e) = self.try_save_loadout_default() {
+                    log::warn!("loadout save-on-stop failed: {e}");
+                }
                 self.shutting_down = true;
                 SocketResponse::Ok
             }
@@ -149,6 +152,10 @@ impl FlowWM {
             SocketMessage::SetConfigValue { .. } => unimplemented_command("set_config_value"),
             SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
             SocketMessage::ForgetAllApps => unimplemented_command("forget_all_apps"),
+            SocketMessage::LoadoutSave { path } => self.dispatch_loadout_save(path.clone()),
+            SocketMessage::LoadoutLoad { path, force } => {
+                self.dispatch_loadout_load(path.clone(), *force)
+            }
 
             // --- Workspace ---
             //

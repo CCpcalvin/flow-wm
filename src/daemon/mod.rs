@@ -50,6 +50,7 @@ mod drag;
 mod edge_scroll;
 mod floating_sync;
 mod hooks;
+mod loadout;
 mod new;
 mod query;
 mod run;
