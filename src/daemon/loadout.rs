@@ -38,14 +38,14 @@ use std::path::PathBuf;
 
 use crate::common::{Rect, WindowId};
 use crate::ipc::message::SocketResponse;
-use crate::layout::types::AppliedLayout;
+use crate::layout::types::{ActualLayout, AppliedLayout};
 use crate::loadout::{
     ColumnSnapshot, FloatingEntry, LoadoutFile, RectJson, RowSnapshot, ScrollingSnapshot,
     WindowRef, WorkspaceSnapshot, is_stale,
 };
 use crate::registry::hooks::set_float_hwnds;
 use crate::registry::types::{FloatingState, WindowState};
-use crate::workspace::WorkspaceId;
+use crate::workspace::{Workspace, WorkspaceId, workspace_y_offset};
 use windows::Win32::Foundation::HWND;
 
 use super::types::FlowWM;
@@ -83,6 +83,79 @@ fn resolve_hwnd(live: &mut HashSet<isize>, window: &WindowRef) -> Result<WindowI
             window.title, window.exe, window.hwnd as u64
         ))
     }
+}
+
+/// Resolve the seating target from the loadout's saved active-workspace flag.
+///
+/// Returns the [`WorkspaceId`] of the first snapshot marked `active: true`,
+/// falling back to workspace 1 when none is marked. The `active` flag is
+/// persisted per workspace at save time (exactly one snapshot is marked) but
+/// was historically ignored at load — this reads it for the first time so the
+/// workspace the user had visible is the one seated on restore.
+///
+/// Pure: operates only on the parsed snapshot list — no daemon state, no Win32.
+/// The foreground-first refinement (foreground window's workspace → this
+/// fallback → workspace 1) layers on top of this elsewhere.
+#[must_use]
+fn saved_active_target(workspaces: &[WorkspaceSnapshot]) -> WorkspaceId {
+    workspaces
+        .iter()
+        .find(|ws| ws.active)
+        .map(|ws| WorkspaceId(ws.workspace_id))
+        .unwrap_or(WorkspaceId(1))
+}
+
+/// Build the seating batch list that seats every non-empty workspace relative
+/// to a target workspace.
+///
+/// For each non-empty workspace on the monitor, merges its scrolling and
+/// floating actual layouts into one batch entry and computes that workspace's
+/// vertical parking offset relative to `target_id` via
+/// [`workspace_y_offset`]: the target sits at offset `0` (visible), every other
+/// workspace parks off-screen above (`-`) or below (`+`). Workspaces with no
+/// windows in either space are skipped — there is nothing to seat.
+///
+/// Pure: no Win32, no animator, no daemon state. The caller submits the
+/// returned `&[(ActualLayout, i32)]` through
+/// [`FlowWM::animate_workspaces`](super::types::FlowWM::animate_workspaces),
+/// which performs the visible-rect → window-rect translation, flattens border
+/// overlays, and arms float-tracking suppression.
+///
+/// # Why this is separate from the workspace-switch path
+///
+/// This is structurally the same merge+offset loop that
+/// `switch_workspace_layout` performs inline, lifted out as a pure function so
+/// the load path can share the math **without** reusing the switch path's
+/// bystander-teleport step. That teleport is correct for a real switch
+/// (bystanders are already parked off-screen, so the snap is invisible) but
+/// wrong at restore time, where every window begins on-screen — reusing it
+/// would visibly snap on-screen windows off-screen. The full rationale is
+/// restated briefly at the call site in `apply_loadout`.
+#[must_use]
+fn build_seating_batches(
+    workspaces: &[Workspace],
+    target_id: WorkspaceId,
+    monitor_height: i32,
+    window_gap: i32,
+) -> Vec<(ActualLayout, i32)> {
+    let mut batches = Vec::new();
+    for ws in workspaces {
+        let scroll_actual = ws.scrolling.actual_layout();
+        let float_actual = ws.floating.to_actual_layout();
+        // Skip workspaces with nothing to seat — an empty workspace has no
+        // windows to park, and emitting an empty batch entry would only add
+        // noise (the animator drops empty target lists anyway).
+        if scroll_actual.entries.is_empty() && float_actual.entries.is_empty() {
+            continue;
+        }
+        let y_offset = workspace_y_offset(ws.id, target_id, monitor_height, window_gap);
+        // Merge scrolling + floating into one entry so a single workspace's
+        // tiles and floats animate together at the same parking offset.
+        let mut entries = scroll_actual.entries.clone();
+        entries.extend(float_actual.entries.iter().cloned());
+        batches.push((ActualLayout { entries }, y_offset));
+    }
+    batches
 }
 
 impl FlowWM {
@@ -348,24 +421,68 @@ impl FlowWM {
             self.registry.update_tiled_rects(&applied.actual_layout);
         }
 
-        // 8. Rebuild the active workspace's float-tracking set so LOCATIONCHANGE
-        //    forwarding and animator float-suppression reflect the loaded layout
-        //    (mirrors switch_workspace_layout).
-        let active_floats: Vec<isize> = self
+        // 8. Resolve the seating target: the loadout's saved active-workspace
+        //    flag, read here for the first time (it is persisted at save but
+        //    was historically ignored). Falls back to workspace 1 when no
+        //    snapshot is marked active. The foreground-first refinement layers
+        //    on top of this elsewhere; this routine seats the saved-active
+        //    workspace.
+        let target_id = saved_active_target(&file.workspaces);
+
+        // 9. Make the target workspace the visible one. The apply above set
+        //    every workspace's logical layout; this selects which one is on
+        //    screen — the first half of a workspace switch, without its
+        //    teleport step (see step 11 for why the teleport is wrong here).
+        //    The target is always present on the active monitor in the
+        //    single-monitor daemon; the guard keeps a missing target from
+        //    panicking and leaves the freshly-applied layout visible.
+        if self
+            .active_monitor_mut()
+            .set_active_workspace(target_id)
+            .is_none()
+        {
+            log::warn!(
+                "loadout load: seating target workspace {} not found on the active monitor; \
+                 leaving the freshly-tiled layout in place",
+                target_id.0
+            );
+            log::info!("loadout load: applied layout from {resolved:?} (seating skipped)");
+            return Ok(());
+        }
+
+        // 10. Rebuild the TARGET workspace's float-tracking set so
+        //     LOCATIONCHANGE forwarding and animator float-suppression reflect
+        //     the loaded layout (mirrors switch_workspace_layout). Parked
+        //     workspaces' floats are excluded — they are off-screen and must
+        //     not be draggable, and excluding them prevents a stray
+        //     LOCATIONCHANGE during the seating animation from corrupting a
+        //     parked workspace's rect.
+        let target_floats: Vec<isize> = self
             .active_workspace()
             .floating
             .windows()
             .iter()
             .map(|entry| entry.window_id.0)
             .collect();
-        set_float_hwnds(&active_floats);
+        set_float_hwnds(&target_floats);
 
-        // 9. Animate the active workspace's final layout, merging scrolling +
-        //    floating so float HWNDs are also moved to their restored rects
-        //    (mirrors set_window_to_float's batched animate_workspaces call).
-        let scroll_actual = self.active_scrolling().actual_layout().clone();
-        let float_actual = self.active_workspace().floating.to_actual_layout();
-        let batches = [(scroll_actual, 0), (float_actual, 0)];
+        // 11. Seat the full workspace stack in one animation: the target
+        //     workspace settles at offset 0 (visible) and every other
+        //     non-empty workspace animates to its parking offset. This is the
+        //     core fix — previously only the active workspace animated, so the
+        //     physical workspace stacking was never established at load time
+        //     and only appeared after a manual workspace switch. The pure
+        //     `build_seating_batches` helper builds the batch; see its docs for
+        //     why this path deliberately shares the switch path's merge+offset
+        //     math but not its bystander-teleport step.
+        let monitor_height = self.active_monitor().screen_rect().height;
+        let window_gap = self.active_scrolling().padding().window_gap;
+        let batches = build_seating_batches(
+            self.active_monitor().workspaces(),
+            target_id,
+            monitor_height,
+            window_gap,
+        );
         self.animate_workspaces(&batches);
 
         log::info!("loadout load: restored layout from {resolved:?}");
@@ -487,6 +604,8 @@ impl FlowWM {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::types::{MonitorInfo, Padding};
+    use crate::workspace::{ScrollingSpace, Workspace};
 
     // ── rect_json_to_rect: pure conversion ───────────────────────────
 
@@ -539,5 +658,229 @@ mod tests {
     fn is_stale_callable() {
         let old = "2020-01-01T00:00:00Z";
         assert!(is_stale(old, 60));
+    }
+
+    // ── saved_active_target: saved active-workspace flag ───────────────
+    //
+    // The loadout persists an `active` flag per workspace at save time; the
+    // seating target is the id of the snapshot marked active, falling back to
+    // workspace 1 when none is marked (defensive — save always marks exactly
+    // one, but a hand-edited or all-false file must still resolve).
+
+    /// Positive: the snapshot marked active resolves to its workspace id.
+    #[test]
+    fn saved_active_target_picks_the_marked_workspace() {
+        let snaps = vec![
+            WorkspaceSnapshot {
+                workspace_id: 1,
+                active: false,
+                scrolling: empty_scrolling_snap(),
+                floating: vec![],
+            },
+            WorkspaceSnapshot {
+                workspace_id: 2,
+                active: true,
+                scrolling: empty_scrolling_snap(),
+                floating: vec![],
+            },
+        ];
+        assert_eq!(saved_active_target(&snaps), WorkspaceId(2));
+    }
+
+    /// Negative: no snapshot marked active → workspace 1 fallback.
+    #[test]
+    fn saved_active_target_falls_back_to_workspace_one_when_none_marked() {
+        let snaps = vec![WorkspaceSnapshot {
+            workspace_id: 3,
+            active: false,
+            scrolling: empty_scrolling_snap(),
+            floating: vec![],
+        }];
+        assert_eq!(saved_active_target(&snaps), WorkspaceId(1));
+    }
+
+    /// Negative: empty snapshot list → workspace 1 fallback.
+    #[test]
+    fn saved_active_target_falls_back_to_workspace_one_when_empty() {
+        assert_eq!(saved_active_target(&[]), WorkspaceId(1));
+    }
+
+    // ── build_seating_batches: full-stack seating output ──────────────
+    //
+    // The core contract: for a given target, the builder returns EVERY
+    // non-empty workspace (not just the active one), each merged across
+    // scrolling + floating, at its correct parking offset relative to the
+    // target. Empty workspaces are absent.
+
+    /// Positive: every non-empty workspace appears at its correct offset for a
+    /// target at the top of the stack. Windows on ws 1 and ws 3, target ws 1 →
+    /// ws 1 at 0, ws 3 below at +Y_UNIT. Empty ws 2 is absent.
+    #[test]
+    fn seating_batches_cover_every_nonempty_workspace() {
+        let workspaces = vec![
+            make_workspace_with_tile(1, WindowId(100)),
+            make_empty_workspace(2),
+            make_workspace_with_tile(3, WindowId(200)),
+        ];
+        let batches = build_seating_batches(&workspaces, WorkspaceId(1), MONITOR_H, GAP);
+
+        // Two non-empty workspaces; the empty middle one is skipped.
+        assert_eq!(batches.len(), 2, "empty workspace must be skipped");
+        // Target workspace sits at offset 0 (visible).
+        assert_eq!(batches[0].1, 0, "target workspace parks at offset 0");
+        assert!(
+            batches[0]
+                .0
+                .entries
+                .iter()
+                .any(|e| e.window_id == WindowId(100)),
+            "target workspace's tile must be in its merged batch"
+        );
+        // Workspace 3 is below the target → parks at +Y_UNIT.
+        assert_eq!(batches[1].1, Y_UNIT, "ws 3 parks below target at +Y_UNIT");
+        assert!(
+            batches[1]
+                .0
+                .entries
+                .iter()
+                .any(|e| e.window_id == WindowId(200)),
+            "ws 3's tile must be in its merged batch"
+        );
+    }
+
+    /// Positive: a target in the middle produces both an above (negative) and a
+    /// below (positive) offset around the offset-0 target.
+    #[test]
+    fn seating_batches_offset_signs_around_a_middle_target() {
+        let workspaces = vec![
+            make_workspace_with_tile(1, WindowId(100)),
+            make_workspace_with_tile(2, WindowId(200)),
+            make_workspace_with_tile(3, WindowId(300)),
+        ];
+        let batches = build_seating_batches(&workspaces, WorkspaceId(2), MONITOR_H, GAP);
+
+        // Offsets in workspace-id order: ws1 above (-Y_UNIT), ws2 target (0),
+        // ws3 below (+Y_UNIT).
+        assert_eq!(
+            batches.iter().map(|(_, off)| *off).collect::<Vec<_>>(),
+            vec![-Y_UNIT, 0, Y_UNIT],
+            "offsets must be [-Y_UNIT, 0, +Y_UNIT] around a middle target"
+        );
+    }
+
+    /// Positive: a workspace with ONLY a floating window (no tiles) still gets
+    /// a batch entry — floats are part of the merge and must be seated too.
+    #[test]
+    fn seating_batches_include_float_only_workspaces() {
+        let mut ws = make_empty_workspace(2);
+        ws.floating.add(
+            WindowId(400),
+            Rect {
+                x: 10,
+                y: 10,
+                width: 100,
+                height: 100,
+            },
+        );
+        let batches = build_seating_batches(&[ws], WorkspaceId(2), MONITOR_H, GAP);
+
+        assert_eq!(
+            batches.len(),
+            1,
+            "float-only workspace must produce a batch"
+        );
+        assert_eq!(batches[0].1, 0, "target workspace at offset 0");
+        assert!(
+            batches[0]
+                .0
+                .entries
+                .iter()
+                .any(|e| e.window_id == WindowId(400)),
+            "floating window must be merged into the batch"
+        );
+    }
+
+    /// Positive: a workspace holding BOTH a tile and a float merges both into a
+    /// single batch entry (one entry per workspace, not one per space).
+    #[test]
+    fn seating_batches_merge_scrolling_and_float_into_one_entry() {
+        let mut ws = make_workspace_with_tile(1, WindowId(100));
+        ws.floating.add(
+            WindowId(101),
+            Rect {
+                x: 20,
+                y: 20,
+                width: 80,
+                height: 80,
+            },
+        );
+        let batches = build_seating_batches(&[ws], WorkspaceId(1), MONITOR_H, GAP);
+
+        assert_eq!(batches.len(), 1);
+        let ids: Vec<isize> = batches[0].0.entries.iter().map(|e| e.window_id.0).collect();
+        assert!(ids.contains(&100), "tile merged");
+        assert!(ids.contains(&101), "float merged");
+    }
+
+    /// Negative: when every workspace is empty, no batches are produced.
+    #[test]
+    fn seating_batches_empty_when_all_workspaces_empty() {
+        let workspaces = vec![make_empty_workspace(1), make_empty_workspace(2)];
+        let batches = build_seating_batches(&workspaces, WorkspaceId(1), MONITOR_H, GAP);
+        assert!(batches.is_empty());
+    }
+
+    // ── Test helpers ────────────────────────────────────────────────────
+
+    /// Test monitor height and gap — mirror `y_offset.rs` test constants so the
+    /// parking unit matches: `Y_UNIT = MONITOR_H + GAP`.
+    const MONITOR_H: i32 = 1080;
+    const GAP: i32 = 4;
+    const Y_UNIT: i32 = MONITOR_H + GAP; // 1084
+
+    /// Build a [`ScrollingSpace`] sized like the canonical 1920×1080 test
+    /// monitor, mirroring `workspace::monitor::tests::make_scrolling`.
+    fn make_scrolling() -> ScrollingSpace {
+        ScrollingSpace::new(
+            MonitorInfo {
+                work_area: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            960,
+            320,
+            100,
+            Padding {
+                window_gap: GAP,
+                up: 0,
+                down: 0,
+            },
+            4,
+        )
+    }
+
+    /// Build a workspace that owns one tiled window.
+    fn make_workspace_with_tile(id: u32, wid: WindowId) -> Workspace {
+        let mut scrolling = make_scrolling();
+        scrolling.add_window(wid);
+        Workspace::new(WorkspaceId(id), scrolling)
+    }
+
+    /// Build an empty workspace (no tiles, no floats).
+    fn make_empty_workspace(id: u32) -> Workspace {
+        Workspace::new(WorkspaceId(id), make_scrolling())
+    }
+
+    /// An all-zero [`ScrollingSnapshot`] for [`saved_active_target`] tests that
+    /// only care about the `active` flag.
+    fn empty_scrolling_snap() -> ScrollingSnapshot {
+        ScrollingSnapshot {
+            viewport_offset: 0,
+            focus: None,
+            columns: vec![],
+        }
     }
 }
