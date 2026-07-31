@@ -16,6 +16,7 @@
 
 use crate::common::Direction;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Target window mode for the [`SocketMessage::SetWindow`] command.
 ///
@@ -266,6 +267,28 @@ pub enum SocketMessage {
     },
     /// Remove all per-app learned preferences.
     ForgetAllApps,
+
+    // --- Loadout save / restore ---
+    /// Save the current workspace arrangement to a loadout file.
+    ///
+    /// `path: None` means the daemon should use the config-default path.
+    /// `path: Some(p)` overrides to the given file path.
+    LoadoutSave {
+        /// Destination file path, or `None` for the config default.
+        path: Option<PathBuf>,
+    },
+    /// Restore a previously saved loadout.
+    ///
+    /// `path: None` means the daemon should use the config-default path.
+    /// `force: true` ignores staleness checks (used by manual
+    /// `flow loadout load`). `force: false` honours `max_age_secs`
+    /// (used by auto-restore on `flow start`).
+    LoadoutLoad {
+        /// Source file path, or `None` for the config default.
+        path: Option<PathBuf>,
+        /// When `true`, skip staleness / `max_age_secs` checks.
+        force: bool,
+    },
 }
 
 impl SocketMessage {
@@ -683,6 +706,77 @@ mod tests {
         );
     }
 
+    // Positive: round-trip LoadoutSave with None path (config default)
+    #[test]
+    fn roundtrip_loadout_save_none_path() {
+        let msg = SocketMessage::LoadoutSave { path: None };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"loadout_save","path":null}"#);
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketMessage::LoadoutSave { path: None });
+    }
+
+    // Positive: round-trip LoadoutSave with explicit path
+    #[test]
+    fn roundtrip_loadout_save_some_path() {
+        let msg = SocketMessage::LoadoutSave {
+            path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"loadout_save\""));
+        assert!(json.contains("\"path\":\"C:\\\\temp\\\\loadout.json\""));
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    // Positive: round-trip LoadoutLoad with force=false (auto-restore)
+    #[test]
+    fn roundtrip_loadout_load_auto_restore() {
+        let msg = SocketMessage::LoadoutLoad {
+            path: None,
+            force: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"loadout_load","path":null,"force":false}"#);
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            SocketMessage::LoadoutLoad {
+                path: None,
+                force: false
+            }
+        );
+    }
+
+    // Positive: round-trip LoadoutLoad with force=true (manual load)
+    #[test]
+    fn roundtrip_loadout_load_force() {
+        let msg = SocketMessage::LoadoutLoad {
+            path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+            force: true,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"force\":true"));
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    // Negative: LoadoutLoad missing required force field fails to deserialize
+    #[test]
+    fn decode_loadout_load_missing_force_returns_none() {
+        let line = r#"{"type":"loadout_load","path":null}"#;
+        let msg: Option<SocketMessage> = decode_message(line);
+        assert_eq!(msg, None, "missing force field should fail");
+    }
+
+    // Negative: unknown loadout type tag returns None
+    #[test]
+    fn decode_unknown_loadout_type_returns_none() {
+        let line = r#"{"type":"loadout_delete","path":null}"#;
+        let msg: Option<SocketMessage> = decode_message(line);
+        assert_eq!(msg, None, "unknown loadout type should return None");
+    }
+
     // --- encode_message error path ---
 
     // Negative: encode_message returns Err for a type that fails serialization
@@ -769,6 +863,18 @@ mod tests {
             SocketMessage::SwitchWorkspace { workspace_id: 1 },
             SocketMessage::SwapWorkspace { workspace_id: 2 },
             SocketMessage::MoveWindowToWorkspace { workspace_id: 3 },
+            SocketMessage::LoadoutSave { path: None },
+            SocketMessage::LoadoutSave {
+                path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+            },
+            SocketMessage::LoadoutLoad {
+                path: None,
+                force: false,
+            },
+            SocketMessage::LoadoutLoad {
+                path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+                force: true,
+            },
         ];
 
         for msg in &all_variants {

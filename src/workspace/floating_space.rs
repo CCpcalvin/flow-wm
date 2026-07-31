@@ -84,6 +84,19 @@ impl FloatingSpace {
         &self.windows
     }
 
+    /// Replace the entire floating window set with `entries`, preserving input
+    /// order as z-order (earlier = deeper, later = on top — same convention as
+    /// [`add`](Self::add)).
+    ///
+    /// Used by the loadout load path to restore saved floating window rects in
+    /// one operation. Any windows currently in the space are discarded.
+    pub fn replace_all(&mut self, entries: Vec<(WindowId, Rect)>) {
+        self.windows = entries
+            .into_iter()
+            .map(|(window_id, rect)| ActualEntry { window_id, rect })
+            .collect();
+    }
+
     /// Build an [`ActualLayout`] from this space's entries.
     ///
     /// The daemon merges this into the animation batch alongside the scrolling
@@ -381,5 +394,144 @@ mod tests {
         assert_eq!(entries[0].window_id, WindowId(1));
         assert_eq!(entries[1].window_id, WindowId(2));
         assert_eq!(entries[2].window_id, WindowId(3));
+    }
+
+    // --- replace_all tests ---
+
+    #[test]
+    fn replace_all_from_empty() {
+        // Positive: empty → replace_all with 2 entries → len 2, order preserved, contains both.
+        let mut fs = FloatingSpace::new();
+        let r1 = Rect {
+            x: 10,
+            y: 10,
+            width: 100,
+            height: 100,
+        };
+        let r2 = Rect {
+            x: 20,
+            y: 20,
+            width: 200,
+            height: 200,
+        };
+        fs.replace_all(vec![(WindowId(1), r1), (WindowId(2), r2)]);
+
+        assert_eq!(fs.len(), 2);
+        assert!(fs.contains(WindowId(1)));
+        assert!(fs.contains(WindowId(2)));
+        // Order preserved (first = deepest in z-order).
+        assert_eq!(fs.windows()[0].window_id, WindowId(1));
+        assert_eq!(fs.windows()[1].window_id, WindowId(2));
+        assert_eq!(fs.windows()[0].rect, r1);
+        assert_eq!(fs.windows()[1].rect, r2);
+    }
+
+    #[test]
+    fn replace_all_discards_existing() {
+        // Positive: existing windows discarded — add some, replace_all with
+        // different set, assert only the new set remains.
+        let mut fs = FloatingSpace::new();
+        fs.add(
+            WindowId(1),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        );
+        fs.add(
+            WindowId(2),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+        );
+        assert_eq!(fs.len(), 2);
+
+        let r_new = Rect {
+            x: 50,
+            y: 50,
+            width: 300,
+            height: 300,
+        };
+        fs.replace_all(vec![(WindowId(3), r_new)]);
+
+        assert_eq!(fs.len(), 1);
+        assert!(!fs.contains(WindowId(1)));
+        assert!(!fs.contains(WindowId(2)));
+        assert!(fs.contains(WindowId(3)));
+        assert_eq!(fs.windows()[0].rect, r_new);
+    }
+
+    #[test]
+    fn replace_all_preserves_z_order_from_input() {
+        // Positive: z-order preserved from input order (first entry deepest).
+        let mut fs = FloatingSpace::new();
+        fs.replace_all(vec![
+            (
+                WindowId(10),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            ),
+            (
+                WindowId(20),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 200,
+                },
+            ),
+            (
+                WindowId(30),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 300,
+                    height: 300,
+                },
+            ),
+        ]);
+        let entries = fs.windows();
+        assert_eq!(entries[0].window_id, WindowId(10));
+        assert_eq!(entries[1].window_id, WindowId(20));
+        assert_eq!(entries[2].window_id, WindowId(30));
+    }
+
+    #[test]
+    fn replace_all_empty_clears_everything() {
+        // Negative: empty input → clears everything (len 0, is_empty true).
+        let mut fs = FloatingSpace::new();
+        fs.add(
+            WindowId(1),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        );
+        fs.add(
+            WindowId(2),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+        );
+        assert_eq!(fs.len(), 2);
+
+        fs.replace_all(vec![]);
+
+        assert!(fs.is_empty());
+        assert_eq!(fs.len(), 0);
     }
 }

@@ -145,6 +145,9 @@ pub struct FlowConfig {
 
     /// Tile-drag configuration.
     pub drag: DragConfig,
+
+    /// Loadout save/restore configuration.
+    pub loadout: LoadoutConfig,
     /// Whether `flow start` should query GitHub for a newer release and print a
     /// one-line notification prompting `flow update` when one exists.
     ///
@@ -153,6 +156,35 @@ pub struct FlowConfig {
     /// aborts startup. The explicit `flow update --check` command is unaffected
     /// by this flag. See (`docs/src/dev-guide/updater.md`).
     pub check_for_updates: bool,
+}
+
+/// Loadout save/restore configuration.
+///
+/// Controls the file path and staleness threshold used when saving or
+/// restoring workspace loadouts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LoadoutConfig {
+    /// File name (not a full path) used by `flow loadout save` and
+    /// `flow loadout restore`.
+    ///
+    /// The daemon resolves this relative to the user's config directory
+    /// (`%USERPROFILE%\.config\flow\`). Defaults to `"loadout.json"`.
+    pub default_path: String,
+    /// Maximum age in seconds before a saved loadout is considered stale and
+    /// rejected by `flow loadout restore`.
+    ///
+    /// Defaults to `60` seconds. Set to `0` to disable staleness checks.
+    pub max_age_secs: u64,
+}
+
+impl Default for LoadoutConfig {
+    fn default() -> Self {
+        Self {
+            default_path: "loadout.json".into(),
+            max_age_secs: 60,
+        }
+    }
 }
 
 fn default_window_action() -> WindowAction {
@@ -173,6 +205,7 @@ impl Default for FlowConfig {
             floating: FloatingConfig::default(),
             focus: FocusConfig::default(),
             drag: DragConfig::default(),
+            loadout: LoadoutConfig::default(),
             check_for_updates: true,
         }
     }
@@ -1021,6 +1054,24 @@ strategy = "original_slot"
         assert_eq!(FocusConfig::default().foreground_sync_interval_ms, 250);
     }
 
+    /// Positive: `LoadoutConfig::default()` ships `default_path = "loadout.json"`
+    /// and `max_age_secs = 60` — the canonical values the daemon resolves
+    /// against when no `[loadout]` block is present in the user's `flow.toml`.
+    ///
+    /// The `default-config.toml` sync test catches drift only when the example
+    /// file is also updated; this focused check guards the compiled `Default`
+    /// impl independently, mirroring `focus_config_default_interval_is_250ms`
+    /// and `border_config_default_overlap_is_one`. A regression to a different
+    /// `default_path` would silently break save/restore (file written to one
+    /// name, read from another); a regression to `max_age_secs = 0` would
+    /// disable the staleness safety net for crashes/hard-kills.
+    #[test]
+    fn loadout_config_default_values() {
+        let default = LoadoutConfig::default();
+        assert_eq!(default.default_path, "loadout.json");
+        assert_eq!(default.max_age_secs, 60);
+    }
+
     // --- Integration: Full field preservation through round-trip ---
 
     #[test]
@@ -1066,6 +1117,10 @@ strategy = "original_slot"
                 edge_scroll_initial_delay_ms: 350,
                 edge_scroll_repeat_interval_ms: 200,
             },
+            loadout: LoadoutConfig {
+                default_path: "my-loadout.json".into(),
+                max_age_secs: 120,
+            },
             check_for_updates: false,
         };
 
@@ -1100,6 +1155,8 @@ strategy = "original_slot"
         assert_eq!(parsed.drag.col_edge_max_px, 50);
         assert_eq!(parsed.drag.edge_scroll_initial_delay_ms, 350);
         assert_eq!(parsed.drag.edge_scroll_repeat_interval_ms, 200);
+        assert_eq!(parsed.loadout.default_path, "my-loadout.json");
+        assert_eq!(parsed.loadout.max_age_secs, 120);
         assert!(!parsed.check_for_updates);
     }
 
