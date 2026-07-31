@@ -105,6 +105,66 @@ fn saved_active_target(workspaces: &[WorkspaceSnapshot]) -> WorkspaceId {
         .unwrap_or(WorkspaceId(1))
 }
 
+/// Find which workspace contains a given window, searching both each
+/// workspace's scrolling space and its floating space.
+///
+/// Returns the [`WorkspaceId`] of the first workspace whose tiling columns or
+/// floating set holds `window_id`, or `None` when no workspace owns it. The
+/// search is exhaustive across both spaces because a window is seated in
+/// exactly one — tiles live in `scrolling`, floats in `floating` — so the first
+/// hit is authoritative.
+///
+/// Pure: walks the workspace slice's read-only views only — no daemon state, no
+/// Win32. Used by the seating-target resolution to seat the workspace that
+/// currently holds the OS foreground window (read separately via
+/// `get_foreground_window`).
+#[must_use]
+fn workspace_containing_window(
+    workspaces: &[Workspace],
+    window_id: WindowId,
+) -> Option<WorkspaceId> {
+    workspaces.iter().find_map(|ws| {
+        let in_scrolling = ws
+            .scrolling
+            .virtual_layout()
+            .columns
+            .iter()
+            .any(|col| col.rows.iter().any(|row| row.window_id == window_id));
+        let in_floating = ws.floating.contains(window_id);
+        if in_scrolling || in_floating {
+            Some(ws.id)
+        } else {
+            None
+        }
+    })
+}
+
+/// Resolve the seating target, preferring the workspace holding the OS
+/// foreground window.
+///
+/// Order: foreground window's workspace → the loadout's saved active workspace
+/// (via [`saved_active_target`], itself falling back to workspace 1). When the
+/// foreground window is absent (`foreground: None`, e.g. desktop has focus) or
+/// not managed by any workspace, resolution degrades to the saved-active
+/// fallback unchanged.
+///
+/// The foreground is read-only here — this never calls `SetForegroundWindow`.
+/// Seating the foreground's workspace keeps that window on-screen by
+/// construction (it is the workspace the focused window actually lives in),
+/// sidestepping the Windows startup foreground lock. The caller resolves the
+/// foreground HWND against the post-apply workspaces, so `workspace_containing`
+/// reports where the foreground window NOW sits after the loadout is applied.
+#[must_use]
+fn resolve_seating_target(
+    workspaces: &[Workspace],
+    foreground: Option<WindowId>,
+    saved: &[WorkspaceSnapshot],
+) -> WorkspaceId {
+    foreground
+        .and_then(|wid| workspace_containing_window(workspaces, wid))
+        .unwrap_or_else(|| saved_active_target(saved))
+}
+
 /// Build the seating batch list that seats every non-empty workspace relative
 /// to a target workspace.
 ///
@@ -421,13 +481,22 @@ impl FlowWM {
             self.registry.update_tiled_rects(&applied.actual_layout);
         }
 
-        // 8. Resolve the seating target: the loadout's saved active-workspace
-        //    flag, read here for the first time (it is persisted at save but
-        //    was historically ignored). Falls back to workspace 1 when no
-        //    snapshot is marked active. The foreground-first refinement layers
-        //    on top of this elsewhere; this routine seats the saved-active
-        //    workspace.
-        let target_id = saved_active_target(&file.workspaces);
+        // 8. Resolve the seating target. Preferred: the workspace that holds
+        //    the OS foreground window — read-only (`GetForegroundWindow`, never
+        //    `SetForegroundWindow`), so seating it keeps the focused window
+        //    on-screen by construction and avoids the startup foreground lock.
+        //    The foreground is read here, AFTER the layout apply, so
+        //    `workspace_containing_window` reports where the foreground window
+        //    now sits after the loadout seated it. First fallback is the
+        //    loadout's saved active workspace (`saved_active_target`, itself
+        //    falling back to workspace 1) — used when the foreground is absent
+        //    (desktop focus) or belongs to no managed workspace.
+        let foreground = crate::registry::win32::get_foreground_window().map(WindowId);
+        let target_id = resolve_seating_target(
+            self.active_monitor().workspaces(),
+            foreground,
+            &file.workspaces,
+        );
 
         // 9. Make the target workspace the visible one. The apply above set
         //    every workspace's logical layout; this selects which one is on
@@ -830,8 +899,135 @@ mod tests {
         assert!(batches.is_empty());
     }
 
-    // ── Test helpers ────────────────────────────────────────────────────
+    // ── workspace_containing_window: workspace lookup by window ──────────
+    //
+    // Seating-target resolution needs to map a foreground window back to the
+    // workspace it lives in. The search must cover BOTH spaces: a tile in the
+    // scrolling canvas and a float in the floating set.
 
+    /// Positive: a tiled window resolves to its workspace's id.
+    #[test]
+    fn workspace_containing_finds_tiled_window() {
+        let workspaces = vec![
+            make_empty_workspace(1),
+            make_workspace_with_tile(2, WindowId(111)),
+        ];
+        assert_eq!(
+            workspace_containing_window(&workspaces, WindowId(111)),
+            Some(WorkspaceId(2))
+        );
+    }
+
+    /// Positive: a floating window resolves to its workspace's id — the search
+    /// covers the floating space, not just tiles.
+    #[test]
+    fn workspace_containing_finds_floating_window() {
+        let mut ws = make_empty_workspace(3);
+        ws.floating.add(
+            WindowId(222),
+            Rect {
+                x: 5,
+                y: 5,
+                width: 50,
+                height: 50,
+            },
+        );
+        let workspaces = vec![make_empty_workspace(1), ws];
+        assert_eq!(
+            workspace_containing_window(&workspaces, WindowId(222)),
+            Some(WorkspaceId(3))
+        );
+    }
+
+    /// Negative: an unmanaged / absent window resolves to none — no workspace
+    /// claims it, so the foreground lookup falls back to saved-active.
+    #[test]
+    fn workspace_containing_returns_none_for_absent_window() {
+        let workspaces = vec![make_workspace_with_tile(1, WindowId(100))];
+        assert_eq!(
+            workspace_containing_window(&workspaces, WindowId(999)),
+            None
+        );
+    }
+
+    /// Negative: empty workspace list → none.
+    #[test]
+    fn workspace_containing_returns_none_when_no_workspaces() {
+        assert_eq!(workspace_containing_window(&[], WindowId(1)), None);
+    }
+
+    // ── resolve_seating_target: foreground-first ordering ───────────────
+    //
+    // Target order: foreground window's workspace → saved-active → workspace 1.
+
+    /// Positive: when the foreground window sits in a managed workspace, that
+    /// workspace wins over the saved-active flag.
+    #[test]
+    fn seating_target_prefers_foreground_workspace() {
+        let workspaces = vec![
+            make_workspace_with_tile(1, WindowId(100)),
+            make_workspace_with_tile(2, WindowId(200)),
+        ];
+        // Saved-active is workspace 1, but the foreground window lives on ws 2.
+        let saved = vec![WorkspaceSnapshot {
+            workspace_id: 1,
+            active: true,
+            scrolling: empty_scrolling_snap(),
+            floating: vec![],
+        }];
+        assert_eq!(
+            resolve_seating_target(&workspaces, Some(WindowId(200)), &saved),
+            WorkspaceId(2)
+        );
+    }
+
+    /// Fallback: foreground present but unmanaged → saved-active workspace.
+    #[test]
+    fn seating_target_falls_back_to_saved_when_foreground_unmanaged() {
+        let workspaces = vec![
+            make_workspace_with_tile(1, WindowId(100)),
+            make_workspace_with_tile(2, WindowId(200)),
+        ];
+        // Foreground window 999 is not on any workspace → saved-active ws 2.
+        let saved = vec![WorkspaceSnapshot {
+            workspace_id: 2,
+            active: true,
+            scrolling: empty_scrolling_snap(),
+            floating: vec![],
+        }];
+        assert_eq!(
+            resolve_seating_target(&workspaces, Some(WindowId(999)), &saved),
+            WorkspaceId(2)
+        );
+    }
+
+    /// Fallback: no foreground (desktop has focus) → saved-active workspace.
+    #[test]
+    fn seating_target_falls_back_to_saved_when_no_foreground() {
+        let workspaces = vec![make_workspace_with_tile(1, WindowId(100))];
+        let saved = vec![WorkspaceSnapshot {
+            workspace_id: 1,
+            active: true,
+            scrolling: empty_scrolling_snap(),
+            floating: vec![],
+        }];
+        assert_eq!(
+            resolve_seating_target(&workspaces, None, &saved),
+            WorkspaceId(1)
+        );
+    }
+
+    /// Fallback: foreground unmanaged AND no saved-active → workspace 1.
+    #[test]
+    fn seating_target_falls_back_to_workspace_one() {
+        let workspaces = vec![make_workspace_with_tile(3, WindowId(100))];
+        assert_eq!(
+            resolve_seating_target(&workspaces, Some(WindowId(999)), &[]),
+            WorkspaceId(1)
+        );
+    }
+
+    // ── Test helpers ────────────────────────────────────────────────────
     /// Test monitor height and gap — mirror `y_offset.rs` test constants so the
     /// parking unit matches: `Y_UNIT = MONITOR_H + GAP`.
     const MONITOR_H: i32 = 1080;
