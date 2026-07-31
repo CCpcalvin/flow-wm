@@ -25,10 +25,12 @@
 //!
 //! (`docs/src/dev-guide/tile-drag.md`)
 
+use std::time::{Duration, Instant};
+
 use windows::Win32::Foundation::HWND;
 
 use crate::borders::{BorderState, style_for_state};
-use crate::common::WindowId;
+use crate::common::{Direction, WindowId};
 use crate::layout::mutations::ensure_column_visible;
 use crate::layout::preview::{DropZone, preview_move, resolve_drop_zone};
 use crate::layout::types::AppliedLayout;
@@ -37,6 +39,7 @@ use crate::registry::types::{TilingState, WindowState};
 use crate::registry::win32 as registry_win32;
 
 use super::borders::float_border_rect;
+use super::edge_scroll::{EdgeScrollAction, EdgeScrollScheduler, EdgeScrollTimings};
 use super::types::FlowWM;
 
 /// State held while the user is dragging a tiled window.
@@ -56,9 +59,23 @@ pub(super) struct DragState {
     /// The raw HWND value (for `GetWindowRect`, the `DRAGGED_HWND` global).
     pub(super) dragged_hwnd: isize,
     /// Drop zone currently under the cursor (`None` until the first move, and
-    /// for the empty-workspace degenerate where `resolve_drop_zone` returns
+    /// for the empty-workspace degenerate where [`resolve_drop_zone`] returns
     /// `None`).
     pub(super) current_zone: Option<DropZone>,
+    /// The edge-scroll auto-repeat state machine. Drives the
+    /// immediate-on-entry scroll plus the timer-based repeat cadence; see
+    /// [`edge_scroll`] and [`EdgeScrollScheduler`].
+    pub(super) edge_scroll: EdgeScrollScheduler,
+    /// The already-clamped effective timings, computed once at drag start from
+    /// [`DragConfig`](crate::config::DragConfig) so the scheduler consumes them
+    /// with no per-event clamp math.
+    pub(super) edge_scroll_timings: EdgeScrollTimings,
+    /// The deadline at which the armed auto-repeat timer fires, or `None` when
+    /// no repeat is armed. The main loop folds this into its wait-timeout
+    /// `min`-reduce and runs [`FlowWM::maybe_fire_edge_scroll`] when it arrives.
+    /// Set/cleared by the [`EdgeScrollAction::Arm`] / [`EdgeScrollAction::Cancel`]
+    /// actions the scheduler emits.
+    pub(super) edge_scroll_deadline: Option<Instant>,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +110,23 @@ impl FlowWM {
             return;
         }
 
+        // Compute the clamped effective edge-scroll timings once for the whole
+        // drag. The scheduler consumes these directly; no per-event clamp math.
+        let drag_cfg = &self.config.drag;
+        let repeat_ms = drag_cfg.effective_repeat_interval_ms(&self.config.animation);
+        let initial_ms = drag_cfg.effective_initial_delay_ms(repeat_ms);
+        let edge_scroll_timings = EdgeScrollTimings {
+            initial_delay: Duration::from_millis(u64::from(initial_ms)),
+            repeat_interval: Duration::from_millis(u64::from(repeat_ms)),
+        };
+
         self.drag_state = Some(DragState {
             dragged_id: WindowId(hwnd),
             dragged_hwnd: hwnd,
             current_zone: None,
+            edge_scroll: EdgeScrollScheduler::new(),
+            edge_scroll_timings,
+            edge_scroll_deadline: None,
         });
 
         set_dragged_hwnd(hwnd);
@@ -123,12 +153,14 @@ impl FlowWM {
     /// 2. Read the cursor position.
     /// 3. Snapshot the committed layout and resolve the pure drop zone via
     ///    [`resolve_drop_zone`].
-    /// 4. Act on the resolved zone, gating the preview on zone change:
-    ///    - `ScrollLeft` / `ScrollRight` → commit the viewport scroll live and
-    ///      animate the (non-dragged) windows to their scrolled slots. Each move
-    ///      in the band scrolls one more column, naturally bounded because
-    ///      scroll_left/right return None at the content edge. Fires every move
-    ///      (not gated) because scroll is cumulative.
+    /// 4. Act on the resolved zone:
+    ///    - `ScrollLeft` / `ScrollRight` → **transition detection only**, NOT a
+    ///      per-move scroll. Entering a band fires one immediate scroll and arms
+    ///      the auto-repeat scheduler; leaving the band cancels it. The repeat
+    ///      itself runs off the main-loop timer ([`Self::maybe_fire_edge_scroll`]),
+    ///      so holding the cursor still in the band keeps scrolling. This replaces
+    ///      the old per-`LOCATIONCHANGE` scroll that raced the viewport to the far
+    ///      end one column per pixel.
     ///    - `Row` / `Column` → submit a **non-committing** preview
     ///      ([`preview_move`] + [`Self::animate_preview`]) so the other windows
     ///      reflow toward the prospective layout. The committed
@@ -143,8 +175,9 @@ impl FlowWM {
     ///    - `None` → empty workspace; nothing to preview.
     ///
     /// NOTE: continuous *stationary* edge-scroll (cursor held still at the edge)
-    /// is not implemented — it would need a repeating timer, since `LOCATIONCHANGE`
-    /// only fires while the dragged window moves. Out of scope here.
+    /// runs off the auto-repeat scheduler + main-loop timer, not this handler —
+    /// `LOCATIONCHANGE` only fires while the dragged window moves, so the repeat
+    /// is driven by [`Self::maybe_fire_edge_scroll`] between moves.
     pub(super) fn on_drag_move(&mut self, hwnd: isize) {
         let Some(drag) = self.drag_state.as_ref() else {
             return;
@@ -209,47 +242,75 @@ impl FlowWM {
             drag_cfg.col_edge_max_px,
         );
 
-        // 4. Update the tracked zone (used by on_drag_end), then act — gating
-        //    the preview on zone change. We capture the previous move's zone
-        //    BEFORE overwriting it. The animator's `RetargetFromCurrent` policy
-        //    samples each window's current interpolated position as the new
-        //    `from` on every submit, so resubmitting an identical (stable)
-        //    target while windows are mid-flight resets the batch's progress to
-        //    zero and the reflow never completes under continuous cursor
-        //    movement. Scroll is exempt: it is cumulative and MUST fire every
-        //    move (advancing one column per move, bounded at the content edge).
-        //    Because a scroll band is itself a distinct zone value, passing
-        //    through it naturally invalidates this gate, so the next preview
-        //    after a scroll always fires.
+        // 4. Update the tracked zone (used by on_drag_end), then act. We capture
+        //    the previous move's zone BEFORE overwriting it. Two independent
+        //    consumers:
+        //    - Edge-scroll transition detection (below) keys off the band change.
+        //    - The preview gate keys off the zone change. The animator's
+        //      `RetargetFromCurrent` policy samples each window's current
+        //      interpolated position as the new `from` on every submit, so
+        //      resubmitting an identical (stable) target while windows are
+        //      mid-flight resets the batch's progress to zero and the reflow
+        //      never completes under continuous cursor movement. Because a scroll
+        //      band is a distinct zone value, passing through it changes the zone
+        //      and naturally invalidates this gate, so the next preview after a
+        //      scroll always fires.
         let prev_zone = self.drag_state.as_ref().and_then(|ds| ds.current_zone);
         if let Some(drag) = self.drag_state.as_mut() {
             drag.current_zone = new_zone;
         }
 
+        // Edge-scroll transition detection — replaces the old per-move scroll.
+        // Only band *changes* act here: entering fires the one immediate scroll
+        // and arms the scheduler; leaving cancels. The repeat itself is
+        // timer-driven (maybe_fire_edge_scroll), so a cursor held still in the
+        // band keeps scrolling — impossible when scroll rode the move stream.
+        // A band flip (Left↔Right) is a leave-then-enter; the new entry arms the
+        // opposite direction.
+        let prev_dir = scroll_direction(prev_zone);
+        let new_dir = scroll_direction(new_zone);
+        if new_dir != prev_dir {
+            // Leaving any armed band cancels the timer.
+            if prev_dir.is_some() {
+                let action = self
+                    .drag_state
+                    .as_mut()
+                    .expect("drag_state set for the whole drag")
+                    .edge_scroll
+                    .on_leave();
+                self.apply_edge_scroll_action(action);
+            }
+            // Entering a new band fires the immediate defining scroll, then arms
+            // the first-gap timer on success (or stays idle at the content edge).
+            if let Some(dir) = new_dir {
+                // on_enter returns Scroll(dir) — a *request* the scheduler makes,
+                // not a scroll it performs. The caller (this method) performs the
+                // real scroll and feeds whether it moved back through
+                // on_scroll_outcome, per the scheduler's caller protocol. So the
+                // returned action is intentionally discarded here.
+                let _ = self
+                    .drag_state
+                    .as_mut()
+                    .expect("drag_state set for the whole drag")
+                    .edge_scroll
+                    .on_enter(dir);
+                self.scroll_once_and_rearm(dir);
+            }
+        }
+
+        // NON-COMMITTING preview, gated on zone change (the guard below).
+        // Resubmitting an identical target mid-flight resets the animator
+        // (see `should_submit_preview`), so this arm only fires when the zone
+        // changed. On a no-op move (`preview_move` returns None — window already
+        // at its target) target the committed layout so a stale reflow from a
+        // prior zone resets.
         match new_zone {
             None => {
                 // Degenerate (empty workspace). Nothing to preview.
             }
-            Some(DropZone::ScrollLeft) => {
-                // Viewport commits LIVE during drag (a real view change the
-                // user expects to persist). The dragged window is excluded by
-                // submit_animation's filter; the others animate to their
-                // scrolled slots. Not gated: scroll is cumulative.
-                if let Some(scrolled) = self.active_scrolling_mut().scroll_left() {
-                    self.animate_layout(&scrolled);
-                }
-            }
-            Some(DropZone::ScrollRight) => {
-                if let Some(scrolled) = self.active_scrolling_mut().scroll_right() {
-                    self.animate_layout(&scrolled);
-                }
-            }
-            // NON-COMMITTING preview, gated on zone change (the guard below).
-            // Resubmitting an identical target mid-flight resets the animator
-            // (see `should_submit_preview`), so this arm only fires when the
-            // zone changed. On a no-op move (`preview_move` returns None —
-            // window already at its target) target the committed layout so a
-            // stale reflow from a prior zone resets.
+            // Scroll bands are handled above by the transition detector; the
+            // repeat cadence runs off the timer, not here.
+            Some(DropZone::ScrollLeft | DropZone::ScrollRight) => {}
             Some(zone @ (DropZone::Row { .. } | DropZone::Column { .. }))
                 if should_submit_preview(prev_zone, new_zone) =>
             {
@@ -279,10 +340,18 @@ impl FlowWM {
     /// is `take()`n before [`animate_layout`], the dragged window is INCLUDED
     /// in the animation and visibly snaps from its mouse-following position
     /// into its tile.
+    ///
+    /// Taking `drag_state` also drops the edge-scroll scheduler and its armed
+    /// deadline, tearing down the auto-repeat timer — no leftover scroll
+    /// continues after release.
     pub(super) fn on_drag_end(&mut self, _hwnd: isize) {
-        let Some(drag) = self.drag_state.take() else {
+        let Some(mut drag) = self.drag_state.take() else {
             return;
         };
+        // Explicitly cancel the auto-repeat timer (tears down the scheduler
+        // state); `drag` (and its deadline field) is dropped at the end of this
+        // method, so no leftover scroll continues after release.
+        let _ = drag.edge_scroll.on_drag_end();
         clear_dragged_hwnd();
 
         // Destroyed-mid-drag guard: the window is already gone from the layout
@@ -333,6 +402,112 @@ impl FlowWM {
 
         log::debug!("drag end: hwnd={}", drag.dragged_hwnd);
     }
+
+    /// Perform one column scroll in `direction` and report whether the viewport
+    /// moved.
+    ///
+    /// The viewport commits LIVE during a drag (a real view change the user
+    /// expects to persist). `scroll_left` / `scroll_right` return `None` at the
+    /// content edge, which the scheduler reads as "stop repeating". The dragged
+    /// window is excluded by `animate_layout`'s filter; the others animate to
+    /// their scrolled slots. Returns whether a scroll happened (the boolean the
+    /// scheduler's outcome feedback consumes).
+    fn perform_edge_scroll(&mut self, direction: Direction) -> bool {
+        let scrolled = match direction {
+            Direction::Left => self.active_scrolling_mut().scroll_left(),
+            Direction::Right => self.active_scrolling_mut().scroll_right(),
+            // Edge scroll is horizontal only; Up/Down never reach here.
+            Direction::Up | Direction::Down => return false,
+        };
+        match scrolled {
+            Some(applied) => {
+                self.animate_layout(&applied);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply a scheduler-emitted [`EdgeScrollAction`] to the drag's armed
+    /// deadline.
+    ///
+    /// `Arm(deadline)` stores the next-fire deadline (the main loop waits on
+    /// it); `Cancel` clears it. `Scroll` is never returned by `on_scroll_outcome`
+    /// — only by `on_enter` / `on_timer_fired`, whose callers perform the scroll
+    /// directly and feed the outcome back, so a `Scroll` arriving here is a
+    /// defensive no-op (leave the deadline untouched).
+    fn apply_edge_scroll_action(&mut self, action: EdgeScrollAction) {
+        let Some(drag) = self.drag_state.as_mut() else {
+            return;
+        };
+        match action {
+            EdgeScrollAction::Arm(deadline) => drag.edge_scroll_deadline = Some(deadline),
+            EdgeScrollAction::Cancel => drag.edge_scroll_deadline = None,
+            EdgeScrollAction::Scroll(_) => {}
+        }
+    }
+
+    /// Perform one scroll in `direction`, then feed its outcome to the scheduler
+    /// and (re)arm or cancel the repeat timer per the result.
+    ///
+    /// Shared tail of the entry scroll ([`Self::on_drag_move`]) and each
+    /// timer-fired repeat ([`Self::maybe_fire_edge_scroll`]): once the scheduler
+    /// has requested a scroll via `on_enter` / `on_timer_fired`, the caller
+    /// performs the real column scroll, reports whether the viewport moved back
+    /// through `on_scroll_outcome`, and applies the emitted `Arm` / `Cancel` to
+    /// the deadline.
+    fn scroll_once_and_rearm(&mut self, direction: Direction) {
+        let scrolled = self.perform_edge_scroll(direction);
+        let timings = self
+            .drag_state
+            .as_ref()
+            .expect("drag_state set for the whole drag")
+            .edge_scroll_timings;
+        let action = self
+            .drag_state
+            .as_mut()
+            .expect("drag_state set for the whole drag")
+            .edge_scroll
+            .on_scroll_outcome(scrolled, Instant::now(), &timings);
+        self.apply_edge_scroll_action(action);
+    }
+
+    /// Fire one auto-repeat edge scroll if the armed timer's deadline arrived.
+    ///
+    /// A twin of [`maybe_resume_float_tracking`](super::FlowWM::maybe_resume_float_tracking):
+    /// called at the top of the main loop (and inside the IPC inner loop), it
+    /// drives the steady repeat cadence while the cursor stays in a band —
+    /// including when the cursor is held perfectly still, which the move-driven
+    /// design could not do. The timer fires in the scheduler's last-known
+    /// direction (no fresh cursor read: the band is screen-edge-based, so
+    /// scrolling the viewport does not move it). On each fire it performs one
+    /// column scroll and re-arms or cancels per the outcome (the content edge
+    /// stops it). No-op when no drag is active, no timer is armed, or the
+    /// deadline has not yet arrived.
+    pub(super) fn maybe_fire_edge_scroll(&mut self) {
+        let Some(drag) = self.drag_state.as_ref() else {
+            return;
+        };
+        let Some(deadline) = drag.edge_scroll_deadline else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        // Deadline due: the scheduler emits a Scroll in its stored direction.
+        // A spurious fire from Idle (no action armed) is a no-op.
+        let dir = match self
+            .drag_state
+            .as_mut()
+            .expect("drag_state checked Some above")
+            .edge_scroll
+            .on_timer_fired()
+        {
+            Some(EdgeScrollAction::Scroll(dir)) => dir,
+            _ => return,
+        };
+        self.scroll_once_and_rearm(dir);
+    }
 }
 
 // NOTE: drag lifecycle is Win32 orchestration; coverage via the pure
@@ -357,6 +532,21 @@ impl FlowWM {
 #[must_use]
 fn should_submit_preview(prev_zone: Option<DropZone>, new_zone: Option<DropZone>) -> bool {
     prev_zone != new_zone
+}
+
+/// The edge-scroll band direction a drop zone sits in, or `None` off-band.
+///
+/// Drives the transition detector in [`FlowWM::on_drag_move`]: a change in this
+/// value is the only thing that acts on the scroll — entering a band fires the
+/// immediate scroll, leaving cancels. `Row` / `Column` / `None` are all "off"
+/// (no band), so the detector only distinguishes Left / Right / off.
+#[must_use]
+fn scroll_direction(zone: Option<DropZone>) -> Option<Direction> {
+    match zone {
+        Some(DropZone::ScrollLeft) => Some(Direction::Left),
+        Some(DropZone::ScrollRight) => Some(Direction::Right),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -410,5 +600,28 @@ mod tests {
         let col = Some(DropZone::Column { col: 2 });
         assert!(should_submit_preview(col, None));
         assert!(should_submit_preview(None, col));
+    }
+
+    #[test]
+    fn scroll_direction_maps_bands() {
+        assert_eq!(
+            scroll_direction(Some(DropZone::ScrollLeft)),
+            Some(Direction::Left)
+        );
+        assert_eq!(
+            scroll_direction(Some(DropZone::ScrollRight)),
+            Some(Direction::Right)
+        );
+    }
+
+    #[test]
+    fn scroll_direction_off_band_is_none() {
+        // Row / Column / None are all off-band (no scroll).
+        assert_eq!(scroll_direction(Some(DropZone::Column { col: 2 })), None);
+        assert_eq!(
+            scroll_direction(Some(DropZone::Row { col: 2, row: 0 })),
+            None
+        );
+        assert_eq!(scroll_direction(None), None);
     }
 }

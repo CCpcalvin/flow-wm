@@ -112,7 +112,8 @@ impl FlowWM {
     ///     resume float tracking if its deadline arrived
     ///     reconcile foreground against GetForegroundWindow()
     ///     timeout = soonest(pending_creations?100ms, float_resume_deadline,
-    ///                       foreground_sync_interval, INFINITE)
+    ///                       foreground_sync_interval, edge_scroll_deadline,
+    ///                       INFINITE)
     ///     MsgWaitForMultipleObjects(          // Sleep until something happens
     ///         [hook_signal, connected_event],
     ///         timeout,
@@ -202,6 +203,11 @@ impl FlowWM {
             // Runs before computing the timeout so a due deadline is handled
             // now instead of scheduling a 1 ms re-wake.
             self.maybe_resume_float_tracking();
+
+            // Fire one auto-repeat edge scroll if the drag's armed timer is due.
+            // Same top-of-loop pattern as the float-resume handler above: handle
+            // a due deadline now rather than re-scheduling a 1 ms re-wake.
+            self.maybe_fire_edge_scroll();
 
             // Reconcile internal focus against GetForegroundWindow(). This runs
             // on every wake, but no-ops in ~1 µs when tracked focus already
@@ -297,6 +303,7 @@ impl FlowWM {
                     // float tracking if its deadline arrived mid-session.
                     self.process_hook_events();
                     self.maybe_resume_float_tracking();
+                    self.maybe_fire_edge_scroll();
 
                     // Read next IPC message (blocking — but client is active).
                     match self.server.read_message() {
@@ -381,10 +388,17 @@ impl FlowWM {
                         self.config.focus.foreground_sync_interval_ms,
                     )
             });
+        // The drag's armed edge-scroll deadline (if a repeat is mid-flight).
+        // `None` when no drag is active or no timer is armed.
+        let edge_scroll_deadline = self
+            .drag_state
+            .as_ref()
+            .and_then(|ds| ds.edge_scroll_deadline);
         compute_wait_timeout_inner(
             !self.pending_creations.is_empty(),
             self.float_resume_deadline,
             next_foreground_sync,
+            edge_scroll_deadline,
             std::time::Instant::now(),
         )
     }
@@ -505,37 +519,43 @@ impl FlowWM {
 
 /// Pure, clock-injectable form of [`FlowWM::compute_wait_timeout`].
 ///
-/// Returns the smaller of the two finite deadlines:
+/// Returns the smaller of the finite deadlines:
 /// - `has_pending_creations` → [`PENDING_RETRY_TIMEOUT_MS`].
-/// - `float_resume_deadline` → milliseconds remaining until it's due (floored
-///   to 1 so a due deadline re-wakes the loop instead of busy-looping on 0).
+/// - any of the optional deadlines → milliseconds remaining until it's due
+///   (floored to 1 so a due deadline re-wakes the loop instead of busy-looping
+///   on 0).
 ///
 /// Returns `u32::MAX` (`INFINITE`) when no source is active. Extracted
 /// to a free function so the branching is unit-testable without constructing
 /// a full [`FlowWM`] (which needs Win32 + a hook thread).
 ///
-/// Three finite-deadline sources fold into the result via `min`:
+/// Four finite-deadline sources fold into the result via `min`:
 /// 1. `has_pending_creations` → fixed `PENDING_RETRY_TIMEOUT_MS` cadence.
 /// 2. `float_resume_deadline` → remaining ms until float tracking resumes.
 /// 3. `next_foreground_sync` → remaining ms until the foreground is reconciled
 ///    against `GetForegroundWindow()` (closes the gap when
 ///    `EVENT_SYSTEM_FOREGROUND` is dropped under rapid window churn).
+/// 4. `edge_scroll_deadline` → remaining ms until the drag's armed auto-repeat
+///    timer fires (so a held cursor in a band keeps scrolling even with no
+///    hook/IPC activity).
 fn compute_wait_timeout_inner(
     has_pending_creations: bool,
     float_resume_deadline: Option<std::time::Instant>,
     next_foreground_sync: Option<std::time::Instant>,
+    edge_scroll_deadline: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> u32 {
     let mut best: Option<u32> = None;
     if has_pending_creations {
         best = Some(PENDING_RETRY_TIMEOUT_MS);
     }
-    // Fold two optional deadlines through the same min-reduce. A due (past)
+    // Fold the optional deadlines through the same min-reduce. A due (past)
     // deadline floors at 1 ms so the loop re-wakes and runs the handler instead
     // of busy-spinning; the top-of-loop handlers clear due deadlines first.
     for deadline in float_resume_deadline
         .into_iter()
         .chain(next_foreground_sync)
+        .chain(edge_scroll_deadline)
     {
         let remaining = deadline.saturating_duration_since(now);
         let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
@@ -553,14 +573,17 @@ mod tests {
     #[test]
     fn wait_timeout_infinite_when_idle() {
         let now = Instant::now();
-        assert_eq!(compute_wait_timeout_inner(false, None, None, now), u32::MAX);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, now),
+            u32::MAX
+        );
     }
 
     #[test]
     fn wait_timeout_pending_creations_uses_retry_cadence() {
         let now = Instant::now();
         assert_eq!(
-            compute_wait_timeout_inner(true, None, None, now),
+            compute_wait_timeout_inner(true, None, None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -570,7 +593,7 @@ mod tests {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(500);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(deadline), None, now),
+            compute_wait_timeout_inner(false, Some(deadline), None, None, now),
             500
         );
     }
@@ -581,7 +604,7 @@ mod tests {
         // Pending = 100 ms cadence; deadline in 50 ms → 50 wins.
         let deadline = now + Duration::from_millis(50);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), None, now),
+            compute_wait_timeout_inner(true, Some(deadline), None, None, now),
             50
         );
     }
@@ -592,7 +615,7 @@ mod tests {
         // Pending = 100 ms; deadline in 5 s → 100 wins.
         let deadline = now + Duration::from_secs(5);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), None, now),
+            compute_wait_timeout_inner(true, Some(deadline), None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -604,7 +627,7 @@ mod tests {
         // loop re-wakes and runs the resume handler instead of busy-spinning.
         let deadline = now - Duration::from_millis(10);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(deadline), None, now),
+            compute_wait_timeout_inner(false, Some(deadline), None, None, now),
             1
         );
     }
@@ -615,7 +638,7 @@ mod tests {
         // Sync deadline in 250 ms (the default interval) → 250.
         let deadline = now + Duration::from_millis(250);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, Some(deadline), now),
+            compute_wait_timeout_inner(false, None, Some(deadline), None, now),
             250
         );
     }
@@ -628,8 +651,43 @@ mod tests {
         let float_deadline = now + Duration::from_secs(5);
         let sync_deadline = now + Duration::from_millis(80);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(float_deadline), Some(sync_deadline), now),
+            compute_wait_timeout_inner(false, Some(float_deadline), Some(sync_deadline), None, now),
             80
+        );
+    }
+
+    #[test]
+    fn wait_timeout_edge_scroll_deadline_uses_remaining_ms() {
+        let now = Instant::now();
+        // Armed auto-repeat timer in 120 ms → 120.
+        let deadline = now + Duration::from_millis(120);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, Some(deadline), now),
+            120
+        );
+    }
+
+    #[test]
+    fn wait_timeout_edge_scroll_deadline_wins_when_soonest() {
+        let now = Instant::now();
+        // Float deadline in 5 s; edge-scroll repeat in 60 ms → 60 wins. Confirms
+        // the fourth source participates in the min-reduce, not just appends.
+        let float_deadline = now + Duration::from_secs(5);
+        let edge_deadline = now + Duration::from_millis(60);
+        assert_eq!(
+            compute_wait_timeout_inner(false, Some(float_deadline), None, Some(edge_deadline), now),
+            60
+        );
+    }
+
+    #[test]
+    fn wait_timeout_edge_scroll_due_deadline_floors_to_one_ms() {
+        let now = Instant::now();
+        // Already past → floor to 1 so the loop re-wakes and fires the repeat.
+        let deadline = now - Duration::from_millis(5);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, Some(deadline), now),
+            1
         );
     }
 }
