@@ -107,27 +107,37 @@ floating_color = "#AA00FF"
 [focus]
 foreground_sync_interval_ms = 250
 
+# Edge-scroll configuration (shared by drag and hover edge-scroll).
+#
+# The three parameters that govern edge-scroll auto-repeat — the band width
+# and the two timings — live here so both tile-drag edge-scroll and (future)
+# edge-hover-scroll read one set of values.
+#
+# - band_width:         px band at the screen edge that triggers viewport scroll
+# - initial_delay_ms:   gap (ms) from the immediate entry scroll to the first
+#                       repeat; clamped up to the repeat interval
+# - repeat_interval_ms: gap (ms) between successive column scrolls while held;
+#                       clamped up to the animation duration and an internal
+#                       spam-guard floor
+[edge_scroll]
+band_width = 30
+initial_delay_ms = 500
+repeat_interval_ms = 240
+
 # Tile-drag configuration.
 #
 # When a user drags a tiled window by its title bar, a live non-committing
 # preview reflows the other windows to the prospective layout on each zone
 # change; on release the move commits and the dragged window snaps into its
-# slot. Floating windows never enter the drag state machine.
+# slot. Floating windows never enter the drag state machine. The shared
+# edge-scroll band width and timings live in [edge_scroll] above; this block
+# holds only the drag-specific column-insert hit-band parameters.
 #
-# - edge_scroll_width:          px band at screen edge that triggers viewport scroll
-# - col_edge_ratio:             fraction of column width for column-insert edge band
-# - col_edge_max_px:            pixel cap on the column-insert hit band
-# - edge_scroll_initial_delay_ms:  gap (ms) from the immediate entry scroll to the
-#                                  first repeat; clamped up to the repeat interval
-# - edge_scroll_repeat_interval_ms: gap (ms) between successive column scrolls while
-#                                   held; clamped up to the animation duration and an
-#                                   internal spam-guard floor
+# - col_edge_ratio:  fraction of column width for the column-insert edge band
+# - col_edge_max_px: pixel cap on the column-insert hit band
 [drag]
-edge_scroll_width = 30
 col_edge_ratio = 0.18
 col_edge_max_px = 120
-edge_scroll_initial_delay_ms = 500
-edge_scroll_repeat_interval_ms = 240
 
 # Loadout save/restore settings.
 #

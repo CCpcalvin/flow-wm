@@ -65,18 +65,18 @@ pub(super) struct DragState {
     pub(super) current_zone: Option<DropZone>,
 }
 
-/// Compute the already-clamped effective edge-scroll timings from the drag
-/// config.
+/// Compute the already-clamped effective edge-scroll timings from the shared
+/// edge-scroll config.
 ///
 /// Built once per drag (at [`FlowWM::on_drag_start`], and for the
 /// orchestrator's initial value in `new.rs`) from
-/// `DragConfig::effective_repeat_interval_ms` /
-/// `DragConfig::effective_initial_delay_ms` so the scheduler consumes them
-/// with no per-event clamp math. The scheduler itself stays config-agnostic.
+/// `EdgeScrollConfig::effective_repeat_interval_ms` /
+/// `EdgeScrollConfig::effective_initial_delay_ms` so the scheduler consumes
+/// them with no per-event clamp math. The scheduler itself stays config-agnostic.
 pub(super) fn edge_scroll_timings_for(config: &FlowConfig) -> EdgeScrollTimings {
-    let drag_cfg = &config.drag;
-    let repeat_ms = drag_cfg.effective_repeat_interval_ms(&config.animation);
-    let initial_ms = drag_cfg.effective_initial_delay_ms(repeat_ms);
+    let edge_scroll_cfg = &config.edge_scroll;
+    let repeat_ms = edge_scroll_cfg.effective_repeat_interval_ms(&config.animation);
+    let initial_ms = edge_scroll_cfg.effective_initial_delay_ms(repeat_ms);
     EdgeScrollTimings {
         initial_delay: Duration::from_millis(u64::from(initial_ms)),
         repeat_interval: Duration::from_millis(u64::from(repeat_ms)),
@@ -117,8 +117,10 @@ impl FlowWM {
 
         // Arm the shared edge-scroll scheduler fresh for this drag (mirrors the
         // old per-drag `EdgeScrollScheduler::new()`), set this drag's clamped
-        // timings, and clear any stale deadline. The scheduler is a single
-        // instance on the orchestrator now; see `edge_scroll`.
+        // timings (read from the shared `[edge_scroll]` config block via
+        // [`edge_scroll_timings_for`]), and clear any stale deadline. The
+        // scheduler is a single instance on the orchestrator now; see
+        // `edge_scroll`.
         self.edge_scroll = EdgeScrollScheduler::new();
         self.edge_scroll_timings = edge_scroll_timings_for(&self.config);
         self.edge_scroll_deadline = None;
@@ -237,7 +239,7 @@ impl FlowWM {
             dragged_id,
             cx,
             cy,
-            drag_cfg.edge_scroll_width,
+            self.config.edge_scroll.band_width,
             drag_cfg.col_edge_ratio,
             drag_cfg.col_edge_max_px,
         );

@@ -182,8 +182,8 @@ variants:
 
 The map is layered, highest priority first.
 
-**1. Edge scroll.** A band `edge_scroll_width` pixels wide on each monitor
-edge. The cursor in the left band maps to `ScrollLeft`, but only if there is
+**1. Edge scroll.** A band `band_width` pixels wide on each monitor
+edge (the `[edge_scroll]` section). The cursor in the left band maps to `ScrollLeft`, but only if there is
 content scrolled off-screen to the left (`viewport_offset > 0`);
 `ScrollRight` only if the column content extends past the right viewport
 edge. The right-edge check uses `content_right = canvas_width − gap` rather
@@ -425,19 +425,24 @@ the drag ends.
 
 ## Config
 
-The `[drag]` section (`DragConfig` in (`src/config/types.rs`)) has three
-knobs:
+The `[drag]` section (`DragConfig` in (`src/config/types.rs`)) holds the
+drag-specific column-insert hit-band knobs:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `edge_scroll_width` | `30` | Pixel width of the left/right monitor-edge scroll bands |
 | `col_edge_ratio` | `0.18` | Fraction of column width used as the column-insert band floor |
 | `col_edge_max_px` | `120` | Pixel cap on the column-insert band (`band = max(1, min(ratio · width, max_px))`) |
 
+The shared edge-scroll band width (`band_width`) and auto-repeat timings
+(`initial_delay_ms`, `repeat_interval_ms`) live in their own `[edge_scroll]`
+section (`EdgeScrollConfig`), consumed by drag edge-scroll and (future)
+edge-hover-scroll.
+
 Per the project's config-defaults rule, **code is the single source of
-truth**: the `Default` impl on `DragConfig` holds the authoritative defaults,
-and `default-config.toml` is a hand-written example kept in sync by the
-`default_config_toml_matches_compiled_defaults` test in (`src/config/types.rs`).
+truth**: the `Default` impls on `DragConfig` and `EdgeScrollConfig` hold the
+authoritative defaults, and `default-config.toml` is a hand-written example
+kept in sync by the `default_config_toml_matches_compiled_defaults` test in
+(`src/config/types.rs`).
 
 The three knobs removed in this redesign — `dwell_time_ms`,
 `left_right_zone_ratio`, `upper_lower_zone_ratio` — belonged to the old

@@ -72,12 +72,12 @@ pub(crate) enum EdgeScrollState {
 
 /// The already-clamped effective timings fed to the scheduler.
 ///
-/// Built by the live drag from [`DragConfig::effective_repeat_interval_ms`] /
-/// [`DragConfig::effective_initial_delay_ms`] so the scheduler itself contains
+/// Built by the live drag from [`EdgeScrollConfig::effective_repeat_interval_ms`] /
+/// [`EdgeScrollConfig::effective_initial_delay_ms`] so the scheduler itself contains
 /// no clamp math — it just consumes the result.
 ///
-/// [`DragConfig::effective_repeat_interval_ms`]: crate::config::DragConfig::effective_repeat_interval_ms
-/// [`DragConfig::effective_initial_delay_ms`]: crate::config::DragConfig::effective_initial_delay_ms
+/// [`EdgeScrollConfig::effective_repeat_interval_ms`]: crate::config::types::EdgeScrollConfig::effective_repeat_interval_ms
+/// [`EdgeScrollConfig::effective_initial_delay_ms`]: crate::config::types::EdgeScrollConfig::effective_initial_delay_ms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EdgeScrollTimings {
     /// Gap from the immediate entry scroll to the first repeat (the first-gap).
