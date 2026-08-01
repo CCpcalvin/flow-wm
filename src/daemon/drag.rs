@@ -124,6 +124,10 @@ impl FlowWM {
         self.edge_scroll = EdgeScrollScheduler::new();
         self.edge_scroll_timings = edge_scroll_timings_for(&self.config);
         self.edge_scroll_deadline = None;
+        // The hover subsystem is suppressed during a drag: cancel any armed
+        // edge-dwell so it cannot fire EdgeEnter and feed the scheduler mid-drag
+        // (the drag owns the scheduler while drag_state is set).
+        self.edge_dwell_deadline = None;
 
         self.drag_state = Some(DragState {
             dragged_id: WindowId(hwnd),
@@ -428,8 +432,9 @@ impl FlowWM {
     /// it); `Cancel` clears it. `Scroll` is never returned by `on_scroll_outcome`
     /// — only by `on_enter` / `on_timer_fired`, whose callers perform the scroll
     /// directly and feed the outcome back, so a `Scroll` arriving here is a
-    /// defensive no-op (leave the deadline untouched).
-    fn apply_edge_scroll_action(&mut self, action: EdgeScrollAction) {
+    /// defensive no-op (leave the deadline untouched). Shared by the drag feed
+    /// and the hover feed (`edge_dwell` EdgeLeave).
+    pub(super) fn apply_edge_scroll_action(&mut self, action: EdgeScrollAction) {
         match action {
             EdgeScrollAction::Arm(deadline) => self.edge_scroll_deadline = Some(deadline),
             EdgeScrollAction::Cancel => self.edge_scroll_deadline = None,
@@ -440,13 +445,15 @@ impl FlowWM {
     /// Perform one scroll in `direction`, then feed its outcome to the scheduler
     /// and (re)arm or cancel the repeat timer per the result.
     ///
-    /// Shared tail of the entry scroll ([`Self::on_drag_move`]) and each
-    /// timer-fired repeat ([`Self::maybe_fire_edge_scroll`]): once the scheduler
-    /// has requested a scroll via `on_enter` / `on_timer_fired`, the caller
-    /// performs the real column scroll, reports whether the viewport moved back
-    /// through `on_scroll_outcome`, and applies the emitted `Arm` / `Cancel` to
-    /// the deadline.
-    fn scroll_once_and_rearm(&mut self, direction: Direction) {
+    /// Shared tail of the entry scroll ([`Self::on_drag_move`]), each
+    /// timer-fired repeat ([`Self::maybe_fire_edge_scroll`]), and the hover
+    /// edge-dwell expiry (`EdgeEnter` → the hover feed reuses the same
+    /// immediate-then-first-gap-then-repeat behavior). Once the scheduler has
+    /// requested a scroll via `on_enter` / `on_timer_fired`, the caller performs
+    /// the real column scroll, reports whether the viewport moved back through
+    /// `on_scroll_outcome`, and applies the emitted `Arm` / `Cancel` to the
+    /// deadline.
+    pub(super) fn scroll_once_and_rearm(&mut self, direction: Direction) {
         let scrolled = self.perform_edge_scroll(direction);
         let timings = self.edge_scroll_timings;
         let action = self
@@ -465,14 +472,12 @@ impl FlowWM {
     /// direction (no fresh cursor read: the band is screen-edge-based, so
     /// scrolling the viewport does not move it). On each fire it performs one
     /// column scroll and re-arms or cancels per the outcome (the content edge
-    /// stops it). No-op when no drag is active, no timer is armed, or the
-    /// deadline has not yet arrived.
+    /// stops it). No-op when no timer is armed or the deadline has not yet
+    /// arrived. The single scheduler is fed by exactly one site at a time (the
+    /// drag's reactive move handler during a drag, the hover edge-dwell
+    /// otherwise); they never overlap because `poll_hover` bails while a drag is
+    /// active and `on_drag_start` clears any armed hover edge-dwell.
     pub(super) fn maybe_fire_edge_scroll(&mut self) {
-        // Only the tile-drag path arms the orchestrator's scheduler today, so
-        // bail when no drag is active. (A later ticket adds the hover feed.)
-        if self.drag_state.is_none() {
-            return;
-        }
         let Some(deadline) = self.edge_scroll_deadline else {
             return;
         };

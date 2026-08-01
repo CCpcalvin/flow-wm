@@ -220,9 +220,9 @@ pub struct FlowWM {
     pub(super) hover: crate::hover::HoverController,
 
     /// Already-clamped effective hover dwell durations for the current poll.
-    /// Focus dwell is read from `config.hover.focus_dwell_ms`; edge dwell is a
-    /// placeholder until edge-hover-scroll (a later ticket) wires its config
-    /// field. Mirrors [`edge_scroll_timings`](Self::edge_scroll_timings).
+    /// Focus dwell is read from `config.hover.focus_dwell_ms`; edge dwell from
+    /// `config.hover.edge_dwell_ms`. Mirrors
+    /// [`edge_scroll_timings`](Self::edge_scroll_timings).
     pub(super) hover_timings: crate::hover::HoverTimings,
 
     /// The armed focus-follows-mouse dwell deadline, or `None` when no dwell is
@@ -230,6 +230,14 @@ pub struct FlowWM {
     /// fires `maybe_fire_focus_dwell` when it arrives. Set by `ArmDwell`, cleared
     /// by `CancelDwell` and after the dwell fires. (`docs/src/dev-guide/hover.md`)
     pub(super) focus_dwell_deadline: Option<std::time::Instant>,
+
+    /// The armed edge-hover-scroll dwell deadline, or `None` when none is armed.
+    /// The main loop folds this into its wait-timeout `min`-reduce and fires
+    /// [`maybe_fire_edge_dwell`](super::hover::FlowWM::maybe_fire_edge_dwell)
+    /// when it arrives. Set by `ArmEdgeDwell`, cleared by `CancelEdgeDwell`,
+    /// after it fires, and when a tile drag starts (the hover subsystem is
+    /// suppressed during a drag). (`docs/src/dev-guide/hover.md`)
+    pub(super) edge_dwell_deadline: Option<std::time::Instant>,
 
     /// Timestamp of the most recent hover cursor poll. `None` until the first
     /// poll. Throttles the poll to `config.hover.poll_interval_ms` (the loop can

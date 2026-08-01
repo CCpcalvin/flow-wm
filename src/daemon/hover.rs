@@ -1,12 +1,16 @@
-//! Focus-follows-mouse wiring — translates the pure
+//! Hover wiring — translates the pure
 //! [`HoverController`](crate::hover::HoverController) into the live daemon.
 //!
-//! This module is the impure glue: it polls `GetCursorPos`, resolves the
-//! top-level window under the cursor, feeds the controller a [`HoverPoll`], and
-//! applies the returned [`HoverAction`]s — the OS foreground push for `Focus`,
-//! and arming/clearing the focus-dwell deadline for `ArmDwell` / `CancelDwell`.
-//! The pure decision logic (movement-gate, cancel-on-foreground, eligibility
-//! precedence) lives entirely in the controller; this module only translates.
+//! This module is the impure glue: it polls `GetCursorPos`, classifies the
+//! cursor against the screen edge band (via
+//! [`edge_band_direction`](crate::hover::edge_band_direction)) and resolves the
+//! top-level window under it, feeds the controller a [`HoverPoll`], and applies
+//! the returned [`HoverAction`]s — the OS foreground push for `Focus`,
+//! arming/clearing the focus-dwell deadline for `ArmDwell` / `CancelDwell`, and
+//! feeding the shared edge-scroll scheduler plus the edge-dwell deadline for the
+//! edge actions. The pure decision logic (movement-gate, cancel-on-foreground,
+//! eligibility precedence, edge-band precedence) lives entirely in the
+//! controller; this module only translates.
 //!
 //! # Coverage
 //!
@@ -14,14 +18,6 @@
 //! unit-tested without a cross-cutting injection seam that is out of scope. It
 //! is covered by the controller's hermetic unit tests plus manual interactive
 //! testing. (`docs/src/dev-guide/hover.md`)
-//!
-//! # Edge-hover-scroll (a later ticket)
-//!
-//! Today `edge_band` is fed `None`, so only the focus-follows-mouse path runs.
-//! A later ticket fills in the edge band (via
-//! [`edge_band_direction`](crate::hover::edge_band_direction)) and translates
-//! the edge actions (`EdgeEnter` / `EdgeLeave` / `ArmEdgeDwell` /
-//! `CancelEdgeDwell`) into feeds to the shared edge-scroll scheduler.
 
 use std::time::{Duration, Instant};
 
@@ -29,42 +25,42 @@ use windows::Win32::Foundation::HWND;
 
 use crate::common::{Point, WindowId};
 use crate::config::FlowConfig;
-use crate::hover::{HoverAction, HoverPoll, HoverTimings};
+use crate::hover::{HoverAction, HoverPoll, HoverTimings, edge_band_direction};
 use crate::registry::types::WindowState;
 use crate::registry::win32 as registry_win32;
 
 use super::types::FlowWM;
 
-/// Placeholder for the edge-band dwell, used only while edge-hover-scroll is
-/// unwired (ticket 04 feeds `edge_band: None`, so the controller never consults
-/// it). Ticket 05 will read it from `config.hover.edge_dwell_ms` and remove this.
-const HOVER_EDGE_DWELL_PLACEHOLDER_MS: u64 = 150;
-
 /// Compute the already-clamped effective hover dwell durations from the config.
 ///
 /// Built once at construction (and on config reload) from
-/// `HoverConfig::focus_dwell_ms`; the controller consumes the result with no
-/// per-event clamp math, mirroring the drag's `edge_scroll_timings_for`.
-/// `edge_dwell` is a placeholder until edge-hover-scroll wires its config field.
+/// `HoverConfig::focus_dwell_ms` and `HoverConfig::edge_dwell_ms`; the
+/// controller consumes the result with no per-event clamp math, mirroring the
+/// drag's `edge_scroll_timings_for`.
 pub(super) fn hover_timings_for(config: &FlowConfig) -> HoverTimings {
     HoverTimings {
         focus_dwell: Duration::from_millis(u64::from(config.hover.focus_dwell_ms)),
-        edge_dwell: Duration::from_millis(HOVER_EDGE_DWELL_PLACEHOLDER_MS),
+        edge_dwell: Duration::from_millis(u64::from(config.hover.edge_dwell_ms)),
     }
 }
 
 impl FlowWM {
-    /// Poll the cursor and drive focus-follows-mouse.
+    /// Poll the cursor and drive the hover behaviors (FFM and edge-hover-scroll).
     ///
-    /// No-op when focus-follows-mouse is off or a tile drag is in progress
+    /// No-op when both behavior flags are off or a tile drag is in progress
     /// (the whole hover subsystem is suspended during a drag). Throttled to
     /// `config.hover.poll_interval_ms` via [`last_hover_poll`](Self::last_hover_poll):
     /// the loop can wake far more often on hook activity, but the poll only
-    /// fires once per interval. On each poll it resolves the top-level window
-    /// under the cursor, classifies its FFM eligibility, feeds the controller,
-    /// and applies the emitted [`HoverAction`]s.
+    /// fires once per interval. On each poll it classifies the cursor against
+    /// the screen edge band (using the active workspace's monitor work area and
+    /// the shared `[edge_scroll]` band width) and resolves the FFM-eligible
+    /// target, then feeds the controller and applies the emitted
+    /// [`HoverAction`]s. Edge-band classification takes precedence over FFM
+    /// (the controller cancels any pending FFM dwell on band entry).
     pub(super) fn poll_hover(&mut self) {
-        if !self.config.hover.focus_follows_mouse || self.drag_state.is_some() {
+        if (!self.config.hover.focus_follows_mouse && !self.config.hover.edge_scroll)
+            || self.drag_state.is_some()
+        {
             return;
         }
         let now = Instant::now();
@@ -89,13 +85,32 @@ impl FlowWM {
             }
         };
 
-        // Resolve the FFM-eligible target under the cursor. `edge_band` is
-        // `None` for now — edge-hover-scroll (a later ticket) fills it in via
-        // `edge_band_direction`.
-        let target = self.hover_ffm_target(cx, cy);
+        let cursor_point = Point { x: cx, y: cy };
+
+        // Classify the cursor against the screen edge band of the active
+        // workspace's monitor work area, using the shared `[edge_scroll]` band
+        // width (the same value drag edge-scroll uses). Disabled when
+        // `edge_scroll` is off — the controller then sees `edge_band: None` and
+        // only the FFM path can run.
+        let edge_band = if self.config.hover.edge_scroll {
+            let work_area = self.active_scrolling().monitor().work_area;
+            edge_band_direction(cursor_point, work_area, self.config.edge_scroll.band_width)
+        } else {
+            None
+        };
+
+        // Resolve the FFM-eligible target only when FFM is on (skip the Win32
+        // lookup otherwise). The controller ignores `target` while in a band
+        // (edge precedence), so the two never conflict.
+        let target = if self.config.hover.focus_follows_mouse {
+            self.hover_ffm_target(cx, cy)
+        } else {
+            None
+        };
+
         let poll = HoverPoll {
-            cursor: Point { x: cx, y: cy },
-            edge_band: None,
+            cursor: cursor_point,
+            edge_band,
             target,
         };
         let actions = self.hover.on_poll(poll, now, &self.hover_timings);
@@ -128,6 +143,33 @@ impl FlowWM {
         // deadline unconditionally before asking the controller to fire.
         self.focus_dwell_deadline = None;
         let action = self.hover.on_dwell_timer_fired();
+        self.apply_hover_action(action);
+    }
+
+    /// Fire the edge-hover-scroll dwell if its armed deadline is due.
+    ///
+    /// A twin of [`maybe_fire_focus_dwell`](Self::maybe_fire_focus_dwell):
+    /// called at the top of the main loop, it lands the edge-dwell promptly when
+    /// its deadline arrives. On fire it asks the controller for the
+    /// [`HoverAction::EdgeEnter`] (which feeds the shared edge-scroll scheduler),
+    /// so the immediate-first-scroll-then-repeat behavior is reused exactly.
+    /// No-op when edge-hover-scroll is off, no edge-dwell is armed, or the
+    /// deadline has not yet arrived.
+    pub(super) fn maybe_fire_edge_dwell(&mut self) {
+        if !self.config.hover.edge_scroll {
+            return;
+        }
+        let Some(deadline) = self.edge_dwell_deadline else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        // The deadline is consumed whether or not the controller had one armed —
+        // a spurious fire (nothing armed) is a harmless no-op in the controller —
+        // so clear it unconditionally before asking the controller to fire.
+        self.edge_dwell_deadline = None;
+        let action = self.hover.on_edge_dwell_timer_fired();
         self.apply_hover_action(action);
     }
 
@@ -180,8 +222,11 @@ impl FlowWM {
     /// `EVENT_SYSTEM_FOREGROUND` runs [`on_focus_changed`](super::hooks::FlowWM::on_focus_changed),
     /// which does scroll-to-reveal, border recolor, and workspace switching).
     /// `ArmDwell` / `CancelDwell` set / clear the focus-dwell deadline the main
-    /// loop waits on. The edge actions are no-ops today (edge-hover-scroll is a
-    /// later ticket); they will feed the shared edge-scroll scheduler then.
+    /// loop waits on. `ArmEdgeDwell` / `CancelEdgeDwell` set / clear the
+    /// edge-dwell deadline. `EdgeEnter` feeds the shared edge-scroll scheduler
+    /// the band entry (immediate scroll + arm the first-gap timer, reusing the
+    /// drag's `scroll_once_and_rearm`); `EdgeLeave` tells the scheduler to stop
+    /// and clears the edge-dwell deadline.
     fn apply_hover_action(&mut self, action: HoverAction) {
         match action {
             HoverAction::Focus(wid) => {
@@ -198,13 +243,29 @@ impl FlowWM {
             HoverAction::CancelDwell => {
                 self.focus_dwell_deadline = None;
             }
-            // Edge-hover-scroll (a later ticket) translates these into feeds to
-            // the shared edge-scroll scheduler and the edge-dwell deadline.
-            HoverAction::ArmEdgeDwell(_)
-            | HoverAction::CancelEdgeDwell
-            | HoverAction::EdgeEnter(_)
-            | HoverAction::EdgeLeave
-            | HoverAction::NoOp => {}
+            HoverAction::ArmEdgeDwell(deadline) => {
+                self.edge_dwell_deadline = Some(deadline);
+            }
+            HoverAction::CancelEdgeDwell => {
+                self.edge_dwell_deadline = None;
+            }
+            HoverAction::EdgeEnter(direction) => {
+                // Feed the shared scheduler the band entry: `on_enter` records
+                // the direction and returns the immediate-scroll request, then
+                // `scroll_once_and_rearm` performs the scroll and arms the
+                // first-gap timer (or stays idle at the content edge). This is
+                // exactly the drag's band-entry path — one shared scheduler, one
+                // immediate-then-first-gap-then-repeat state machine.
+                let _ = self.edge_scroll.on_enter(direction);
+                self.scroll_once_and_rearm(direction);
+            }
+            HoverAction::EdgeLeave => {
+                // Tell the shared scheduler to stop and clear its timer.
+                let action = self.edge_scroll.on_leave();
+                self.apply_edge_scroll_action(action);
+                self.edge_dwell_deadline = None;
+            }
+            HoverAction::NoOp => {}
         }
     }
 }
