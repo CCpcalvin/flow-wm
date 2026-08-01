@@ -232,6 +232,66 @@ foreground_sync_interval_ms = 250
 
 ---
 
+### `[edge_scroll]` — shared edge-scroll band & cadence
+
+The three parameters that govern edge-scrolling — during a tile drag **and**
+during edge-hover-scroll. They were promoted out of `[drag]` into their own
+block because they are shared by both consumers (the drag feed and the hover
+feed of the single edge-scroll scheduler). `[drag]` retains only its
+drag-specific column-insert hit-band parameters (`col_edge_ratio`,
+`col_edge_max_px`).
+
+> **Breaking rename.** Existing configs that customized these under `[drag]`
+> (`edge_scroll_width`, `edge_scroll_initial_delay_ms`,
+> `edge_scroll_repeat_interval_ms`) silently revert to the defaults below
+> unless moved to `[edge_scroll]`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `band_width` | `i32` | `30` | Pixel width of the left/right edge bands at the screen edge. |
+| `initial_delay_ms` | `u32` | `500` | Gap (ms) from the immediate entry scroll to the first repeat. Clamped up to the effective repeat interval at runtime. |
+| `repeat_interval_ms` | `u32` | `240` | Gap (ms) between successive column scrolls. Clamped up to the enabled animation duration and an 80 ms spam-guard floor at runtime. |
+
+Example:
+
+```toml
+[edge_scroll]
+band_width = 30
+initial_delay_ms = 500
+repeat_interval_ms = 240
+```
+
+---
+
+### `[hover]` — focus-follows-mouse & edge-hover-scroll
+
+Two pointer-driven behaviors that let you navigate the workspace with the mouse
+alone. Both share one low-rate cursor poll. **Both ship on by default** — this
+breaks the daemon's zero-CPU-while-idle property (the poll wakes ~20 times per
+second); flip either flag to `false` to restore it. See the
+[Hover developer guide](../dev-guide/hover.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `focus_follows_mouse` | `bool` | `true` | Rest the cursor on an eligible tracked window for the dwell to focus it through the existing focus path. |
+| `focus_dwell_ms` | `u32` | `300` | Rest time (ms) before FFM focuses; any cursor motion restarts it (a jittering mouse never focuses). |
+| `edge_scroll` | `bool` | `true` | Rest the cursor in a screen edge band for the edge-dwell to scroll the viewport one column, then glide at the shared cadence. |
+| `edge_dwell_ms` | `u32` | `150` | Rest time (ms) in a band before the first edge-scroll — shorter than the focus dwell. |
+| `poll_interval_ms` | `u32` | `50` | Shared cursor poll interval (ms); clamped to an 8 ms floor so a typo can't busy-loop. |
+
+Example:
+
+```toml
+[hover]
+focus_follows_mouse = true
+focus_dwell_ms = 300
+edge_scroll = true
+edge_dwell_ms = 150
+poll_interval_ms = 50
+```
+
+---
+
 ## `flow-rules.toml`
 
 Window classification rules — which windows FlowWM should tile, float, or

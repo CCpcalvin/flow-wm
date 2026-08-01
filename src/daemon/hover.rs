@@ -3,7 +3,7 @@
 //!
 //! This module is the impure glue: it polls `GetCursorPos`, classifies the
 //! cursor against the screen edge band (via
-//! [`edge_band_direction`](crate::hover::edge_band_direction)) and resolves the
+//! [`edge_band_direction`]) and resolves the
 //! top-level window under it, feeds the controller a [`HoverPoll`], and applies
 //! the returned [`HoverAction`]s — the OS foreground push for `Focus`,
 //! arming/clearing the focus-dwell deadline for `ArmDwell` / `CancelDwell`, and
@@ -121,7 +121,7 @@ impl FlowWM {
 
     /// Fire the focus-follows-mouse dwell if its armed deadline is due.
     ///
-    /// A twin of [`maybe_fire_edge_scroll`](super::drag::FlowWM::maybe_fire_edge_scroll):
+    /// A twin of [`FlowWM::maybe_fire_edge_scroll`]:
     /// called at the top of the main loop, it lands the dwell promptly when its
     /// deadline arrives — including when the cursor is held perfectly still,
     /// which is exactly the case that should focus. On fire it asks the
@@ -181,7 +181,7 @@ impl FlowWM {
     /// has not moved, so the dwell cannot re-arm until the mouse actually moves
     /// — the movement-gate defeats the classic alt-tab steal-back with no
     /// keyboard detection or cooldown. Called from
-    /// [`on_focus_changed`](super::hooks::FlowWM::on_focus_changed).
+    /// [`FlowWM::on_focus_changed`].
     pub(super) fn on_hover_foreground_change(&mut self) {
         let action = self.hover.on_foreground_change();
         self.apply_hover_action(action);
@@ -219,7 +219,7 @@ impl FlowWM {
     /// Apply a controller-emitted [`HoverAction`] to the live orchestrator.
     ///
     /// `Focus` pushes the OS foreground (the existing focus path; the resulting
-    /// `EVENT_SYSTEM_FOREGROUND` runs [`on_focus_changed`](super::hooks::FlowWM::on_focus_changed),
+    /// `EVENT_SYSTEM_FOREGROUND` runs [`FlowWM::on_focus_changed`],
     /// which does scroll-to-reveal, border recolor, and workspace switching).
     /// `ArmDwell` / `CancelDwell` set / clear the focus-dwell deadline the main
     /// loop waits on. `ArmEdgeDwell` / `CancelEdgeDwell` set / clear the

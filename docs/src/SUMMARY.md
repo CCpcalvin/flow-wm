@@ -20,6 +20,7 @@
 - [Threading Model](./dev-guide/threading-model.md)
 - [Event Pipelines](./dev-guide/event-pipelines.md)
 - [Tile Drag](./dev-guide/tile-drag.md)
+- [Hover — Focus-Follows-Mouse & Edge-Hover-Scroll](./dev-guide/hover.md)
 
 ## Layout Engine
 

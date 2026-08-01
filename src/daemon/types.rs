@@ -233,7 +233,7 @@ pub struct FlowWM {
 
     /// The armed edge-hover-scroll dwell deadline, or `None` when none is armed.
     /// The main loop folds this into its wait-timeout `min`-reduce and fires
-    /// [`maybe_fire_edge_dwell`](super::hover::FlowWM::maybe_fire_edge_dwell)
+    /// [`FlowWM::maybe_fire_edge_dwell`]
     /// when it arrives. Set by `ArmEdgeDwell`, cleared by `CancelEdgeDwell`,
     /// after it fires, and when a tile drag starts (the hover subsystem is
     /// suppressed during a drag). (`docs/src/dev-guide/hover.md`)

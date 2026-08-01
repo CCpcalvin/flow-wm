@@ -990,7 +990,7 @@ pub struct HoverConfig {
     /// gesture.
     pub edge_dwell_ms: u32,
     /// Cursor poll interval in milliseconds, shared by both hover behaviors.
-    /// Clamped up to [`HOVER_POLL_FLOOR_MS`] by [`Self::effective_poll_interval_ms`]
+    /// Clamped up to `HOVER_POLL_FLOOR_MS` by [`Self::effective_poll_interval_ms`]
     /// so a typo cannot busy-loop the daemon.
     pub poll_interval_ms: u32,
 }
