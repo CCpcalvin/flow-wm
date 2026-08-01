@@ -43,12 +43,12 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    WS_THICKFRAME,
+    BringWindowToTop, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME, WindowFromPoint,
 };
 use windows::core::PWSTR;
 
@@ -210,6 +210,33 @@ pub fn get_cursor_pos() -> Result<(i32, i32), String> {
     let mut point = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut point) }.map_err(|e| format!("GetCursorPos failed: {e}"))?;
     Ok((point.x, point.y))
+}
+
+/// Resolve the **top-level** window under the given screen point.
+///
+/// `WindowFromPoint` returns the window (possibly a child control) directly
+/// beneath `(x, y)`; this walks it to its top-level ancestor via `GetAncestor`
+/// (`GA_ROOT`) so that hovering a button, an edit field, or any child control
+/// inside a managed window resolves to that window itself. Without the walk,
+/// child controls read as untracked and focus-follows-mouse is defeated.
+///
+/// Returns `None` when the point is over no window (the bare desktop) or the
+/// APIs return a null handle.
+///
+/// (`docs/src/dev-guide/hover.md`)
+#[must_use]
+pub fn window_from_point(x: i32, y: i32) -> Option<isize> {
+    let point = POINT { x, y };
+    let hwnd = unsafe { WindowFromPoint(point) };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    if root.0.is_null() {
+        None
+    } else {
+        Some(root.0 as isize)
+    }
 }
 
 /// Retrieves the window's **visible** screen rectangle via DWM extended frame bounds.

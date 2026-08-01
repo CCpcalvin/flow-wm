@@ -150,6 +150,9 @@ pub struct FlowConfig {
     /// consumed by tile-drag edge-scroll and (future) edge-hover-scroll.
     pub edge_scroll: EdgeScrollConfig,
 
+    /// Hover configuration — focus-follows-mouse and (future) edge-hover-scroll.
+    pub hover: HoverConfig,
+
     /// Loadout save/restore configuration.
     pub loadout: LoadoutConfig,
     /// Whether `flow start` should query GitHub for a newer release and print a
@@ -210,6 +213,7 @@ impl Default for FlowConfig {
             focus: FocusConfig::default(),
             drag: DragConfig::default(),
             edge_scroll: EdgeScrollConfig::default(),
+            hover: HoverConfig::default(),
             loadout: LoadoutConfig::default(),
             check_for_updates: true,
         }
@@ -939,6 +943,72 @@ impl EdgeScrollConfig {
     }
 }
 
+/// Floor on the hover poll interval, applied at runtime so a configuration typo
+/// (e.g. `poll_interval_ms = 0`) cannot busy-loop the daemon. Private to this
+/// module, mirroring the edge-scroll spam-guard floor: shipping the guard and a
+/// knob to disable it together would defeat its purpose. At 8 ms it caps the
+/// poll at ~125 Hz, far below a hardware-mouse reporting rate yet responsive.
+const HOVER_POLL_FLOOR_MS: u32 = 8;
+
+/// Hover configuration — focus-follows-mouse and (future) edge-hover-scroll.
+///
+/// Both behaviors share one low-rate cursor poll folded into the main loop's
+/// wait-timeout reduce, so when every behavior flag is off there is no poll
+/// deadline and the daemon sleeps indefinitely. (`docs/src/dev-guide/hover.md`)
+///
+/// Ticket 04 ships the focus-follows-mouse fields; ticket 05 extends this block
+/// with the `edge_scroll` flag and `edge_dwell_ms`.
+///
+/// # Example
+///
+/// ```toml
+/// [hover]
+/// focus_follows_mouse = true
+/// focus_dwell_ms = 300
+/// poll_interval_ms = 50
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct HoverConfig {
+    /// Master switch for focus-follows-mouse: when `true`, resting the cursor
+    /// on an eligible tracked window for the dwell focuses it through the
+    /// existing focus path. Ships **on** — see (`docs/src/dev-guide/hover.md`).
+    pub focus_follows_mouse: bool,
+    /// Focus-follows-mouse dwell in milliseconds — how long the cursor must
+    /// rest on an eligible window before focus fires. Any movement restarts
+    /// the dwell, so a jittering mouse never focuses.
+    pub focus_dwell_ms: u32,
+    /// Cursor poll interval in milliseconds, shared by both hover behaviors.
+    /// Clamped up to [`HOVER_POLL_FLOOR_MS`] by [`Self::effective_poll_interval_ms`]
+    /// so a typo cannot busy-loop the daemon.
+    pub poll_interval_ms: u32,
+}
+
+impl Default for HoverConfig {
+    fn default() -> Self {
+        Self {
+            // Ships on: the mouse-driven experience works out of the box. This
+            // breaks the daemon's zero-CPU-while-idle property (the poll then
+            // wakes ~20 times per second); see (`docs/src/dev-guide/hover.md`).
+            focus_follows_mouse: true,
+            focus_dwell_ms: 300,
+            poll_interval_ms: 50,
+        }
+    }
+}
+
+impl HoverConfig {
+    /// Effective poll interval: `max(configured, poll floor)`.
+    ///
+    /// The runtime clamp the daemon's poll cadence reads, so a sub-floor value
+    /// is silently made safe — no startup warning is emitted (the floor makes
+    /// unsafe values silently safe, mirroring the edge-scroll initial delay).
+    #[must_use]
+    pub fn effective_poll_interval_ms(&self) -> u32 {
+        self.poll_interval_ms.max(HOVER_POLL_FLOOR_MS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,6 +1221,11 @@ strategy = "original_slot"
                 initial_delay_ms: 350,
                 repeat_interval_ms: 200,
             },
+            hover: HoverConfig {
+                focus_follows_mouse: false,
+                focus_dwell_ms: 450,
+                poll_interval_ms: 30,
+            },
             loadout: LoadoutConfig {
                 default_path: "my-loadout.json".into(),
                 max_age_secs: 120,
@@ -1189,6 +1264,9 @@ strategy = "original_slot"
         assert_eq!(parsed.edge_scroll.band_width, 25);
         assert_eq!(parsed.edge_scroll.initial_delay_ms, 350);
         assert_eq!(parsed.edge_scroll.repeat_interval_ms, 200);
+        assert!(!parsed.hover.focus_follows_mouse);
+        assert_eq!(parsed.hover.focus_dwell_ms, 450);
+        assert_eq!(parsed.hover.poll_interval_ms, 30);
         assert_eq!(parsed.loadout.default_path, "my-loadout.json");
         assert_eq!(parsed.loadout.max_age_secs, 120);
         assert!(!parsed.check_for_updates);
@@ -1336,6 +1414,79 @@ strategy = "original_slot"
             ..FlowConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    // --- Hover config defaults, clamp, and round-trip ---
+
+    /// Positive: `HoverConfig::default()` ships focus-follows-mouse on, a 300 ms
+    /// focus dwell, and a 50 ms poll interval — the design defaults. Mirrors the
+    /// focused default-value guards (`focus_config_default_interval_is_250ms`).
+    #[test]
+    fn hover_config_default_values() {
+        let hover = HoverConfig::default();
+        assert!(hover.focus_follows_mouse);
+        assert_eq!(hover.focus_dwell_ms, 300);
+        assert_eq!(hover.poll_interval_ms, 50);
+    }
+
+    /// Positive: the poll interval clamps up to its 8 ms floor so a typo cannot
+    /// busy-loop the daemon. A value at or above the floor is unchanged.
+    #[test]
+    fn hover_config_poll_interval_clamps_to_floor() {
+        let floor = 8u32;
+        // Sub-floor values clamp up.
+        assert_eq!(
+            HoverConfig {
+                poll_interval_ms: 0,
+                ..HoverConfig::default()
+            }
+            .effective_poll_interval_ms(),
+            floor
+        );
+        assert_eq!(
+            HoverConfig {
+                poll_interval_ms: 7,
+                ..HoverConfig::default()
+            }
+            .effective_poll_interval_ms(),
+            floor
+        );
+        // At the floor — unchanged.
+        assert_eq!(
+            HoverConfig {
+                poll_interval_ms: 8,
+                ..HoverConfig::default()
+            }
+            .effective_poll_interval_ms(),
+            floor
+        );
+        // Above the floor — respected as-is.
+        assert_eq!(
+            HoverConfig {
+                poll_interval_ms: 50,
+                ..HoverConfig::default()
+            }
+            .effective_poll_interval_ms(),
+            50
+        );
+    }
+
+    /// Positive: a partial `[hover]` block fills the rest from compiled defaults
+    /// (per-field serde defaults via `#[serde(default)]`).
+    #[test]
+    fn hover_config_partial_toml_uses_defaults() {
+        let toml_str = "[hover]\nfocus_dwell_ms = 450\n";
+        let parsed: FlowConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(parsed.hover.focus_dwell_ms, 450);
+        assert!(parsed.hover.focus_follows_mouse);
+        assert_eq!(parsed.hover.poll_interval_ms, 50);
+    }
+
+    /// Positive: an empty `[hover]` block parses to the compiled defaults.
+    #[test]
+    fn hover_config_empty_block_uses_defaults() {
+        let parsed: FlowConfig = toml::from_str("[hover]\n").expect("parse");
+        assert_eq!(parsed.hover, HoverConfig::default());
     }
 
     /// Positive: with animation enabled and a repeat interval below the

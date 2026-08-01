@@ -113,7 +113,7 @@ impl FlowWM {
     ///     reconcile foreground against GetForegroundWindow()
     ///     timeout = soonest(pending_creations?100ms, float_resume_deadline,
     ///                       foreground_sync_interval, edge_scroll_deadline,
-    ///                       INFINITE)
+    ///                       hover_poll_interval, focus_dwell_deadline, INFINITE)
     ///     MsgWaitForMultipleObjects(          // Sleep until something happens
     ///         [hook_signal, connected_event],
     ///         timeout,
@@ -209,6 +209,12 @@ impl FlowWM {
             // a due deadline now rather than re-scheduling a 1 ms re-wake.
             self.maybe_fire_edge_scroll();
 
+            // Fire the focus-follows-mouse dwell if its armed deadline is due —
+            // focuses the eligible window the cursor has been resting on through
+            // the existing focus path. Another due-deadline handler that runs
+            // before the timeout is recomputed.
+            self.maybe_fire_focus_dwell();
+
             // Reconcile internal focus against GetForegroundWindow(). This runs
             // on every wake, but no-ops in ~1 µs when tracked focus already
             // matches reality. The `foreground_sync_interval_ms` timeout folded
@@ -216,6 +222,12 @@ impl FlowWM {
             // that often even with no hook/IPC activity; running it on every
             // wake adds only a microsecond-scale guard clause.
             self.reconcile_foreground();
+
+            // Poll the cursor for focus-follows-mouse. Throttled to the
+            // configured `poll_interval_ms` (the loop can wake far more often on
+            // hook activity); the poll deadline folded into `compute_wait_timeout`
+            // is what guarantees it runs at least that often while idle.
+            self.poll_hover();
 
             // Block until a hook event, an IPC client connection, OR a Win32
             // window message arrives. When there are pending window creations
@@ -378,6 +390,7 @@ impl FlowWM {
     /// using the manager's current pending-creations state and resume
     /// deadline. See that function for the deadline-selection rules.
     fn compute_wait_timeout(&self) -> u32 {
+        let now = std::time::Instant::now();
         // Fold the next foreground-reconciliation deadline into the wait so the
         // loop never sleeps past the configured sync interval. `None` only when
         // the interval is disabled (0); otherwise always Some.
@@ -391,12 +404,28 @@ impl FlowWM {
         // The orchestrator's armed edge-scroll deadline (if a repeat is
         // mid-flight). `None` when no timer is armed.
         let edge_scroll_deadline = self.edge_scroll_deadline;
+        // The hover cursor-poll deadline, armed only while focus-follows-mouse
+        // is on and no tile drag is in progress. Anchored on the last poll so
+        // the throttle in `poll_hover` and this deadline agree on the cadence;
+        // when FFM is off (and, later, edge-hover-scroll off) this is `None` and
+        // the daemon sleeps indefinitely — the idle invariant.
+        let hover_poll_deadline =
+            if self.config.hover.focus_follows_mouse && self.drag_state.is_none() {
+                let interval = std::time::Duration::from_millis(
+                    u64::from(self.config.hover.effective_poll_interval_ms()),
+                );
+                Some(self.last_hover_poll.map_or(now + interval, |last| last + interval))
+            } else {
+                None
+            };
         compute_wait_timeout_inner(
             !self.pending_creations.is_empty(),
             self.float_resume_deadline,
             next_foreground_sync,
             edge_scroll_deadline,
-            std::time::Instant::now(),
+            hover_poll_deadline,
+            self.focus_dwell_deadline,
+            now,
         )
     }
 
@@ -535,11 +564,17 @@ impl FlowWM {
 /// 4. `edge_scroll_deadline` → remaining ms until the orchestrator's armed
 ///    auto-repeat timer fires (so a held cursor in a band keeps scrolling
 ///    even with no hook/IPC activity).
+/// 5. `hover_poll_deadline` → remaining ms until the next cursor poll (armed
+///    only while a hover behavior is on and no drag is in progress).
+/// 6. `focus_dwell_deadline` → remaining ms until the focus-follows-mouse
+///    dwell fires (so the dwell lands promptly even with no other wake).
 fn compute_wait_timeout_inner(
     has_pending_creations: bool,
     float_resume_deadline: Option<std::time::Instant>,
     next_foreground_sync: Option<std::time::Instant>,
     edge_scroll_deadline: Option<std::time::Instant>,
+    hover_poll_deadline: Option<std::time::Instant>,
+    focus_dwell_deadline: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> u32 {
     let mut best: Option<u32> = None;
@@ -553,6 +588,8 @@ fn compute_wait_timeout_inner(
         .into_iter()
         .chain(next_foreground_sync)
         .chain(edge_scroll_deadline)
+        .chain(hover_poll_deadline)
+        .chain(focus_dwell_deadline)
     {
         let remaining = deadline.saturating_duration_since(now);
         let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
@@ -571,7 +608,7 @@ mod tests {
     fn wait_timeout_infinite_when_idle() {
         let now = Instant::now();
         assert_eq!(
-            compute_wait_timeout_inner(false, None, None, None, now),
+            compute_wait_timeout_inner(false, None, None, None, None, None, now),
             u32::MAX
         );
     }
@@ -580,7 +617,7 @@ mod tests {
     fn wait_timeout_pending_creations_uses_retry_cadence() {
         let now = Instant::now();
         assert_eq!(
-            compute_wait_timeout_inner(true, None, None, None, now),
+            compute_wait_timeout_inner(true, None, None, None, None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -590,7 +627,7 @@ mod tests {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(500);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(false, Some(deadline), None, None, None, None, now),
             500
         );
     }
@@ -601,7 +638,7 @@ mod tests {
         // Pending = 100 ms cadence; deadline in 50 ms → 50 wins.
         let deadline = now + Duration::from_millis(50);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(true, Some(deadline), None, None, None, None, now),
             50
         );
     }
@@ -612,7 +649,7 @@ mod tests {
         // Pending = 100 ms; deadline in 5 s → 100 wins.
         let deadline = now + Duration::from_secs(5);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(true, Some(deadline), None, None, None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -624,7 +661,7 @@ mod tests {
         // loop re-wakes and runs the resume handler instead of busy-spinning.
         let deadline = now - Duration::from_millis(10);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(false, Some(deadline), None, None, None, None, now),
             1
         );
     }
@@ -635,7 +672,7 @@ mod tests {
         // Sync deadline in 250 ms (the default interval) → 250.
         let deadline = now + Duration::from_millis(250);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, Some(deadline), None, now),
+            compute_wait_timeout_inner(false, None, Some(deadline), None, None, None, now),
             250
         );
     }
@@ -648,7 +685,15 @@ mod tests {
         let float_deadline = now + Duration::from_secs(5);
         let sync_deadline = now + Duration::from_millis(80);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(float_deadline), Some(sync_deadline), None, now),
+            compute_wait_timeout_inner(
+                false,
+                Some(float_deadline),
+                Some(sync_deadline),
+                None,
+                None,
+                None,
+                now
+            ),
             80
         );
     }
@@ -659,7 +704,7 @@ mod tests {
         // Armed auto-repeat timer in 120 ms → 120.
         let deadline = now + Duration::from_millis(120);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, None, Some(deadline), now),
+            compute_wait_timeout_inner(false, None, None, Some(deadline), None, None, now),
             120
         );
     }
@@ -672,7 +717,15 @@ mod tests {
         let float_deadline = now + Duration::from_secs(5);
         let edge_deadline = now + Duration::from_millis(60);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(float_deadline), None, Some(edge_deadline), now),
+            compute_wait_timeout_inner(
+                false,
+                Some(float_deadline),
+                None,
+                Some(edge_deadline),
+                None,
+                None,
+                now
+            ),
             60
         );
     }
@@ -683,7 +736,111 @@ mod tests {
         // Already past → floor to 1 so the loop re-wakes and fires the repeat.
         let deadline = now - Duration::from_millis(5);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, None, Some(deadline), now),
+            compute_wait_timeout_inner(false, None, None, Some(deadline), None, None, now),
+            1
+        );
+    }
+
+    // --- Hover poll deadline (source 5) ---
+
+    #[test]
+    fn wait_timeout_hover_poll_deadline_uses_remaining_ms() {
+        let now = Instant::now();
+        // Next cursor poll in 50 ms (the default poll interval) → 50.
+        let deadline = now + Duration::from_millis(50);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, Some(deadline), None, now),
+            50
+        );
+    }
+
+    #[test]
+    fn wait_timeout_hover_poll_deadline_wins_when_soonest() {
+        let now = Instant::now();
+        // Edge-scroll repeat in 5 s; hover poll in 30 ms → 30 wins. Confirms
+        // the fifth source participates in the min-reduce, not just appends.
+        let edge_deadline = now + Duration::from_secs(5);
+        let hover_deadline = now + Duration::from_millis(30);
+        assert_eq!(
+            compute_wait_timeout_inner(
+                false,
+                None,
+                None,
+                Some(edge_deadline),
+                Some(hover_deadline),
+                None,
+                now
+            ),
+            30
+        );
+    }
+
+    #[test]
+    fn wait_timeout_hover_poll_due_deadline_floors_to_one_ms() {
+        let now = Instant::now();
+        // Already past → floor to 1 so the loop re-wakes and polls.
+        let deadline = now - Duration::from_millis(3);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, Some(deadline), None, now),
+            1
+        );
+    }
+
+    #[test]
+    fn wait_timeout_no_hover_deadline_when_all_sources_none_is_infinite() {
+        // The idle invariant: with no active source the reducer returns INFINITE.
+        // This is the disabled-feature case (FFM off, no edge-scroll, no drag) —
+        // the daemon sleeps indefinitely. The decision to supply `None` for the
+        // hover deadline lives in `compute_wait_timeout` (FFM off → None);
+        // here we pin the reducer half of the invariant.
+        let now = Instant::now();
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, None, None, now),
+            u32::MAX
+        );
+    }
+
+    // --- Focus-dwell deadline (source 6) ---
+
+    #[test]
+    fn wait_timeout_focus_dwell_deadline_uses_remaining_ms() {
+        let now = Instant::now();
+        // Armed focus dwell in 300 ms (the default dwell) → 300.
+        let deadline = now + Duration::from_millis(300);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, None, Some(deadline), now),
+            300
+        );
+    }
+
+    #[test]
+    fn wait_timeout_focus_dwell_deadline_wins_when_soonest() {
+        let now = Instant::now();
+        // Hover poll in 50 ms; focus dwell in 20 ms → 20 wins. Confirms the
+        // sixth source participates in the min-reduce, not just appends.
+        let hover_deadline = now + Duration::from_millis(50);
+        let dwell_deadline = now + Duration::from_millis(20);
+        assert_eq!(
+            compute_wait_timeout_inner(
+                false,
+                None,
+                None,
+                None,
+                Some(hover_deadline),
+                Some(dwell_deadline),
+                now
+            ),
+            20
+        );
+    }
+
+    #[test]
+    fn wait_timeout_focus_dwell_due_deadline_floors_to_one_ms() {
+        let now = Instant::now();
+        // Already past → floor to 1 so the loop re-wakes and fires the dwell.
+        let deadline = now - Duration::from_millis(4);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, None, Some(deadline), now),
             1
         );
     }

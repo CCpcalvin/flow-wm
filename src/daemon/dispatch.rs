@@ -1410,6 +1410,11 @@ impl FlowWM {
         // below read `self.config.borders` live.
         self.config = new_config;
 
+        // Refresh the hover dwell durations from the new config (hover is
+        // continuous, so unlike the drag's edge-scroll timings it must take
+        // effect immediately rather than at the next discrete trigger).
+        self.hover_timings = super::hover::hover_timings_for(&self.config);
+
         // Reconfigure every workspace's geometry, preserving each space's
         // virtual_layout (window columns/order/focus/viewport). Only the active
         // workspace is on-screen; parked ones re-project silently and animate

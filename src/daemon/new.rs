@@ -256,6 +256,10 @@ impl FlowWM {
         // start.
         let edge_scroll_timings = super::drag::edge_scroll_timings_for(&app_config);
 
+        // Hover dwell durations, derived once from the hover config (refreshed on
+        // config reload). Edge dwell is a placeholder until edge-hover-scroll.
+        let hover_timings = super::hover::hover_timings_for(&app_config);
+
         let mut manager = Self {
             registry,
             history,
@@ -280,6 +284,10 @@ impl FlowWM {
             edge_scroll: super::edge_scroll::EdgeScrollScheduler::new(),
             edge_scroll_timings,
             edge_scroll_deadline: None,
+            hover: crate::hover::HoverController::new(),
+            hover_timings,
+            focus_dwell_deadline: None,
+            last_hover_poll: None,
             last_foreground_sync: std::time::Instant::now(),
         };
         // Adopt pre-existing float-classified windows (found during the init
@@ -385,6 +393,10 @@ impl FlowWM {
             edge_scroll: super::edge_scroll::EdgeScrollScheduler::new(),
             edge_scroll_timings: super::drag::edge_scroll_timings_for(&FlowConfig::default()),
             edge_scroll_deadline: None,
+            hover: crate::hover::HoverController::new(),
+            hover_timings: super::hover::hover_timings_for(&FlowConfig::default()),
+            focus_dwell_deadline: None,
+            last_hover_poll: None,
             last_foreground_sync: std::time::Instant::now(),
         }
     }

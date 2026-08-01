@@ -124,6 +124,25 @@ band_width = 30
 initial_delay_ms = 500
 repeat_interval_ms = 240
 
+# Hover configuration — focus-follows-mouse and (future) edge-hover-scroll.
+#
+# Both behaviors share one low-rate cursor poll. When focus-follows-mouse is on
+# (and, later, edge-hover-scroll), the daemon polls the cursor at poll_interval_ms
+# forever — a deliberate trade-off of a little idle CPU for the mouse-driven
+# experience. With every hover flag off, there is no poll and the daemon sleeps
+# indefinitely (zero CPU while idle). See docs/src/dev-guide/hover.md.
+#
+# - focus_follows_mouse: master switch; when true, resting the cursor on an
+#                        eligible tracked window for the dwell focuses it
+# - focus_dwell_ms:      ms the cursor must rest on a window before focus fires
+#                        (any movement restarts the dwell, so jitter never focuses)
+# - poll_interval_ms:    ms between cursor polls; clamped up to an 8 ms floor so
+#                        a typo cannot busy-loop the daemon
+[hover]
+focus_follows_mouse = true
+focus_dwell_ms = 300
+poll_interval_ms = 50
+
 # Tile-drag configuration.
 #
 # When a user drags a tiled window by its title bar, a live non-committing

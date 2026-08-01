@@ -393,6 +393,12 @@ impl FlowWM {
     /// natural no-op: the focused column is already visible, so
     /// `ensure_focused_visible` returns `None`.
     pub(super) fn on_focus_changed(&mut self, hwnd: isize) {
+        // Any foreground change cancels a pending focus-follows-mouse dwell so an
+        // external alt-tab/click (or a self-induced push) is respected until the
+        // mouse actually moves — no steal-back. The movement-gate in the
+        // controller keeps the dwell from re-arming without cursor motion.
+        self.on_hover_foreground_change();
+
         // Capture the previous focus BEFORE set_focused mutates it: only the
         // previously-focused and newly-focused windows can change border
         // color on a focus switch, so we refresh just those two instead of

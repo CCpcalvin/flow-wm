@@ -213,6 +213,30 @@ pub struct FlowWM {
     /// `Cancel` actions the scheduler emits.
     pub(super) edge_scroll_deadline: Option<std::time::Instant>,
 
+    /// The pure focus-follows-mouse / edge-hover decision controller
+    /// (`crate::hover::HoverController`). The wiring (this daemon module)
+    /// translates its [`HoverAction`](crate::hover::HoverAction)s into
+    /// `GetCursorPos` polls and OS foreground pushes. (`docs/src/dev-guide/hover.md`)
+    pub(super) hover: crate::hover::HoverController,
+
+    /// Already-clamped effective hover dwell durations for the current poll.
+    /// Focus dwell is read from `config.hover.focus_dwell_ms`; edge dwell is a
+    /// placeholder until edge-hover-scroll (a later ticket) wires its config
+    /// field. Mirrors [`edge_scroll_timings`](Self::edge_scroll_timings).
+    pub(super) hover_timings: crate::hover::HoverTimings,
+
+    /// The armed focus-follows-mouse dwell deadline, or `None` when no dwell is
+    /// armed. The main loop folds this into its wait-timeout `min`-reduce and
+    /// fires `maybe_fire_focus_dwell` when it arrives. Set by `ArmDwell`, cleared
+    /// by `CancelDwell` and after the dwell fires. (`docs/src/dev-guide/hover.md`)
+    pub(super) focus_dwell_deadline: Option<std::time::Instant>,
+
+    /// Timestamp of the most recent hover cursor poll. `None` until the first
+    /// poll. Throttles the poll to `config.hover.poll_interval_ms` (the loop can
+    /// wake far more often on hook activity) and anchors the hover poll deadline
+    /// so both agree on the cadence. (`docs/src/dev-guide/hover.md`)
+    pub(super) last_hover_poll: Option<std::time::Instant>,
+
     /// Timestamp of the most recent foreground-reconciliation pass.
     ///
     /// The main loop folds `last_foreground_sync + foreground_sync_interval_ms`
