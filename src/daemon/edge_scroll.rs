@@ -1,4 +1,4 @@
-//! Pure, clock-injectable scheduler for edge-scroll auto-repeat during a tile drag.
+//! Pure, clock-injectable scheduler for edge-scroll auto-repeat, owned once on the orchestrator and shared by every edge-scroll consumer (the tile drag today).
 //!
 //! Replaces the old per-`LOCATIONCHANGE` scroll firing (which raced the viewport
 //! to the far end one column per pixel) with the OS-keyboard-repeat model: one
@@ -46,7 +46,9 @@
 //! [`EdgeScrollScheduler::on_scroll_outcome`]. That boolean drives the
 //! `Some`/`None` branching in the state machine (the content edge).
 //!
-//! Ticket 01 delivered this tested core; ticket 02 wires it into the live drag.
+//! Held on the orchestrator as a single instance shared by every edge-scroll
+//! consumer — the tile drag's move handler today; a hover poll feed arrives in
+//! a later ticket.
 
 use std::time::{Duration, Instant};
 
@@ -56,7 +58,7 @@ use crate::common::Direction;
 ///
 /// See the module docs for the full transition table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EdgeScrollState {
+pub(crate) enum EdgeScrollState {
     /// No edge scroll armed. Entry into a band from here fires the immediate
     /// scroll.
     Idle,
@@ -77,7 +79,7 @@ pub(super) enum EdgeScrollState {
 /// [`DragConfig::effective_repeat_interval_ms`]: crate::config::DragConfig::effective_repeat_interval_ms
 /// [`DragConfig::effective_initial_delay_ms`]: crate::config::DragConfig::effective_initial_delay_ms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct EdgeScrollTimings {
+pub(crate) struct EdgeScrollTimings {
     /// Gap from the immediate entry scroll to the first repeat (the first-gap).
     pub initial_delay: Duration,
     /// Gap between successive repeat scrolls (the glide cadence).
@@ -86,7 +88,7 @@ pub(super) struct EdgeScrollTimings {
 
 /// An action the scheduler asks the live drag to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EdgeScrollAction {
+pub(crate) enum EdgeScrollAction {
     /// Perform one column scroll in the given direction, then report whether the
     /// viewport moved via [`EdgeScrollScheduler::on_scroll_outcome`].
     Scroll(Direction),
@@ -97,7 +99,8 @@ pub(super) enum EdgeScrollAction {
     Cancel,
 }
 
-/// The auto-repeat scheduler: a pure state machine held on the per-drag state.
+/// The auto-repeat scheduler: a pure state machine held once on the
+/// orchestrator and shared by every edge-scroll consumer.
 ///
 /// The caller drives it through the event methods ([`Self::on_enter`],
 /// [`Self::on_timer_fired`], [`Self::on_leave`], [`Self::on_drag_end`]) and the
@@ -106,7 +109,7 @@ pub(super) enum EdgeScrollAction {
 /// timer fires in that direction without re-reading the cursor (the band is
 /// screen-edge-based, so scrolling the viewport does not move it).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct EdgeScrollScheduler {
+pub(crate) struct EdgeScrollScheduler {
     state: EdgeScrollState,
     /// The direction of the band we are scrolling in. `None` only while `Idle`
     /// with no band entered.
@@ -121,7 +124,7 @@ impl Default for EdgeScrollScheduler {
 
 impl EdgeScrollScheduler {
     /// A fresh scheduler in [`EdgeScrollState::Idle`].
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: EdgeScrollState::Idle,
             direction: None,
@@ -130,7 +133,7 @@ impl EdgeScrollScheduler {
 
     /// Current state-machine state (for introspection / assertions).
     #[cfg(test)]
-    pub(super) fn state(&self) -> EdgeScrollState {
+    pub(crate) fn state(&self) -> EdgeScrollState {
         self.state
     }
 
@@ -145,7 +148,7 @@ impl EdgeScrollScheduler {
     /// fresh at the immediate scroll — the well-behaved caller reaches this from
     /// `Idle` (leave-then-enter), but a stray re-entry cannot inherit a stale
     /// armed timer.
-    pub(super) fn on_enter(&mut self, direction: Direction) -> EdgeScrollAction {
+    pub(crate) fn on_enter(&mut self, direction: Direction) -> EdgeScrollAction {
         self.state = EdgeScrollState::Idle;
         self.direction = Some(direction);
         EdgeScrollAction::Scroll(direction)
@@ -159,7 +162,7 @@ impl EdgeScrollScheduler {
     /// - [`ArmedInitial`](EdgeScrollState::ArmedInitial) /
     ///   [`ArmedRepeat`](EdgeScrollState::ArmedRepeat) → a timer-fired repeat
     ///   just ran.
-    pub(super) fn on_scroll_outcome(
+    pub(crate) fn on_scroll_outcome(
         &mut self,
         scrolled: bool,
         now: Instant,
@@ -200,7 +203,7 @@ impl EdgeScrollScheduler {
     /// caller to perform, after which it reports the outcome via
     /// [`Self::on_scroll_outcome`]. Returns `None` when no timer is armed
     /// (spurious fire from `Idle`) so the caller can no-op.
-    pub(super) fn on_timer_fired(&mut self) -> Option<EdgeScrollAction> {
+    pub(crate) fn on_timer_fired(&mut self) -> Option<EdgeScrollAction> {
         match self.state {
             EdgeScrollState::ArmedInitial | EdgeScrollState::ArmedRepeat => {
                 self.direction.map(EdgeScrollAction::Scroll)
@@ -213,7 +216,7 @@ impl EdgeScrollScheduler {
     ///
     /// Cancels and resets to [`EdgeScrollState::Idle`], so the next entry starts
     /// fresh at the immediate scroll.
-    pub(super) fn on_leave(&mut self) -> EdgeScrollAction {
+    pub(crate) fn on_leave(&mut self) -> EdgeScrollAction {
         self.reset();
         EdgeScrollAction::Cancel
     }
@@ -222,7 +225,7 @@ impl EdgeScrollScheduler {
     ///
     /// Same as [`Self::on_leave`] — the per-drag state (and its timer) is torn
     /// down — split out so the call site reads its intent.
-    pub(super) fn on_drag_end(&mut self) -> EdgeScrollAction {
+    pub(crate) fn on_drag_end(&mut self) -> EdgeScrollAction {
         self.reset();
         EdgeScrollAction::Cancel
     }

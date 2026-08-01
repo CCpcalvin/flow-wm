@@ -192,6 +192,27 @@ pub struct FlowWM {
     /// [`SocketResponse::Busy`](crate::ipc::message::SocketResponse::Busy).
     pub(super) drag_state: Option<super::drag::DragState>,
 
+    /// The single edge-scroll auto-repeat scheduler.
+    ///
+    /// A single instance shared by every edge-scroll consumer; today only the
+    /// tile-drag move handler feeds it. Promoted from per-drag ownership so a
+    /// later hover feed can reuse it. See (`docs/src/dev-guide/tile-drag.md`)
+    /// and the `edge_scroll` module.
+    pub(super) edge_scroll: super::edge_scroll::EdgeScrollScheduler,
+
+    /// Already-clamped effective edge-scroll timings for the current consumer
+    /// (a tile drag today). Set fresh at drag start from
+    /// `DragConfig` (`src/config/types.rs`); the scheduler consumes them with
+    /// no per-event clamp math.
+    pub(super) edge_scroll_timings: super::edge_scroll::EdgeScrollTimings,
+
+    /// Deadline at which the armed auto-repeat timer fires, or `None` when no
+    /// repeat is armed. The main loop folds this into its wait-timeout
+    /// `min`-reduce (see `compute_wait_timeout_inner` in `run.rs`) and fires
+    /// `maybe_fire_edge_scroll` when it arrives. Set/cleared by the `Arm` /
+    /// `Cancel` actions the scheduler emits.
+    pub(super) edge_scroll_deadline: Option<std::time::Instant>,
+
     /// Timestamp of the most recent foreground-reconciliation pass.
     ///
     /// The main loop folds `last_foreground_sync + foreground_sync_interval_ms`

@@ -251,6 +251,11 @@ impl FlowWM {
             workspaces.push(Workspace::new(WorkspaceId(id), empty_scrolling));
         }
 
+        // Edge-scroll timings for the shared scheduler, derived once from the
+        // drag config (no per-event clamp math). Set fresh again at each drag
+        // start.
+        let edge_scroll_timings = super::drag::edge_scroll_timings_for(&app_config);
+
         let mut manager = Self {
             registry,
             history,
@@ -272,6 +277,9 @@ impl FlowWM {
             pending_creations: Vec::new(),
             float_resume_deadline: None,
             drag_state: None,
+            edge_scroll: super::edge_scroll::EdgeScrollScheduler::new(),
+            edge_scroll_timings,
+            edge_scroll_deadline: None,
             last_foreground_sync: std::time::Instant::now(),
         };
         // Adopt pre-existing float-classified windows (found during the init
@@ -374,6 +382,9 @@ impl FlowWM {
             pending_creations: Vec::new(),
             float_resume_deadline: None,
             drag_state: None,
+            edge_scroll: super::edge_scroll::EdgeScrollScheduler::new(),
+            edge_scroll_timings: super::drag::edge_scroll_timings_for(&FlowConfig::default()),
+            edge_scroll_deadline: None,
             last_foreground_sync: std::time::Instant::now(),
         }
     }

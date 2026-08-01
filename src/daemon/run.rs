@@ -388,12 +388,9 @@ impl FlowWM {
                         self.config.focus.foreground_sync_interval_ms,
                     )
             });
-        // The drag's armed edge-scroll deadline (if a repeat is mid-flight).
-        // `None` when no drag is active or no timer is armed.
-        let edge_scroll_deadline = self
-            .drag_state
-            .as_ref()
-            .and_then(|ds| ds.edge_scroll_deadline);
+        // The orchestrator's armed edge-scroll deadline (if a repeat is
+        // mid-flight). `None` when no timer is armed.
+        let edge_scroll_deadline = self.edge_scroll_deadline;
         compute_wait_timeout_inner(
             !self.pending_creations.is_empty(),
             self.float_resume_deadline,
@@ -535,9 +532,9 @@ impl FlowWM {
 /// 3. `next_foreground_sync` → remaining ms until the foreground is reconciled
 ///    against `GetForegroundWindow()` (closes the gap when
 ///    `EVENT_SYSTEM_FOREGROUND` is dropped under rapid window churn).
-/// 4. `edge_scroll_deadline` → remaining ms until the drag's armed auto-repeat
-///    timer fires (so a held cursor in a band keeps scrolling even with no
-///    hook/IPC activity).
+/// 4. `edge_scroll_deadline` → remaining ms until the orchestrator's armed
+///    auto-repeat timer fires (so a held cursor in a band keeps scrolling
+///    even with no hook/IPC activity).
 fn compute_wait_timeout_inner(
     has_pending_creations: bool,
     float_resume_deadline: Option<std::time::Instant>,

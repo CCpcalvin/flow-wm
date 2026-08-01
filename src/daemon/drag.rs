@@ -31,6 +31,7 @@ use windows::Win32::Foundation::HWND;
 
 use crate::borders::{BorderState, style_for_state};
 use crate::common::{Direction, WindowId};
+use crate::config::FlowConfig;
 use crate::layout::mutations::ensure_column_visible;
 use crate::layout::preview::{DropZone, preview_move, resolve_drop_zone};
 use crate::layout::types::AppliedLayout;
@@ -62,20 +63,24 @@ pub(super) struct DragState {
     /// for the empty-workspace degenerate where [`resolve_drop_zone`] returns
     /// `None`).
     pub(super) current_zone: Option<DropZone>,
-    /// The edge-scroll auto-repeat state machine. Drives the
-    /// immediate-on-entry scroll plus the timer-based repeat cadence; see
-    /// [`edge_scroll`] and [`EdgeScrollScheduler`].
-    pub(super) edge_scroll: EdgeScrollScheduler,
-    /// The already-clamped effective timings, computed once at drag start from
-    /// [`DragConfig`](crate::config::DragConfig) so the scheduler consumes them
-    /// with no per-event clamp math.
-    pub(super) edge_scroll_timings: EdgeScrollTimings,
-    /// The deadline at which the armed auto-repeat timer fires, or `None` when
-    /// no repeat is armed. The main loop folds this into its wait-timeout
-    /// `min`-reduce and runs [`FlowWM::maybe_fire_edge_scroll`] when it arrives.
-    /// Set/cleared by the [`EdgeScrollAction::Arm`] / [`EdgeScrollAction::Cancel`]
-    /// actions the scheduler emits.
-    pub(super) edge_scroll_deadline: Option<Instant>,
+}
+
+/// Compute the already-clamped effective edge-scroll timings from the drag
+/// config.
+///
+/// Built once per drag (at [`FlowWM::on_drag_start`], and for the
+/// orchestrator's initial value in `new.rs`) from
+/// `DragConfig::effective_repeat_interval_ms` /
+/// `DragConfig::effective_initial_delay_ms` so the scheduler consumes them
+/// with no per-event clamp math. The scheduler itself stays config-agnostic.
+pub(super) fn edge_scroll_timings_for(config: &FlowConfig) -> EdgeScrollTimings {
+    let drag_cfg = &config.drag;
+    let repeat_ms = drag_cfg.effective_repeat_interval_ms(&config.animation);
+    let initial_ms = drag_cfg.effective_initial_delay_ms(repeat_ms);
+    EdgeScrollTimings {
+        initial_delay: Duration::from_millis(u64::from(initial_ms)),
+        repeat_interval: Duration::from_millis(u64::from(repeat_ms)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,23 +115,18 @@ impl FlowWM {
             return;
         }
 
-        // Compute the clamped effective edge-scroll timings once for the whole
-        // drag. The scheduler consumes these directly; no per-event clamp math.
-        let drag_cfg = &self.config.drag;
-        let repeat_ms = drag_cfg.effective_repeat_interval_ms(&self.config.animation);
-        let initial_ms = drag_cfg.effective_initial_delay_ms(repeat_ms);
-        let edge_scroll_timings = EdgeScrollTimings {
-            initial_delay: Duration::from_millis(u64::from(initial_ms)),
-            repeat_interval: Duration::from_millis(u64::from(repeat_ms)),
-        };
+        // Arm the shared edge-scroll scheduler fresh for this drag (mirrors the
+        // old per-drag `EdgeScrollScheduler::new()`), set this drag's clamped
+        // timings, and clear any stale deadline. The scheduler is a single
+        // instance on the orchestrator now; see `edge_scroll`.
+        self.edge_scroll = EdgeScrollScheduler::new();
+        self.edge_scroll_timings = edge_scroll_timings_for(&self.config);
+        self.edge_scroll_deadline = None;
 
         self.drag_state = Some(DragState {
             dragged_id: WindowId(hwnd),
             dragged_hwnd: hwnd,
             current_zone: None,
-            edge_scroll: EdgeScrollScheduler::new(),
-            edge_scroll_timings,
-            edge_scroll_deadline: None,
         });
 
         set_dragged_hwnd(hwnd);
@@ -272,12 +272,7 @@ impl FlowWM {
         if new_dir != prev_dir {
             // Leaving any armed band cancels the timer.
             if prev_dir.is_some() {
-                let action = self
-                    .drag_state
-                    .as_mut()
-                    .expect("drag_state set for the whole drag")
-                    .edge_scroll
-                    .on_leave();
+                let action = self.edge_scroll.on_leave();
                 self.apply_edge_scroll_action(action);
             }
             // Entering a new band fires the immediate defining scroll, then arms
@@ -288,12 +283,7 @@ impl FlowWM {
                 // real scroll and feeds whether it moved back through
                 // on_scroll_outcome, per the scheduler's caller protocol. So the
                 // returned action is intentionally discarded here.
-                let _ = self
-                    .drag_state
-                    .as_mut()
-                    .expect("drag_state set for the whole drag")
-                    .edge_scroll
-                    .on_enter(dir);
+                let _ = self.edge_scroll.on_enter(dir);
                 self.scroll_once_and_rearm(dir);
             }
         }
@@ -341,17 +331,18 @@ impl FlowWM {
     /// in the animation and visibly snaps from its mouse-following position
     /// into its tile.
     ///
-    /// Taking `drag_state` also drops the edge-scroll scheduler and its armed
-    /// deadline, tearing down the auto-repeat timer — no leftover scroll
-    /// continues after release.
+    /// Taking `drag_state` tears down the shared edge-scroll scheduler and clears
+    /// its armed deadline, so no leftover scroll continues after release.
     pub(super) fn on_drag_end(&mut self, _hwnd: isize) {
-        let Some(mut drag) = self.drag_state.take() else {
+        let Some(drag) = self.drag_state.take() else {
             return;
         };
-        // Explicitly cancel the auto-repeat timer (tears down the scheduler
-        // state); `drag` (and its deadline field) is dropped at the end of this
-        // method, so no leftover scroll continues after release.
-        let _ = drag.edge_scroll.on_drag_end();
+        // Tear down the shared edge-scroll scheduler (reset to Idle) and clear
+        // its armed deadline — no leftover scroll continues after release. The
+        // scheduler is a single instance on the orchestrator now, so it is reset
+        // here (the old per-drag struct dropped it with the DragState).
+        let _ = self.edge_scroll.on_drag_end();
+        self.edge_scroll_deadline = None;
         clear_dragged_hwnd();
 
         // Destroyed-mid-drag guard: the window is already gone from the layout
@@ -428,8 +419,8 @@ impl FlowWM {
         }
     }
 
-    /// Apply a scheduler-emitted [`EdgeScrollAction`] to the drag's armed
-    /// deadline.
+    /// Apply a scheduler-emitted [`EdgeScrollAction`] to the orchestrator's
+    /// armed deadline.
     ///
     /// `Arm(deadline)` stores the next-fire deadline (the main loop waits on
     /// it); `Cancel` clears it. `Scroll` is never returned by `on_scroll_outcome`
@@ -437,12 +428,9 @@ impl FlowWM {
     /// directly and feed the outcome back, so a `Scroll` arriving here is a
     /// defensive no-op (leave the deadline untouched).
     fn apply_edge_scroll_action(&mut self, action: EdgeScrollAction) {
-        let Some(drag) = self.drag_state.as_mut() else {
-            return;
-        };
         match action {
-            EdgeScrollAction::Arm(deadline) => drag.edge_scroll_deadline = Some(deadline),
-            EdgeScrollAction::Cancel => drag.edge_scroll_deadline = None,
+            EdgeScrollAction::Arm(deadline) => self.edge_scroll_deadline = Some(deadline),
+            EdgeScrollAction::Cancel => self.edge_scroll_deadline = None,
             EdgeScrollAction::Scroll(_) => {}
         }
     }
@@ -458,15 +446,8 @@ impl FlowWM {
     /// the deadline.
     fn scroll_once_and_rearm(&mut self, direction: Direction) {
         let scrolled = self.perform_edge_scroll(direction);
-        let timings = self
-            .drag_state
-            .as_ref()
-            .expect("drag_state set for the whole drag")
-            .edge_scroll_timings;
+        let timings = self.edge_scroll_timings;
         let action = self
-            .drag_state
-            .as_mut()
-            .expect("drag_state set for the whole drag")
             .edge_scroll
             .on_scroll_outcome(scrolled, Instant::now(), &timings);
         self.apply_edge_scroll_action(action);
@@ -485,10 +466,12 @@ impl FlowWM {
     /// stops it). No-op when no drag is active, no timer is armed, or the
     /// deadline has not yet arrived.
     pub(super) fn maybe_fire_edge_scroll(&mut self) {
-        let Some(drag) = self.drag_state.as_ref() else {
+        // Only the tile-drag path arms the orchestrator's scheduler today, so
+        // bail when no drag is active. (A later ticket adds the hover feed.)
+        if self.drag_state.is_none() {
             return;
-        };
-        let Some(deadline) = drag.edge_scroll_deadline else {
+        }
+        let Some(deadline) = self.edge_scroll_deadline else {
             return;
         };
         if Instant::now() < deadline {
@@ -496,13 +479,7 @@ impl FlowWM {
         }
         // Deadline due: the scheduler emits a Scroll in its stored direction.
         // A spurious fire from Idle (no action armed) is a no-op.
-        let dir = match self
-            .drag_state
-            .as_mut()
-            .expect("drag_state checked Some above")
-            .edge_scroll
-            .on_timer_fired()
-        {
+        let dir = match self.edge_scroll.on_timer_fired() {
             Some(EdgeScrollAction::Scroll(dir)) => dir,
             _ => return,
         };
