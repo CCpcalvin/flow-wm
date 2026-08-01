@@ -126,10 +126,22 @@ impl FlowWM {
     /// deadline arrives — including when the cursor is held perfectly still,
     /// which is exactly the case that should focus. On fire it asks the
     /// controller for the [`HoverAction::Focus`] of the armed target and pushes
-    /// it through the existing OS foreground path. No-op when focus-follows-mouse
-    /// is off, no dwell is armed, or the deadline has not yet arrived.
+    /// it through the existing OS foreground path. The entire subsystem is inert
+    /// while a tile drag is in progress. When focus-follows-mouse is off it
+    /// clears any stale deadline (so a hot-reload disable can't pin the loop to a
+    /// 1 ms busy-loop); otherwise it is a no-op when no dwell is armed or before
+    /// the deadline arrives.
     pub(super) fn maybe_fire_focus_dwell(&mut self) {
+        // Defense in depth: the hover subsystem is suppressed while a tile drag
+        // is in progress (`on_drag_start` already clears this deadline).
+        if self.drag_state.is_some() {
+            return;
+        }
         if !self.config.hover.focus_follows_mouse {
+            // Flag disabled (e.g. toggled off via hot-reload while a dwell was
+            // armed): drop the stale deadline so a past value cannot pin the
+            // wait-timeout to a 1 ms busy-loop.
+            self.focus_dwell_deadline = None;
             return;
         }
         let Some(deadline) = self.focus_dwell_deadline else {
@@ -152,11 +164,22 @@ impl FlowWM {
     /// called at the top of the main loop, it lands the edge-dwell promptly when
     /// its deadline arrives. On fire it asks the controller for the
     /// [`HoverAction::EdgeEnter`] (which feeds the shared edge-scroll scheduler),
-    /// so the immediate-first-scroll-then-repeat behavior is reused exactly.
-    /// No-op when edge-hover-scroll is off, no edge-dwell is armed, or the
-    /// deadline has not yet arrived.
+    /// so the immediate-first-scroll-then-repeat behavior is reused exactly. The
+    /// entire subsystem is inert while a tile drag is in progress. When
+    /// edge-hover-scroll is off it clears any stale deadline (so a hot-reload
+    /// disable can't pin the loop to a 1 ms busy-loop); otherwise it is a no-op
+    /// when no edge-dwell is armed or before the deadline arrives.
     pub(super) fn maybe_fire_edge_dwell(&mut self) {
+        // Defense in depth: the hover subsystem is suppressed while a tile drag
+        // is in progress (`on_drag_start` already clears this deadline).
+        if self.drag_state.is_some() {
+            return;
+        }
         if !self.config.hover.edge_scroll {
+            // Flag disabled (e.g. toggled off via hot-reload while an edge-dwell
+            // was armed): drop the stale deadline so a past value cannot pin the
+            // wait-timeout to a 1 ms busy-loop.
+            self.edge_dwell_deadline = None;
             return;
         }
         let Some(deadline) = self.edge_dwell_deadline else {

@@ -153,6 +153,20 @@ impl HoverController {
         }
     }
 
+    /// Drop all armed state — the previous cursor, any focus-follows-mouse
+    /// dwell, and the edge-path state — so the next poll starts fresh.
+    ///
+    /// Called when a tile drag begins: the hover subsystem is suppressed for the
+    /// drag's duration, and without this reset an armed edge state would persist
+    /// past the drag, so edge-hover-scroll would not re-arm until the cursor left
+    /// and re-entered the band. Mirrors the shared scheduler's fresh re-arm at
+    /// drag start.
+    pub fn reset(&mut self) {
+        self.prev_cursor = None;
+        self.ffm = None;
+        self.edge_state = EdgeState::Off;
+    }
+
     /// Process one cursor poll.
     ///
     /// Applies edge-band precedence first (any pending focus-follows-mouse dwell
@@ -790,5 +804,34 @@ mod tests {
             vec![HoverAction::EdgeLeave, HoverAction::CancelEdgeDwell]
         );
         assert_eq!(c.edge_state, EdgeState::Off);
+    }
+
+    #[test]
+    fn reset_clears_armed_state_and_previous_cursor() {
+        let mut c = HoverController::new();
+        let t0 = now();
+        // Establish a previous cursor, then drive the edge path to Active.
+        let _ = c.on_poll(poll_none(pt(10, 10)), t0, &TIMINGS);
+        let _ = c.on_poll(poll_band(Direction::Left, pt(0, 500)), t0 + Duration::from_millis(5), &TIMINGS);
+        assert_eq!(
+            c.on_edge_dwell_timer_fired(),
+            HoverAction::EdgeEnter(Direction::Left)
+        );
+        assert_eq!(c.edge_state, EdgeState::Active(Direction::Left));
+        assert!(c.prev_cursor.is_some());
+
+        // reset() drops everything; the next poll behaves like a fresh controller.
+        c.reset();
+        assert_eq!(c.edge_state, EdgeState::Off);
+        assert!(c.prev_cursor.is_none());
+        assert!(c.ffm.is_none());
+
+        // No previous cursor after reset, so the movement-gate treats the first
+        // poll as not-moved: resting on an eligible target does NOT arm a dwell
+        // (symmetric with a brand-new controller). This is what lets
+        // edge-hover-scroll re-arm cleanly when polling resumes after a drag
+        // even if the cursor never leaves the band.
+        let actions = c.on_poll(poll_over(W1, pt(50, 50)), t0 + Duration::from_millis(10), &TIMINGS);
+        assert!(actions.is_empty());
     }
 }

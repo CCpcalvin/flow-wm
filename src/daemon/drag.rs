@@ -124,10 +124,14 @@ impl FlowWM {
         self.edge_scroll = EdgeScrollScheduler::new();
         self.edge_scroll_timings = edge_scroll_timings_for(&self.config);
         self.edge_scroll_deadline = None;
-        // The hover subsystem is suppressed during a drag: cancel any armed
-        // edge-dwell so it cannot fire EdgeEnter and feed the scheduler mid-drag
-        // (the drag owns the scheduler while drag_state is set).
+        // The entire hover subsystem is suppressed during a drag: cancel any
+        // armed focus/edge dwell so neither can fire mid-drag (the drag owns the
+        // shared scheduler while `drag_state` is set), and reset the controller
+        // so edge-hover-scroll re-arms cleanly when polling resumes after the
+        // drag — even if the cursor never leaves the band.
+        self.focus_dwell_deadline = None;
         self.edge_dwell_deadline = None;
+        self.hover.reset();
 
         self.drag_state = Some(DragState {
             dragged_id: WindowId(hwnd),
