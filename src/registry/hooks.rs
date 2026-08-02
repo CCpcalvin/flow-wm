@@ -257,14 +257,17 @@ pub enum HookEvent {
         /// The window whose title changed.
         hwnd: isize,
     },
-    /// A floating window's screen rect changed (`EVENT_OBJECT_LOCATIONCHANGE`).
+    /// A window's screen rect changed (`EVENT_OBJECT_LOCATIONCHANGE`).
     ///
-    /// Only emitted for windows in [`FLOAT_HWNS`] (active-workspace floats) and
-    /// only while [`FLOAT_TRACKING_ACTIVE`] is `true`. The callback forwards the
-    /// `hwnd` only; the main thread reads the rect via `GetWindowRect` so the
-    /// callback stays minimal (matching the stateless-callback invariant).
+    /// Only emitted for windows in [`FLOAT_HWNS`] (active-workspace floats)
+    /// while [`FLOAT_TRACKING_ACTIVE`] is `true`, the currently-dragged tiled
+    /// window ([`DRAGGED_HWND`]), or the current foreground window
+    /// ([`FOREGROUND_HWND`]) — the last lets an F11 toggle in an already-focused
+    /// app re-trigger the TOPMOST toggle. The callback forwards the `hwnd`
+    /// only; the main thread reads the rect via `GetWindowRect` so the callback
+    /// stays minimal (matching the stateless-callback invariant).
     LocationChange {
-        /// The floating window whose position or size changed.
+        /// The window whose position or size changed.
         hwnd: isize,
     },
     /// The user started dragging a window via its title bar (`EVENT_SYSTEM_MOVESIZESTART`).
@@ -437,6 +440,34 @@ pub fn set_dragged_hwnd(hwnd: isize) {
 /// Clears the dragged HWND (sets to 0). Called by the daemon on MoveSizeEnd.
 pub fn clear_dragged_hwnd() {
     DRAGGED_HWND.store(0, Ordering::Release);
+}
+
+// ── Foreground tracking (shared with the hook callback) ────────────
+
+/// HWND of the window currently holding the foreground, or 0 if none is known.
+///
+/// Set by the daemon in the focus sink on every foreground change (and at
+/// init from `GetForegroundWindow`). The hook callback reads this to decide
+/// whether to forward `EVENT_OBJECT_LOCATIONCHANGE` for the foreground window:
+/// an F11 toggle in an already-focused app resizes the foreground WITHOUT a
+/// focus change, so the focus sink's TOPMOST toggle misses it. Forwarding the
+/// foreground's own location change lets the daemon re-evaluate the (idempotent)
+/// toggle and catch the windowed↔fullscreen crossing. (`docs/src/dev-guide/floating-space.md`)
+///
+/// Stored as `AtomicIsize` (default 0, the "no foreground known" sentinel)
+/// for lock-free reads from the hook thread — same shape as [`DRAGGED_HWND`].
+static FOREGROUND_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Returns the HWND currently holding the foreground, or 0 if none is known.
+#[must_use]
+pub fn foreground_hwnd() -> isize {
+    FOREGROUND_HWND.load(Ordering::Acquire)
+}
+
+/// Sets the foreground HWND. Called by the daemon in the focus sink
+/// (`on_focus_changed`) on every foreground change, and at init.
+pub fn set_foreground_hwnd(hwnd: isize) {
+    FOREGROUND_HWND.store(hwnd, Ordering::Release);
 }
 
 // ── HookThreadHandle ─────────────────────────────────────────────────
@@ -720,12 +751,15 @@ fn run_hook_loop() {
 /// - `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` (range; tray-hide, DWM cloak, re-show)
 /// - `EVENT_OBJECT_STATECHANGE` (single; maximized/fullscreen recovery)
 /// - `EVENT_OBJECT_NAMECHANGE` (single; late-title recovery)
-/// - `EVENT_OBJECT_LOCATIONCHANGE` (single; float drag tracking)
+/// - `EVENT_OBJECT_LOCATIONCHANGE` (single; float drag, tile-drag, and
+///   foreground-resize tracking)
 ///
 /// `STATECHANGE`, `NAMECHANGE`, and `LOCATIONCHANGE` are each registered as
 /// **single-event** hooks rather than one `0x800A..=0x800C` range. `LOCATIONCHANGE`
-/// (`0x800B`) is callback-filtered to active-workspace floats only (see
-/// [`FLOAT_HWNS`]) so its per-pixel noisiness cannot flood the channel.
+/// (`0x800B`) is callback-filtered to active-workspace floats, the dragged
+/// tiled window, and the foreground window (see [`FLOAT_HWNS`],
+/// [`DRAGGED_HWND`], [`FOREGROUND_HWND`]) so its per-pixel noisiness cannot
+/// flood the channel.
 fn register_hooks() -> Vec<HWINEVENTHOOK> {
     let mut hooks = Vec::new();
 
@@ -882,9 +916,10 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
     // Registered as a single-event hook (not folded into the STATECHANGE /
     // NAMECHANGE range, which would also catch it but complicate reasoning).
     // The callback drops every LOCATIONCHANGE except those for tracked
-    // active-workspace floats while tracking is enabled — so despite the
-    // event's noisiness, only genuine user drags of float windows reach the
-    // channel.
+    // active-workspace floats while tracking is enabled, the currently-dragged
+    // tiled window, and the current foreground window — so despite the event's
+    // noisiness, only genuine user drags of float windows, a tile drag, and a
+    // foreground resize (F11 fullscreen toggle) reach the channel.
     let h = unsafe {
         SetWinEventHook(
             EVENT_OBJECT_LOCATIONCHANGE,
@@ -898,7 +933,7 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
     };
     if is_valid_hook(h) {
         hooks.push(h);
-        log::debug!("hook registered: LOCATIONCHANGE (float-filtered)");
+        log::debug!("hook registered: LOCATIONCHANGE (float / drag / foreground-filtered)");
     } else {
         log::error!("failed to hook LOCATIONCHANGE");
     }
@@ -948,11 +983,15 @@ unsafe extern "system" fn hook_callback(
     // LOCATIONCHANGE is the ultra-noisy event: filter it hard. Only forward
     // when the window is a tracked active-workspace float AND tracking is
     // currently enabled (disabled while flow animates floats), OR when the
-    // window is the currently-dragged tiled window (DRAGGED_HWND). All other
-    // event types are forwarded unconditionally as before.
+    // window is the currently-dragged tiled window (DRAGGED_HWND), OR when the
+    // window is the current foreground (FOREGROUND_HWND) so an F11 toggle in an
+    // already-focused app re-triggers the (idempotent) TOPMOST toggle without a
+    // focus change. All other event types are forwarded unconditionally as
+    // before.
     if event == EVENT_OBJECT_LOCATIONCHANGE
         && (!FLOAT_TRACKING_ACTIVE.load(Ordering::Acquire) || !is_float_hwnd(hwnd_val))
         && DRAGGED_HWND.load(Ordering::Acquire) != hwnd_val
+        && FOREGROUND_HWND.load(Ordering::Acquire) != hwnd_val
     {
         return;
     }
@@ -1164,5 +1203,37 @@ mod tests {
         assert_eq!(dragged_hwnd(), 0);
         // Cleanup for any test that runs after this one in the same process.
         clear_dragged_hwnd();
+    }
+
+    // ── Foreground HWND global (ticket #6) ──────────────────────────
+
+    // The foreground HWND global mirrors DRAGGED_HWND: lock-free AtomicIsize,
+    // 0 sentinel for "no foreground known". The hook callback reads it to
+    // forward the foreground's own LOCATIONCHANGE (F11 trigger).
+
+    #[test]
+    fn foreground_hwnd_round_trip() {
+        // Start clean (default 0 sentinel), then set/read/reset.
+        set_foreground_hwnd(0);
+        assert_eq!(foreground_hwnd(), 0);
+        set_foreground_hwnd(12345);
+        assert_eq!(foreground_hwnd(), 12345);
+        set_foreground_hwnd(0);
+        assert_eq!(foreground_hwnd(), 0);
+    }
+
+    // Positive: the focus sink overwrites on every foreground change, so a
+    // set-over-set must replace (not accumulate) — mirrors the dragged-HWND
+    // invariant and is the normal path for foreground focus churn.
+    #[test]
+    fn set_foreground_hwnd_overwrites_previous_value() {
+        set_foreground_hwnd(0);
+        set_foreground_hwnd(11111);
+        assert_eq!(foreground_hwnd(), 11111);
+        // Overwrite with a different HWND — must replace, not accumulate.
+        set_foreground_hwnd(22222);
+        assert_eq!(foreground_hwnd(), 22222);
+        // Cleanup for any test that runs after this one in the same process.
+        set_foreground_hwnd(0);
     }
 }

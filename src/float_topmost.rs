@@ -11,9 +11,11 @@
 //! The contract: a float is kept on top **iff the foreground is a flow-managed
 //! window that is not fullscreen**; otherwise the floats are dropped so they do
 //! not cover a fullscreen app or another application's windows. The wiring
-//! ([`crate::daemon::FlowWM::reconcile_float_topmost`]) evaluates this in the
-//! single focus sink on every foreground change. See
-//! (`docs/src/dev-guide/floating-space.md`).
+//! ([`crate::daemon::FlowWM::reconcile_float_topmost`]) evaluates this on every
+//! foreground change (the focus sink) **and** on the foreground window's own
+//! resize — so an F11 toggle in an already-focused app (no focus change) is
+//! caught by the geometry re-evaluation. [`is_foreground_location_change`]
+//! gates that second trigger. See (`docs/src/dev-guide/floating-space.md`).
 
 /// Stacking-relevant kind of the current foreground window.
 ///
@@ -201,6 +203,34 @@ pub fn decide_float_topmost(snapshot: FloatTopmostSnapshot) -> TopmostAction {
         // Desired state already holds ⇒ no Win32 churn.
         _ => TopmostAction::NoOp,
     }
+}
+
+// ── Foreground location-change trigger (ticket #6) ───────────────
+//
+// The TOPMOST toggle fires on foreground *changes* (the focus sink), which
+// catches alt-tabbing INTO a fullscreen app but misses F11 pressed in an
+// already-focused app: F11 resizes the window WITHOUT a focus change, so the
+// focus sink never runs. The foreground window's own `EVENT_OBJECT_LOCATIONCHANGE`
+// is the second trigger — re-run the (idempotent) toggle whenever the
+// foreground moves or resizes, and let idempotency swallow the ordinary
+// (non-fullscreen) cases. (`docs/src/dev-guide/floating-space.md`)
+
+/// Decide whether a window location-change event should re-run the float
+/// TOPMOST reconciliation.
+///
+/// Only the foreground window's own geometry can flip its live fullscreen
+/// classification (e.g. an F11 toggle in an already-focused app), so a location
+/// change for any other window is irrelevant to the toggle and is ignored. A
+/// `foreground_hwnd` of `0` (no foreground known yet) rejects every event, so
+/// no location change is misrouted before the first foreground is established.
+///
+/// Returning `true` only means the toggle should be re-evaluated: the
+/// underlying [`decide_float_topmost`] is idempotent, so a location change that
+/// does not cross the windowed↔fullscreen boundary is a [`TopmostAction::NoOp`]
+/// (no spurious toggle, no busy-loop). (`docs/src/dev-guide/floating-space.md`)
+#[must_use]
+pub fn is_foreground_location_change(event_hwnd: isize, foreground_hwnd: isize) -> bool {
+    foreground_hwnd != 0 && event_hwnd == foreground_hwnd
 }
 
 #[cfg(test)]
@@ -490,5 +520,120 @@ mod tests {
             currently_topmost: false,
         });
         assert_eq!(re_pin, TopmostAction::Pin);
+    }
+
+    // ── Foreground location-change trigger (ticket #6) ────────────────
+    //
+    // The F11 trigger's pure seam: the relevance filter (which location change
+    // to re-evaluate) plus the transition sequences it must catch and the
+    // no-op it must NOT. All via the existing `classify_foreground` +
+    // `decide_float_topmost`, asserted on the DECISION, never any Win32 call.
+
+    /// The trigger re-evaluates only on the foreground window's own location
+    /// change; the foreground's own HWND is the relevant one.
+    #[test]
+    fn foreground_location_change_is_relevant_for_self() {
+        assert!(is_foreground_location_change(100, 100));
+    }
+
+    /// A location change for any window that is NOT the foreground is
+    /// irrelevant — the noisy `EVENT_OBJECT_LOCATIONCHANGE` stream is filtered
+    /// down to at most the one foreground HWND.
+    #[test]
+    fn non_foreground_location_change_is_irrelevant() {
+        assert!(!is_foreground_location_change(100, 200));
+        assert!(!is_foreground_location_change(200, 100));
+    }
+
+    /// Before the first foreground is established (`foreground_hwnd == 0`)
+    /// every location change is rejected, so none is misrouted into the toggle
+    /// at startup.
+    #[test]
+    fn location_change_irrelevant_when_no_foreground_known() {
+        assert!(!is_foreground_location_change(0, 0));
+        assert!(!is_foreground_location_change(100, 0));
+    }
+
+    /// Criterion 1: pressing F11 in an already-focused flow-managed app flips
+    /// its live fullscreen classification `Flow → Fullscreen`, so the
+    /// foreground location change re-evaluates the toggle and DROPS the floats
+    /// below it (no focus change needed). The fullscreen fact is the live
+    /// geometry+style classification, not the stored registry state.
+    #[test]
+    fn f11_fullscreen_in_focused_flow_app_drops_floats() {
+        // Focused app starts windowed and flow-managed → floats pinned.
+        assert_eq!(
+            decide_float_topmost(FloatTopmostSnapshot {
+                foreground: classify_foreground(true, false), // Flow
+                has_floats: true,
+                currently_topmost: false,
+            }),
+            TopmostAction::Pin,
+        );
+        // Floats are now topmost. F11 makes the focused app fullscreen → the
+        // foreground location change re-runs the toggle with the new (live)
+        // classification → drop.
+        assert_eq!(
+            decide_float_topmost(FloatTopmostSnapshot {
+                foreground: classify_foreground(true, true), // Fullscreen
+                has_floats: true,
+                currently_topmost: true,
+            }),
+            TopmostAction::Drop,
+        );
+    }
+
+    /// Criterion 2: exiting F11 returns a flow-managed app to windowed, so the
+    /// foreground location change re-evaluates and re-PINS the floats.
+    #[test]
+    fn exiting_f11_in_flow_app_re_pins_floats() {
+        // Floats dropped while the focused app is fullscreen.
+        assert_eq!(
+            decide_float_topmost(FloatTopmostSnapshot {
+                foreground: classify_foreground(true, true), // Fullscreen
+                has_floats: true,
+                currently_topmost: true,
+            }),
+            TopmostAction::Drop,
+        );
+        // Floats now dropped. Exit F11 → app windowed again → the foreground
+        // location change re-runs the toggle → re-pin.
+        assert_eq!(
+            decide_float_topmost(FloatTopmostSnapshot {
+                foreground: classify_foreground(true, false), // Flow
+                has_floats: true,
+                currently_topmost: false,
+            }),
+            TopmostAction::Pin,
+        );
+    }
+
+    /// Criterion 3: an ordinary move/resize of the foreground that is NOT a
+    /// fullscreen transition leaves the classification unchanged, so
+    /// re-evaluating the toggle is a `NoOp` — no spurious `SetWindowPos`, and
+    /// no busy-loop across the per-pixel location-change stream during a drag.
+    #[test]
+    fn ordinary_foreground_resize_does_not_toggle_floats() {
+        // Flow-managed app, windowed, floats already on top. A location change
+        // fires (the user resizes within the screen) but it stays windowed and
+        // flow-managed → same classification → no-op.
+        assert_eq!(
+            decide_float_topmost(FloatTopmostSnapshot {
+                foreground: classify_foreground(true, false), // Flow, unchanged
+                has_floats: true,
+                currently_topmost: true,
+            }),
+            TopmostAction::NoOp,
+        );
+        // Same holds while floats are dropped under a non-flow foreground that
+        // resizes: stays NonFlow → no-op.
+        assert_eq!(
+            decide_float_topmost(FloatTopmostSnapshot {
+                foreground: classify_foreground(false, false), // NonFlow, unchanged
+                has_floats: true,
+                currently_topmost: false,
+            }),
+            TopmostAction::NoOp,
+        );
     }
 }

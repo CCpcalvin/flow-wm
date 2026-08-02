@@ -341,6 +341,39 @@ recolor, registry focus) is untouched. It runs in two spots:
 2. At the end of the handler, after any cross-workspace switch has settled the
    active workspace's float set.
 
+### The F11 trigger: the foreground's own resize
+
+A foreground *change* is not the only moment the foreground's fullscreen
+classification can flip. Pressing **F11 in an already-focused app** (VS Code, a
+terminal, a browser) resizes the window into fullscreen **without** a focus
+change, so the focus sink never runs and #5's toggle would leave the floats
+wrongly on top of the now-fullscreen app. This is why fullscreen detection is
+**geometry-based, not event-based**: an F11 toggle is a `EVENT_OBJECT_LOCATIONCHANGE`,
+not a state change, and never touches the stored `Ignored` classification.
+
+So a second, additive trigger re-runs the **same** toggle on the foreground
+window's own resize:
+
+- The focus sink records the authoritative foreground HWND into a
+  `FOREGROUND_HWND` global (mirroring `DRAGGED_HWND`) on every foreground change
+  (and at init). The WinEvent callback forwards `EVENT_OBJECT_LOCATIONCHANGE`
+  for that one HWND in addition to its existing float / drag filters, so the
+  ultra-noisy event still cannot flood the channel — at most one window's
+  location changes reach the daemon.
+- The main loop's `LocationChange` branch runs the pure
+  `is_foreground_location_change` relevance gate ("is this the foreground?")
+  and, on a hit, calls `reconcile_float_topmost` again. Nothing else changes:
+  the float-sync and tile-drag routing run exactly as before.
+
+The toggle itself is **idempotent**, so this trigger costs nothing in the common
+case: an ordinary move/resize of the foreground that does not cross the
+windowed↔fullscreen boundary re-evaluates to the same classification and issues
+no `SetWindowPos` (proven by `decide_float_topmost`'s `NoOp`). During a drag
+`EVENT_OBJECT_LOCATIONCHANGE` fires per-pixel, but each fire is a cheap
+no-op until the classification actually crosses — no busy-loop, no spurious
+toggles. Exiting F11 flips the classification back to `Flow`, so the same
+location-change trigger re-pins the floats.
+
 ### The pure decision
 
 The decision — *given the foreground and the float layer's current state, which

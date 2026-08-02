@@ -145,6 +145,13 @@ impl FlowWM {
             // dialog). See `docs/src/dev-guide/borders.md`.
             if let Some(hwnd) = fg_hwnd {
                 registry.set_focused(hwnd);
+                // Seed the foreground-HWND global so the hook callback forwards
+                // the foreground's own `EVENT_OBJECT_LOCATIONCHANGE` (the F11
+                // trigger) from the very first loop iteration, even when no
+                // foreground *change* fires after startup (the pre-focused app
+                // was foreground before flowd launched). Defaults to 0 otherwise,
+                // the "no foreground known" sentinel.
+                hooks::set_foreground_hwnd(hwnd);
             }
             let focus_col = fg_hwnd.and_then(|hwnd| {
                 let wid = WindowId(hwnd);

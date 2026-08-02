@@ -80,7 +80,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage,
 };
 
+use crate::float_topmost::is_foreground_location_change;
 use crate::registry::HookEvent;
+use crate::registry::hooks::foreground_hwnd;
 
 use super::types::FlowWM;
 
@@ -533,6 +535,16 @@ impl FlowWM {
                     self.on_window_name_change(hwnd);
                 }
                 HookEvent::LocationChange { hwnd } => {
+                    // F11 trigger (ticket #6): an already-focused app that
+                    // resizes into fullscreen does so WITHOUT a foreground
+                    // change, so the focus sink's TOPMOST toggle misses it. The
+                    // foreground's own LOCATIONCHANGE re-evaluates the (idempotent)
+                    // toggle — a non-fullscreen resize is a no-op, so ordinary
+                    // moves/resizes never churn. This is purely additive to the
+                    // existing float/drag routing below. (`docs/src/dev-guide/floating-space.md`)
+                    if is_foreground_location_change(hwnd, foreground_hwnd()) {
+                        self.reconcile_float_topmost(hwnd);
+                    }
                     // During a tile drag, LOCATIONCHANGE for the dragged window
                     // goes to the drag-move handler; all other LOCATIONCHANGE
                     // events (floats) go to the float sync path as before.

@@ -21,7 +21,7 @@
 //! [`mutations::next_available_window`] (same-column sibling first, then left, then right).
 
 use crate::common::WindowId;
-use crate::registry::hooks::remove_float_hwnd;
+use crate::registry::hooks::{remove_float_hwnd, set_foreground_hwnd};
 use crate::registry::types::{FloatingState, ReclassifyResult, VisibilityChange, WindowState};
 use crate::registry::win32 as registry_win32;
 use windows::Win32::Foundation::HWND;
@@ -393,6 +393,15 @@ impl FlowWM {
     /// natural no-op: the focused column is already visible, so
     /// `ensure_focused_visible` returns `None`.
     pub(super) fn on_focus_changed(&mut self, hwnd: isize) {
+        // Record the authoritative foreground BEFORE any bail so the hook
+        // callback forwards the foreground's own `EVENT_OBJECT_LOCATIONCHANGE`
+        // (the F11 trigger): an already-focused app that resizes into fullscreen
+        // does so WITHOUT a foreground change, so this global is how the
+        // location-change trigger finds the window to re-evaluate. The
+        // subsequent toggle is idempotent, so a non-fullscreen foreground never
+        // churns. (`docs/src/dev-guide/floating-space.md`)
+        set_foreground_hwnd(hwnd);
+
         // Any foreground change cancels a pending focus-follows-mouse dwell so an
         // external alt-tab/click (or a self-induced push) is respected until the
         // mouse actually moves — no steal-back. The movement-gate in the
