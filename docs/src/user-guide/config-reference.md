@@ -267,28 +267,43 @@ repeat_interval_ms = 240
 
 Two pointer-driven behaviors that let you navigate the workspace with the mouse
 alone. Both share one low-rate cursor poll. **Both ship on by default** — this
-breaks the daemon's zero-CPU-while-idle property (the poll wakes ~20 times per
+breaks the daemon's zero-CPU-while-idle property (the poll wakes ~40 times per
 second); flip either flag to `false` to restore it. See the
 [Hover developer guide](../dev-guide/hover.md).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `focus_follows_mouse` | `bool` | `true` | Rest the cursor on an eligible tracked window for the dwell to focus it through the existing focus path. |
-| `focus_dwell_ms` | `u32` | `300` | Rest time (ms) before FFM focuses; any cursor motion restarts it (a jittering mouse never focuses). |
+| `focus_dwell_ms` | `u32` | `25` | Sweep debounce (ms) before FFM focuses; any cursor motion restarts it. Keep ≥ `poll_interval_ms` for sweep protection (see below). |
 | `edge_scroll` | `bool` | `true` | Rest the cursor in a screen edge band for the edge-dwell to scroll the viewport one column, then glide at the shared cadence. |
-| `edge_dwell_ms` | `u32` | `150` | Rest time (ms) in a band before the first edge-scroll — shorter than the focus dwell. |
-| `poll_interval_ms` | `u32` | `50` | Shared cursor poll interval (ms); clamped to an 8 ms floor so a typo can't busy-loop. |
+| `edge_dwell_ms` | `u32` | `150` | Rest time (ms) in a band before the first edge-scroll — longer than the focus dwell, since an edge-scroll should require intent. |
+| `poll_interval_ms` | `u32` | `25` | Shared cursor poll interval (ms); clamped to an 8 ms floor so a typo can't busy-loop. |
 
 Example:
 
 ```toml
 [hover]
 focus_follows_mouse = true
-focus_dwell_ms = 300
+focus_dwell_ms = 25
 edge_scroll = true
 edge_dwell_ms = 150
-poll_interval_ms = 50
+poll_interval_ms = 25
 ```
+
+**Tuning `focus_dwell_ms`.** This is a *sweep debounce*, not a "rest to focus"
+pause. The movement-gate arms the dwell only when it sees the cursor move over
+an eligible window and restarts it on every further motion, so a cursor swept
+across windows never trips it — only the window you **stop** on is focused. For
+that to hold, keep `focus_dwell_ms ≥ poll_interval_ms`.
+
+- **Lower it** (toward `0`) for instant "sloppy" focus — the cursor focuses a
+  window the moment it enters — at the cost of flash-focusing every window you
+  sweep past.
+- **Raise it** for more jitter rejection (a trembling cursor won't focus), at
+  the cost of focus landing later after you stop.
+
+The default `25 ms` (one poll, with `poll_interval_ms = 25`) lands focus within
+roughly one poll of the cursor stopping — effectively "focus on stop".
 
 ---
 

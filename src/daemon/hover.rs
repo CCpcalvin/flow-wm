@@ -64,9 +64,8 @@ impl FlowWM {
             return;
         }
         let now = Instant::now();
-        let interval = Duration::from_millis(u64::from(
-            self.config.hover.effective_poll_interval_ms(),
-        ));
+        let interval =
+            Duration::from_millis(u64::from(self.config.hover.effective_poll_interval_ms()));
         // Throttle: only poll if the interval has elapsed since the last poll.
         // This bounds the poll rate to the configured interval regardless of how
         // often hook activity wakes the loop.

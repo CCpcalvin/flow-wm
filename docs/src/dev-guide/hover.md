@@ -28,7 +28,7 @@ The cursor source is **`GetCursorPos` polled on the main loop**, not a
 `WH_MOUSE_LL` low-level mouse hook. A low-level hook fires at the mouse hardware
 reporting rate (up to 8000 Hz on gaming mice) and needs its own thread — exactly
 the cost this daemon exists to avoid. Polling lets us choose the rate and keep
-it independent of the user's hardware. The default interval is **50 ms** (~20 Hz),
+it independent of the user's hardware. The default interval is **25 ms** (~40 Hz),
 clamped to an 8 ms floor at load so a configuration typo cannot busy-loop.
 
 The poll is folded into the main loop's existing wait-timeout `min`-reduce (see
@@ -88,7 +88,13 @@ uses a **movement-gate**:
 
 - The dwell **arms only** when a poll observes the cursor at a position
   **different from the previous poll** *and* that position is over an eligible
-  window. Any motion restarts the dwell, so a jittering mouse never focuses.
+  window, and **any motion restarts it**. That makes the dwell a *sweep
+  debounce*: a cursor actively moving across windows keeps pushing the deadline
+  past the next poll and never fires, so only the window the cursor *stops* on
+  is focused. This is why the default dwell is one poll — 25 ms — rather than a
+  deliberate "rest to focus" pause. For the sweep protection to hold, keep
+  `focus_dwell_ms ≥ poll_interval_ms`; lower it toward 0 for instant "sloppy"
+  focus at the cost of flash-focusing windows mid-sweep.
 - The dwell is **cancelled by any foreground change** — the existing
   `on_focus_changed` handler feeds `controller.on_foreground_change()`, which
   cancels a pending dwell.
@@ -132,9 +138,9 @@ flowchart LR
   **atomically from one cursor read**. The drag's first scroll is **immediate**
   (dragging is high intent; no dwell).
 - **Hover feed** (`src/daemon/hover.rs`): when not dragging, the poll feeds band
-  transitions into the same scheduler, gated behind a short **edge-dwell**
-  (default 150 ms — shorter than the 300 ms focus dwell) so brushing the edge
-  does not jump the viewport. On expiry the controller emits
+  transitions into the same scheduler, gated behind an **edge-dwell** (default
+  150 ms — intentionally longer than the 25 ms focus dwell) so brushing the
+  edge does not jump the viewport. On expiry the controller emits
   `EdgeEnter(direction)`; the wiring arms the shared scheduler (immediate scroll
   + first-gap + repeat). Leaving the band emits `EdgeLeave`, which stops the
   scheduler and clears the edge-dwell deadline.
@@ -155,10 +161,10 @@ sync by `default_config_toml_matches_compiled_defaults`.
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `focus_follows_mouse` | `bool` | `true` | Master switch for FFM. |
-| `focus_dwell_ms` | `u32` | `300` | Rest time before FFM focuses; any motion restarts it. |
+| `focus_dwell_ms` | `u32` | `25` | Sweep debounce before FFM focuses; any motion restarts it. Keep ≥ `poll_interval_ms`. |
 | `edge_scroll` | `bool` | `true` | Master switch for edge-hover-scroll. |
-| `edge_dwell_ms` | `u32` | `150` | Rest time in a band before the first edge-scroll. |
-| `poll_interval_ms` | `u32` | `50` | Shared poll interval; clamped to an 8 ms floor. |
+| `edge_dwell_ms` | `u32` | `150` | Rest time in a band before the first edge-scroll; longer than the focus dwell (edge-scroll needs intent). |
+| `poll_interval_ms` | `u32` | `25` | Shared poll interval; clamped to an 8 ms floor. |
 
 ### `[edge_scroll]` (shared with drag — ADR-0002)
 

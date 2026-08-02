@@ -87,12 +87,18 @@ mod tests {
 
     #[test]
     fn interior_point_is_none() {
-        assert_eq!(edge_band_direction(Point { x: 960, y: 540 }, AREA, BW), None);
+        assert_eq!(
+            edge_band_direction(Point { x: 960, y: 540 }, AREA, BW),
+            None
+        );
     }
 
     #[test]
     fn center_is_none() {
-        assert_eq!(edge_band_direction(Point { x: 960, y: 540 }, AREA, BW), None);
+        assert_eq!(
+            edge_band_direction(Point { x: 960, y: 540 }, AREA, BW),
+            None
+        );
     }
 
     // --- Left edge band ---
@@ -151,13 +157,19 @@ mod tests {
     #[test]
     fn last_pixel_before_right_band_is_none() {
         // x = 1911 is just before the right band → interior.
-        assert_eq!(edge_band_direction(Point { x: 1911, y: 500 }, AREA, BW), None);
+        assert_eq!(
+            edge_band_direction(Point { x: 1911, y: 500 }, AREA, BW),
+            None
+        );
     }
 
     #[test]
     fn exactly_at_right_edge_is_none() {
         // x = 1920 is past the work area (half-open right edge) → None.
-        assert_eq!(edge_band_direction(Point { x: 1920, y: 500 }, AREA, BW), None);
+        assert_eq!(
+            edge_band_direction(Point { x: 1920, y: 500 }, AREA, BW),
+            None
+        );
     }
 
     // --- Corners (band + band-edge of vertical extent) ---
@@ -211,7 +223,10 @@ mod tests {
 
     #[test]
     fn below_work_area_at_right_edge_is_none() {
-        assert_eq!(edge_band_direction(Point { x: 1919, y: 1080 }, AREA, BW), None);
+        assert_eq!(
+            edge_band_direction(Point { x: 1919, y: 1080 }, AREA, BW),
+            None
+        );
     }
 
     // --- Band width boundary ---
@@ -283,7 +298,10 @@ mod tests {
             Some(Direction::Right)
         );
         // Boundary just past left band.
-        assert_eq!(edge_band_direction(Point { x: 1928, y: 500 }, area, BW), None);
+        assert_eq!(
+            edge_band_direction(Point { x: 1928, y: 500 }, area, BW),
+            None
+        );
     }
 
     #[test]

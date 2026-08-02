@@ -336,7 +336,9 @@ impl FlowConfig {
         // `effective_repeat_interval_ms` makes the value safe regardless; the
         // warning tells the user why their value was not used as-is. The initial
         // delay needs no warning — its floor makes unsafe values silently safe.
-        let effective_repeat = self.edge_scroll.effective_repeat_interval_ms(&self.animation);
+        let effective_repeat = self
+            .edge_scroll
+            .effective_repeat_interval_ms(&self.animation);
         if self.edge_scroll.repeat_interval_ms < effective_repeat {
             return Err(format!(
                 "edge_scroll.repeat_interval_ms ({}) is below its effective floor ({} ms, \
@@ -961,10 +963,10 @@ const HOVER_POLL_FLOOR_MS: u32 = 8;
 /// ```toml
 /// [hover]
 /// focus_follows_mouse = true
-/// focus_dwell_ms = 300
+/// focus_dwell_ms = 25
 /// edge_scroll = true
 /// edge_dwell_ms = 150
-/// poll_interval_ms = 50
+/// poll_interval_ms = 25
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -973,9 +975,14 @@ pub struct HoverConfig {
     /// on an eligible tracked window for the dwell focuses it through the
     /// existing focus path. Ships **on** — see (`docs/src/dev-guide/hover.md`).
     pub focus_follows_mouse: bool,
-    /// Focus-follows-mouse dwell in milliseconds — how long the cursor must
-    /// rest on an eligible window before focus fires. Any movement restarts
-    /// the dwell, so a jittering mouse never focuses.
+    /// Focus-follows-mouse dwell in milliseconds — a sweep debounce, not a
+    /// "rest to focus" pause. The movement-gate arms it only on observed
+    /// motion over an eligible window and restarts it on every subsequent
+    /// motion, so a cursor sweeping across windows never trips it: only the
+    /// window the cursor *stops* over is focused. Keep it at or above
+    /// `poll_interval_ms` to preserve that sweep protection; lower it toward 0
+    /// for instant ("sloppy") focus at the cost of flash-focusing windows
+    /// mid-sweep. See (`docs/src/dev-guide/hover.md`).
     pub focus_dwell_ms: u32,
     /// Master switch for edge-hover-scroll: when `true`, resting the cursor in
     /// a screen edge band for the edge-dwell scrolls the tile viewport one
@@ -985,9 +992,11 @@ pub struct HoverConfig {
     /// (`docs/src/dev-guide/hover.md`).
     pub edge_scroll: bool,
     /// Edge-band dwell in milliseconds — how long the cursor must rest in a
-    /// screen edge band before the first edge-scroll fires. Shorter than the
-    /// focus dwell because reaching the screen edge is already a deliberate
-    /// gesture.
+    /// screen edge band before the first edge-scroll fires. Intentionally
+    /// longer than `focus_dwell_ms`: pointing at a window should focus it
+    /// promptly, but an edge-scroll should require intent so the viewport does
+    /// not jump when the cursor merely drifts to the bezel. See
+    /// (`docs/src/dev-guide/hover.md`).
     pub edge_dwell_ms: u32,
     /// Cursor poll interval in milliseconds, shared by both hover behaviors.
     /// Clamped up to `HOVER_POLL_FLOOR_MS` by [`Self::effective_poll_interval_ms`]
@@ -1000,15 +1009,19 @@ impl Default for HoverConfig {
         Self {
             // Ships on: the mouse-driven experience works out of the box. This
             // breaks the daemon's zero-CPU-while-idle property (the poll then
-            // wakes ~20 times per second); see (`docs/src/dev-guide/hover.md`).
+            // wakes ~40 times per second); see (`docs/src/dev-guide/hover.md`).
             focus_follows_mouse: true,
-            focus_dwell_ms: 300,
+            // A ~1-poll sweep debounce, not a "rest to focus" pause: paired
+            // with the 25 ms poll below, focus lands within ~one poll of the
+            // cursor stopping. See the `focus_dwell_ms` field doc.
+            focus_dwell_ms: 25,
             edge_scroll: true,
-            // Shorter than the focus dwell: reaching the screen edge is already
-            // a deliberate gesture, so a shorter guard against accidental
-            // brushes suffices.
+            // Longer than the focus dwell: focus should fire on a point, but an
+            // edge-scroll should require intent so a cursor drifted to the
+            // bezel does not jump the viewport.
             edge_dwell_ms: 150,
-            poll_interval_ms: 50,
+            // ~40 polls per second; see (`docs/src/dev-guide/hover.md`).
+            poll_interval_ms: 25,
         }
     }
 }
@@ -1438,18 +1451,17 @@ strategy = "original_slot"
 
     // --- Hover config defaults, clamp, and round-trip ---
 
-    /// Positive: `HoverConfig::default()` ships focus-follows-mouse on, a 300 ms
-    /// focus dwell, edge-hover-scroll on, a 150 ms edge dwell, and a 50 ms poll
-    /// interval — the design defaults. Mirrors the focused default-value guards
-    /// (`focus_config_default_interval_is_250ms`).
+    /// Positive: `HoverConfig::default()` ships focus-follows-mouse on, a 25 ms
+    /// focus dwell (a ~1-poll sweep debounce), edge-hover-scroll on, a 150 ms
+    /// edge dwell, and a 25 ms poll interval — the design defaults.
     #[test]
     fn hover_config_default_values() {
         let hover = HoverConfig::default();
         assert!(hover.focus_follows_mouse);
-        assert_eq!(hover.focus_dwell_ms, 300);
+        assert_eq!(hover.focus_dwell_ms, 25);
         assert!(hover.edge_scroll);
         assert_eq!(hover.edge_dwell_ms, 150);
-        assert_eq!(hover.poll_interval_ms, 50);
+        assert_eq!(hover.poll_interval_ms, 25);
     }
 
     /// Positive: the poll interval clamps up to its 8 ms floor so a typo cannot
@@ -1504,7 +1516,7 @@ strategy = "original_slot"
         assert!(parsed.hover.focus_follows_mouse);
         assert!(parsed.hover.edge_scroll);
         assert_eq!(parsed.hover.edge_dwell_ms, 150);
-        assert_eq!(parsed.hover.poll_interval_ms, 50);
+        assert_eq!(parsed.hover.poll_interval_ms, 25);
     }
 
     /// Positive: an empty `[hover]` block parses to the compiled defaults.

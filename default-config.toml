@@ -132,24 +132,38 @@ repeat_interval_ms = 240
 # With every hover flag off, there is no poll and the daemon sleeps
 # indefinitely (zero CPU while idle). See docs/src/dev-guide/hover.md.
 #
-# - focus_follows_mouse: master switch; when true, resting the cursor on an
-#                        eligible tracked window for the dwell focuses it
-# - focus_dwell_ms:      ms the cursor must rest on a window before focus fires
-#                        (any movement restarts the dwell, so jitter never focuses)
+# - focus_follows_mouse: master switch; when true, the window under the cursor
+#                        receives focus after the focus_dwell_ms debounce.
+# - focus_dwell_ms:      SWEEP DEBOUNCE, not a "rest to focus" pause. The
+#                        movement-gate arms the dwell only when it sees the
+#                        cursor move over an eligible window and restarts it on
+#                        every further motion, so a cursor sweeping across
+#                        windows never trips it — only the window you STOP on
+#                        is focused. For this to hold, keep focus_dwell_ms >=
+#                        poll_interval_ms. Tuning:
+#                          * raise it for more jitter rejection;
+#                          * lower it (toward 0) for instant "sloppy" focus,
+#                            at the cost of flash-focusing windows mid-sweep.
+#                        The default (25 ms, ~ one poll) lands focus within one
+#                        poll of the cursor stopping.
 # - edge_scroll:         master switch for edge-hover-scroll; when true, resting
 #                        the cursor in a screen edge band for the edge-dwell
 #                        scrolls the viewport one column, then glides. The band
 #                        width and cadence come from [edge_scroll] above.
 # - edge_dwell_ms:       ms the cursor must rest in an edge band before the
-#                        first scroll fires (shorter than focus_dwell_ms)
+#                        first scroll fires. Intentionally LONGER than
+#                        focus_dwell_ms: pointing at a window should focus
+#                        promptly, but an edge-scroll should require intent so
+#                        the viewport does not jump when the cursor drifts to
+#                        the bezel.
 # - poll_interval_ms:    ms between cursor polls; clamped up to an 8 ms floor so
 #                        a typo cannot busy-loop the daemon
 [hover]
 focus_follows_mouse = true
-focus_dwell_ms = 300
+focus_dwell_ms = 25
 edge_scroll = true
 edge_dwell_ms = 150
-poll_interval_ms = 50
+poll_interval_ms = 25
 
 # Tile-drag configuration.
 #

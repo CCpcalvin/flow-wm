@@ -415,17 +415,20 @@ impl FlowWM {
         // last poll so the throttle in `poll_hover` and this deadline agree on
         // the cadence; when both flags are off this is `None` and the daemon
         // sleeps indefinitely — the idle invariant.
-        let hover_poll_deadline =
-            if (self.config.hover.focus_follows_mouse || self.config.hover.edge_scroll)
-                && self.drag_state.is_none()
-            {
-                let interval = std::time::Duration::from_millis(
-                    u64::from(self.config.hover.effective_poll_interval_ms()),
-                );
-                Some(self.last_hover_poll.map_or(now + interval, |last| last + interval))
-            } else {
-                None
-            };
+        let hover_poll_deadline = if (self.config.hover.focus_follows_mouse
+            || self.config.hover.edge_scroll)
+            && self.drag_state.is_none()
+        {
+            let interval = std::time::Duration::from_millis(u64::from(
+                self.config.hover.effective_poll_interval_ms(),
+            ));
+            Some(
+                self.last_hover_poll
+                    .map_or(now + interval, |last| last + interval),
+            )
+        } else {
+            None
+        };
         // The armed edge-hover-scroll dwell deadline (if a band entry armed one
         // and the edge-dwell has not yet fired).
         let edge_dwell_deadline = self.edge_dwell_deadline;
@@ -825,7 +828,7 @@ mod tests {
     #[test]
     fn wait_timeout_focus_dwell_deadline_uses_remaining_ms() {
         let now = Instant::now();
-        // Armed focus dwell in 300 ms (the default dwell) → 300.
+        // Armed focus dwell 300 ms out (an arbitrary fixture) → 300 ms remaining.
         let deadline = now + Duration::from_millis(300);
         assert_eq!(
             compute_wait_timeout_inner(false, None, None, None, None, Some(deadline), None, now),
@@ -874,16 +877,7 @@ mod tests {
         // Armed edge dwell in 150 ms (the default edge-dwell) → 150.
         let deadline = now + Duration::from_millis(150);
         assert_eq!(
-            compute_wait_timeout_inner(
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(deadline),
-                now
-            ),
+            compute_wait_timeout_inner(false, None, None, None, None, None, Some(deadline), now),
             150
         );
     }
@@ -916,16 +910,7 @@ mod tests {
         // Already past → floor to 1 so the loop re-wakes and fires the dwell.
         let deadline = now - Duration::from_millis(6);
         assert_eq!(
-            compute_wait_timeout_inner(
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(deadline),
-                now
-            ),
+            compute_wait_timeout_inner(false, None, None, None, None, None, Some(deadline), now),
             1
         );
     }

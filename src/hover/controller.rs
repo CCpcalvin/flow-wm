@@ -17,7 +17,9 @@
 //! - **Movement-gate:** a focus-follows-mouse dwell arms only when a poll
 //!   observes the cursor at a position *different from the previous poll* and
 //!   over an *eligible* window (tracked and not already foreground). Any motion
-//!   restarts the dwell, so a jittering mouse never focuses. The first poll has
+//!   restarts the dwell, so a cursor that keeps moving never focuses (a
+//!   sufficient dwell also rejects jitter; see `docs/src/dev-guide/hover.md`).
+//!   The first poll has
 //!   no previous position, so it never arms — the cursor must actually move.
 //! - **Alt-tab respect:** any foreground-change event cancels the dwell. After
 //!   the cancel the cursor has not moved, so the dwell cannot re-arm until the
@@ -89,10 +91,11 @@ pub struct HoverPoll {
 /// and holds no clamp math, exactly like the drag's `EdgeScrollTimings`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoverTimings {
-    /// Focus-follows-mouse dwell before focus fires.
+    /// Focus-follows-mouse dwell before focus fires (sweep debounce).
     pub focus_dwell: Duration,
-    /// Edge-band dwell before the first edge-scroll fires (shorter than the
-    /// focus dwell — reaching the edge is already a deliberate gesture).
+    /// Edge-band dwell before the first edge-scroll fires. Longer than the
+    /// focus dwell — an edge-scroll should require intent so a cursor drifted
+    /// to the bezel does not jump the viewport.
     pub edge_dwell: Duration,
 }
 
@@ -210,7 +213,7 @@ impl HoverController {
                 Some(hwnd) => {
                     // Moved onto an eligible window: (re)arm the dwell. A restart
                     // replaces any previously armed dwell — one timer at the
-                    // wiring level — so a jittering mouse never focuses.
+                    // wiring level — so a cursor that keeps moving never focuses.
                     let deadline = now + timings.focus_dwell;
                     self.ffm = Some((hwnd, deadline));
                     actions.push(HoverAction::ArmDwell(deadline));
@@ -358,7 +361,10 @@ mod tests {
         let t = now();
         c.on_poll(poll_over(W1, pt(100, 100)), t, &TIMINGS); // baseline
         let actions = c.on_poll(poll_over(W1, pt(120, 100)), t, &TIMINGS); // moved
-        assert_eq!(actions, vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]);
+        assert_eq!(
+            actions,
+            vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]
+        );
         assert_eq!(c.ffm, Some((W1, t + TIMINGS.focus_dwell)));
     }
 
@@ -369,7 +375,10 @@ mod tests {
         c.on_poll(poll_over(W1, pt(100, 100)), t, &TIMINGS); // baseline
         // Same position → no movement → no arm.
         let actions = c.on_poll(poll_over(W1, pt(100, 100)), t, &TIMINGS);
-        assert!(actions.is_empty(), "stationary cursor must not arm: {actions:?}");
+        assert!(
+            actions.is_empty(),
+            "stationary cursor must not arm: {actions:?}"
+        );
         assert_eq!(c.ffm, None);
     }
 
@@ -397,7 +406,10 @@ mod tests {
         for i in 1..5 {
             let actions = c.on_poll(poll_over(W1, pt(i * 10, 0)), t, &TIMINGS);
             // Every moving poll re-arms at the same `now + dwell`.
-            assert_eq!(actions, vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]);
+            assert_eq!(
+                actions,
+                vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]
+            );
             // The poll never emits Focus — only the timer-fire event does.
         }
     }
@@ -489,7 +501,10 @@ mod tests {
 
         // Stationary poll at the same spot → no re-arm.
         let actions = c.on_poll(poll_over(W1, pt(130, 100)), t, &TIMINGS);
-        assert!(actions.is_empty(), "no re-arm without movement: {actions:?}");
+        assert!(
+            actions.is_empty(),
+            "no re-arm without movement: {actions:?}"
+        );
         assert_eq!(c.ffm, None);
     }
 
@@ -503,7 +518,10 @@ mod tests {
 
         // Actually move the mouse → re-arm.
         let actions = c.on_poll(poll_over(W1, pt(140, 100)), t, &TIMINGS);
-        assert_eq!(actions, vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]);
+        assert_eq!(
+            actions,
+            vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]
+        );
     }
 
     #[test]
@@ -560,7 +578,10 @@ mod tests {
         // Poll inside the band at a new position with an eligible target: the
         // edge path owns this poll — no ArmDwell, no edge transition (same band).
         let actions = c.on_poll(poll_band(Direction::Left, pt(2, 500)), t, &TIMINGS);
-        assert!(actions.is_empty(), "edge precedence suppresses FFM: {actions:?}");
+        assert!(
+            actions.is_empty(),
+            "edge precedence suppresses FFM: {actions:?}"
+        );
         assert_eq!(c.ffm, None);
     }
 
@@ -717,7 +738,10 @@ mod tests {
         c.on_poll(poll_over(W1, pt(110, 100)), t, &TIMINGS); // arm W1
         // Move onto W2 (also eligible) → restart for W2 (single ArmDwell).
         let actions = c.on_poll(poll_over(W2, pt(300, 100)), t, &TIMINGS);
-        assert_eq!(actions, vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]);
+        assert_eq!(
+            actions,
+            vec![HoverAction::ArmDwell(t + TIMINGS.focus_dwell)]
+        );
         assert_eq!(c.ffm, Some((W2, t + TIMINGS.focus_dwell)));
         // Firing now targets W2, not W1.
         assert_eq!(c.on_dwell_timer_fired(), HoverAction::Focus(W2));
@@ -768,14 +792,16 @@ mod tests {
             vec![HoverAction::ArmDwell(t0 + TIMINGS.focus_dwell)]
         );
         // Stationary polls while the dwell runs do nothing.
-        assert!(c
-            .on_poll(poll_over(W1, pt(120, 100)), t0 + Duration::from_millis(100), &TIMINGS)
-            .is_empty());
-        // Timer fires at the deadline → focus.
-        assert_eq!(
-            c.on_dwell_timer_fired(),
-            HoverAction::Focus(W1)
+        assert!(
+            c.on_poll(
+                poll_over(W1, pt(120, 100)),
+                t0 + Duration::from_millis(100),
+                &TIMINGS
+            )
+            .is_empty()
         );
+        // Timer fires at the deadline → focus.
+        assert_eq!(c.on_dwell_timer_fired(), HoverAction::Focus(W1));
         // Dwell consumed; a spurious second fire is NoOp.
         assert_eq!(c.on_dwell_timer_fired(), HoverAction::NoOp);
     }
@@ -795,12 +821,21 @@ mod tests {
             HoverAction::EdgeEnter(Direction::Left)
         );
         // Held in the band → no-op (scheduler repeats on its own).
-        assert!(c
-            .on_poll(poll_band(Direction::Left, pt(2, 500)), t0 + Duration::from_millis(50), &TIMINGS)
-            .is_empty());
+        assert!(
+            c.on_poll(
+                poll_band(Direction::Left, pt(2, 500)),
+                t0 + Duration::from_millis(50),
+                &TIMINGS
+            )
+            .is_empty()
+        );
         // Leave → stop scheduler + cancel edge-dwell (idempotent).
         assert_eq!(
-            c.on_poll(poll_none(pt(100, 500)), t0 + Duration::from_millis(80), &TIMINGS),
+            c.on_poll(
+                poll_none(pt(100, 500)),
+                t0 + Duration::from_millis(80),
+                &TIMINGS
+            ),
             vec![HoverAction::EdgeLeave, HoverAction::CancelEdgeDwell]
         );
         assert_eq!(c.edge_state, EdgeState::Off);
@@ -812,7 +847,11 @@ mod tests {
         let t0 = now();
         // Establish a previous cursor, then drive the edge path to Active.
         let _ = c.on_poll(poll_none(pt(10, 10)), t0, &TIMINGS);
-        let _ = c.on_poll(poll_band(Direction::Left, pt(0, 500)), t0 + Duration::from_millis(5), &TIMINGS);
+        let _ = c.on_poll(
+            poll_band(Direction::Left, pt(0, 500)),
+            t0 + Duration::from_millis(5),
+            &TIMINGS,
+        );
         assert_eq!(
             c.on_edge_dwell_timer_fired(),
             HoverAction::EdgeEnter(Direction::Left)
@@ -831,7 +870,11 @@ mod tests {
         // (symmetric with a brand-new controller). This is what lets
         // edge-hover-scroll re-arm cleanly when polling resumes after a drag
         // even if the cursor never leaves the band.
-        let actions = c.on_poll(poll_over(W1, pt(50, 50)), t0 + Duration::from_millis(10), &TIMINGS);
+        let actions = c.on_poll(
+            poll_over(W1, pt(50, 50)),
+            t0 + Duration::from_millis(10),
+            &TIMINGS,
+        );
         assert!(actions.is_empty());
     }
 }
