@@ -310,6 +310,66 @@ float-specific behavior arrives (e.g. `move-window → pixel nudge`), a second
 `matches!` arm for `WindowState::Floating(FloatingState::Active { .. })` will
 slot in alongside the tiling arm.
 
+## Stacking — Floats Above the Focused Tile
+
+By default Windows bundles *focus* with *raise*: `SetForegroundWindow` both
+gives a window the active state and lifts it to the top of the Z-order. With no
+stacking concept of its own, flow inherited that conflation — focusing a tile
+under (or overlapped by) a float raised the tile and buried the float, breaking
+the stacking invariant (every float must always sit above every tile, no matter
+which window holds focus).
+
+flow keeps the float layer above the tile layer with a **TOPMOST toggle**, the
+same mechanism Microsoft's own PowerToys Always-On-Top uses (`WS_EX_TOPMOST`):
+
+- While the foreground is a **flow-managed, non-fullscreen** window, every float
+  is pinned `WS_EX_TOPMOST`, so focusing a tile (by focus-follows-mouse,
+  keyboard nav, or click) no longer raises that tile above the float.
+- The moment the foreground moves to a **fullscreen app** or any **non-flow
+  window**, the floats are dropped to non-topmost so they never cover fullscreen
+  video / games or another application's windows.
+
+### Where it lives
+
+The toggle is evaluated **live in the single focus sink**
+(`on_focus_changed`) on every foreground change, purely *additively* — the
+existing focus side-effect chain (workspace switch, scroll-to-reveal, border
+recolor, registry focus) is untouched. It runs in two spots:
+
+1. Before the bail for untracked / ignored foregrounds, so a fullscreen app or
+   non-flow window still drops the floats.
+2. At the end of the handler, after any cross-workspace switch has settled the
+   active workspace's float set.
+
+### The pure decision
+
+The decision — *given the foreground and the float layer's current state, which
+floats should be TOPMOST, which dropped?* — is pure logic in
+[`float_topmost`](../../src/float_topmost.rs) (`ForegroundKind`,
+`classify_foreground`, `decide_float_topmost`), hermetically unit-tested like
+the hover controller. The Win32 application (`SetWindowPos(HWND_TOPMOST …)` in
+`daemon/float_topmost.rs`) is a thin shell over that decision and is
+manual-test territory.
+
+Two facts drive the decision, both read **live** on the foreground window:
+
+- **flow-managed** — actively tiling or an active float on the active workspace
+  (not `Ignored`, which must drop).
+- **fullscreen** — the live geometry+style check (`registry::win32::is_fullscreen`:
+  covers the full screen *and* no caption/thick-frame), **not** the stored
+  registry classification. This catches F11 in a tiled app, whose stored state
+  is still `Tiling`; fullscreen takes precedence over flow-managed.
+
+### No-op and no churn
+
+With no floats on the active workspace the toggle is a no-op that never calls
+`SetWindowPos` (the fast path is a pure field read). When floats exist, a cached
+`floats_topmost` flag short-circuits the unchanged case, so an unchanged
+foreground change does not re-issue `SetWindowPos` and disturb the floats'
+mutual Z-order. The toggle is re-evaluated on every foreground change — the
+cadence at which Z-order drift is reintroduced — matching PowerToys' re-pin
+discipline.
+
 ## Configuration
 
 The `[floating]` section in `flow.toml` controls default floating window

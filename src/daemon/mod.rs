@@ -30,6 +30,7 @@
 //! - [`run`] — main event loop ([`FlowWM::run`] and event routing)
 //! - [`hooks`] — Win32 hook event handlers
 //! - [`borders`] — border overlay lifecycle (attach/detach/recolor helpers)
+//! - [`float_topmost`] — TOPMOST-toggle wiring for the float layer
 //! - [`dispatch`] — IPC command dispatch router and action handlers
 //! - [`query`] — query handlers (extracted from dispatch)
 //! - [`edge_scroll`] — pure, clock-injectable edge-scroll auto-repeat scheduler
@@ -48,6 +49,7 @@ mod config_derive;
 mod dispatch;
 mod drag;
 mod edge_scroll;
+mod float_topmost;
 mod floating_sync;
 mod hooks;
 mod hover;
