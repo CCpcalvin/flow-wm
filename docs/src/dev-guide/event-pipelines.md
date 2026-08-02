@@ -336,17 +336,34 @@ These events fire when the user grabs a tiled window's title bar. The full
 drag lifecycle — zone detection, preview reflow, commit — is documented in
 (tile-drag.md).
 
-### LocationChange (extended for tile drag)
+### LocationChange (extended for tile drag and F11)
 
 The `EVENT_OBJECT_LOCATIONCHANGE` hook was already filtered to active-workspace
-floats. Tile-drag extends the filter with a second condition: the callback also
-forwards the event when `hwnd == DRAGGED_HWND.load(Acquire)`. The main thread
-then routes based on whether `drag_state` is active:
+floats. Two further conditions widen the filter without letting the noisy
+event flood the channel:
+
+- **Tile drag** — the callback also forwards when `hwnd == DRAGGED_HWND.load(Acquire)`.
+- **Foreground resize (F11)** — the callback also forwards when
+  `hwnd == FOREGROUND_HWND.load(Acquire)`. The focus sink updates
+  `FOREGROUND_HWND` on every foreground change (and at init), so an F11 toggle
+  in an already-focused app — a resize with **no** focus change — still reaches
+  the main loop and re-runs the idempotent TOPMOST toggle. The relevance gate
+  `is_foreground_location_change` ("is this the foreground?") then decides
+  whether to reconcile; a non-fullscreen resize is a `NoOp`, so per-pixel
+  fires during a drag never churn.
+
+The main thread then routes based on the window's role:
 
 | Condition | Action |
 |-----------|--------|
+| `is_foreground_location_change(hwnd, FOREGROUND_HWND)` | `reconcile_float_topmost(hwnd)`: re-evaluate the (idempotent) TOPMOST toggle for the F11 trigger |
 | `drag_state` is `Some` and `hwnd` matches dragged window | `on_drag_move`: border follow, zone detection, preview reflow |
 | `drag_state` is `None` or `hwnd` doesn't match | Fall through to float sync path (pre-existing behaviour) |
+
+The foreground reconcile is **additive**: it runs first and the float / drag
+routing is unchanged, so a foreground window that is also a float (or being
+dragged) gets both passes. The reconcile is a fast field-read no-op when the
+active workspace has no floats.
 
 ### Name Change (`EVENT_OBJECT_NAMECHANGE`)
 
