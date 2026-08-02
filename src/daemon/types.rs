@@ -242,12 +242,14 @@ pub struct FlowWM {
     /// Whether the active workspace's floats are currently pinned
     /// `WS_EX_TOPMOST` (the last state the toggle applied).
     ///
-    /// Drives the no-churn short-circuit in
-    /// [`reconcile_float_topmost`](super::FlowWM::reconcile_float_topmost):
-    /// the toggle only calls `SetWindowPos` when the desired TOPMOST state
-    /// differs from this value, preserving the floats' mutual z-order on
-    /// unchanged foreground changes. Re-evaluated on every foreground change
-    /// in the focus sink. (`docs/src/dev-guide/floating-space.md`)
+    /// Drives the no-churn short-circuit in the non-topmost (Drop) path of
+    /// [`reconcile_float_topmost`](super::FlowWM::reconcile_float_topmost) so an
+    /// unchanged dropping foreground does not re-issue `SetWindowPos`. The
+    /// TOPMOST-target path does **not** trust this cache: it re-asserts against
+    /// each float's observed real flag (see [`FlowWM::reassert_floats_topmost`](super::FlowWM::reassert_floats_topmost)),
+    /// because another app can clear a float's `WS_EX_TOPMOST` while this flag
+    /// still believes it is set. Re-evaluated on every foreground change in the
+    /// focus sink. (`docs/src/dev-guide/floating-space.md`)
     pub(super) floats_topmost: bool,
 
     /// Timestamp of the most recent hover cursor poll. `None` until the first

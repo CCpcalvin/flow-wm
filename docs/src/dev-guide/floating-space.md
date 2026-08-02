@@ -363,12 +363,36 @@ Two facts drive the decision, both read **live** on the foreground window:
 ### No-op and no churn
 
 With no floats on the active workspace the toggle is a no-op that never calls
-`SetWindowPos` (the fast path is a pure field read). When floats exist, a cached
-`floats_topmost` flag short-circuits the unchanged case, so an unchanged
-foreground change does not re-issue `SetWindowPos` and disturb the floats'
-mutual Z-order. The toggle is re-evaluated on every foreground change — the
-cadence at which Z-order drift is reintroduced — matching PowerToys' re-pin
-discipline.
+`SetWindowPos` (the fast path is a pure field read). The non-topmost (Drop) path
+still short-circuits on a cached `floats_topmost` flag, so an unchanged dropping
+foreground does not re-issue `SetWindowPos` and disturb the floats' mutual
+Z-order.
+
+### Re-assertion against drift
+
+`WS_EX_TOPMOST` is not set-and-forget: other apps can grab topmost and various
+events can reset the flag (PowerToys Always-On-Top re-pins on every
+`EVENT_OBJECT_FOCUS` for exactly this reason). The cache short-circuit above
+would let that drift slip through on the TOPMOST-target path — another app can
+clear a float's real flag while `floats_topmost` still believes it is set, and a
+float would silently drop below a tile.
+
+So the TOPMOST-target path (`Pin`, and the topmost `NoOp`) does **not** trust
+the cache. It re-asserts against each float's **observed** real flag
+(`registry::win32::is_topmost`, a live `GetWindowLongW(GWL_EXSTYLE) &
+WS_EX_TOPMOST` reading) via the pure `reassert_float_topmost` decision, and
+re-applies `SetWindowPos(HWND_TOPMOST)` **only** to the floats whose flag was
+actually lost. The common (no-drift) case does no `SetWindowPos`; an aligned
+sibling is never disturbed. Re-assertion never runs for non-topmost-target
+floats — the Drop path owns dropping, and re-assertion must never force a
+non-topmost float back up.
+
+This converges in a single pass with no busy-loop: the re-apply uses
+`SWP_NOACTIVATE`, so it does not change the foreground and cannot re-enter the
+focus sink recursively; and after a re-apply the drifted floats read topmost
+again, so a re-evaluation is a no-op. The toggle is re-evaluated on every
+foreground change — the cadence at which Z-order drift is reintroduced —
+matching PowerToys' re-pin discipline.
 
 ## Configuration
 

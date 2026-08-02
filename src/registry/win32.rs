@@ -48,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
     SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME, WindowFromPoint,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_THICKFRAME, WindowFromPoint,
 };
 use windows::core::PWSTR;
 
@@ -877,6 +877,31 @@ pub fn is_alt_tab_visible(hwnd: HWND) -> bool {
     !is_cloaked(hwnd)
 }
 
+/// Read a window's live `WS_EX_TOPMOST` flag.
+///
+/// Wraps `GetWindowLongW(GWL_EXSTYLE)` and tests the `WS_EX_TOPMOST` bit. This
+/// is the **reality check** the float-layer re-assertion pass uses to detect
+/// Z-order drift: another app can grab topmost or an event can clear the flag
+/// while the daemon's cached `floats_topmost` still believes it is set, so the
+/// re-assertion reads the live flag rather than trusting the cache.
+///
+/// # Fail-open
+///
+/// Returns `false` on a `GetWindowLongW` failure or for an invalid / destroyed
+/// HWND. A `false` reading drives the re-assertion to (re-)apply `HWND_TOPMOST`,
+/// which is idempotent and harmless — strictly safer than failing open toward
+/// "already topmost", which would mask real drift.
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+#[must_use]
+pub fn is_topmost(hwnd: HWND) -> bool {
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
+    let ex = WINDOW_EX_STYLE(ex_style as u32);
+    ex & WS_EX_TOPMOST != WINDOW_EX_STYLE(0)
+}
+
 /// Returns `true` if the window is DWM-cloaked (hidden from the screen).
 ///
 /// DWM cloaking is the modern Windows mechanism for hiding windows that are
@@ -1335,6 +1360,24 @@ mod tests {
         };
         assert_eq!(zero.visible_to_window(r), r);
         assert_eq!(zero.window_to_visible(r), r);
+    }
+
+    // --- is_topmost (float re-assertion reality check) ---
+
+    /// Fail-open contract: a null / invalid HWND makes `GetWindowLongW` fail,
+    /// so `is_topmost` must return `false` (never panic). A `false` reading
+    /// drives the re-assertion to re-apply `HWND_TOPMOST`, which is idempotent —
+    /// strictly safer than masking real drift behind a `true`.
+    #[test]
+    fn is_topmost_invalid_hwnd_fail_opens_to_false() {
+        assert!(
+            !is_topmost(null_hwnd()),
+            "null HWND must fail-open to false"
+        );
+        assert!(
+            !is_topmost(invalid_hwnd()),
+            "invalid HWND must fail-open to false"
+        );
     }
 
     // --- set_foreground_window tests ---
