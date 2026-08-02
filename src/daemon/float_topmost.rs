@@ -1,18 +1,9 @@
 //! TOPMOST-toggle wiring for the float layer.
 //!
 //! Translates the pure [`crate::float_topmost`] decision into Win32
-//! `SetWindowPos` calls. The daemon evaluates [`FlowWM::reconcile_float_topmost`]
-//! in the single focus sink ([`FlowWM::on_focus_changed`](super::FlowWM::on_focus_changed))
-//! on every foreground change: floats stay `WS_EX_TOPMOST` while the foreground
-//! is a flow-managed non-fullscreen window, and drop to non-topmost the moment
-//! the foreground moves to a fullscreen app or any non-flow window.
-//!
-//! `WS_EX_TOPMOST` is not set-and-forget — it drifts when other apps grab
-//! topmost or events reset the flag — so the TOPMOST-target path does not trust
-//! the [`floats_topmost`](super::FlowWM::floats_topmost) cache. It re-asserts
-//! against each float's **observed** real flag (the [`FlowWM::reassert_floats_topmost`]
-//! pass) and re-applies only what was actually lost. See
-//! (`docs/src/dev-guide/floating-space.md`).
+//! `SetWindowPos` calls, evaluated in the focus sink
+//! ([`FlowWM::on_focus_changed`](super::FlowWM::on_focus_changed)).
+//! (`docs/src/dev-guide/floating-space.md`)
 
 use crate::common::WindowId;
 use crate::float_topmost::{self, FloatObserved, FloatTopmostSnapshot, TopmostAction};
@@ -28,15 +19,11 @@ use super::types::FlowWM;
 impl FlowWM {
     /// Re-evaluate the float layer's TOPMOST state for a new `foreground`.
     ///
-    /// Reads the foreground's two live facts — is it a window flow actively
-    /// manages, and is it currently fullscreen — runs the pure
-    /// [`crate::float_topmost`] decision, and applies the resulting
-    /// [`TopmostAction`] to the active-workspace floats. The TOPMOST-target
-    /// outcomes (`Pin`, and the topmost `NoOp`) re-assert against each float's
-    /// **observed** real flag via [`Self::reassert_floats_topmost`] rather than
-    /// trusting the cache, so Z-order drift is corrected; the non-topmost
-    /// `NoOp` is a true no-op and the `Drop` drops the floats. Called from the
-    /// focus sink on every foreground change.
+    /// Re-evaluate the float layer's TOPMOST state for `foreground`.
+    ///
+    /// Runs the pure [`crate::float_topmost`] decision and applies the resulting
+    /// [`TopmostAction`] to the active-workspace floats; TOPMOST-target outcomes
+    /// re-assert via [`Self::reassert_floats_topmost`].
     pub(super) fn reconcile_float_topmost(&mut self, foreground: isize) {
         // No floats on the active workspace ⇒ nothing to toggle and no work
         // (the no-overhead no-op). The fast path is a pure field read that
@@ -92,24 +79,12 @@ impl FlowWM {
         }
     }
 
-    /// Re-apply `WS_EX_TOPMOST` to floats that lost it.
+    /// Re-apply `WS_EX_TOPMOST` to floats whose live flag was lost.
     ///
-    /// The drift guard for the TOPMOST-target path. Reads each float's live
-    /// `WS_EX_TOPMOST` flag via [`registry_win32::is_topmost`], runs the pure
-    /// [`crate::float_topmost::reassert_float_topmost`] decision, and re-applies
-    /// `SetWindowPos(HWND_TOPMOST)` **only** to the floats whose real flag was
-    /// actually lost — so the common (no-drift) case does no `SetWindowPos`, and
-    /// an aligned sibling is never disturbed.
-    ///
-    /// Converges in a single pass with no busy-loop: `SetWindowPos` is issued
-    /// with `SWP_NOACTIVATE`, so it does not change the foreground and cannot
-    /// re-enter [`Self::reconcile_float_topmost`] recursively; and after a
-    /// re-apply the drifted floats read topmost again, so a re-evaluation is a
-    /// no-op.
+    /// Uses [`registry_win32::is_topmost`] and the pure
+    /// [`crate::float_topmost::reassert_float_topmost`] decision.
     fn reassert_floats_topmost(&self, floats: &[isize]) {
-        // Read each float's REAL flag — reality, not the cache. `is_topmost`
-        // fail-opens to `false`, which only makes the re-assertion (re-)apply
-        // the flag: idempotent and harmless.
+        // `is_topmost` fail-opens to false, making re-assertion re-apply (idempotent).
         let observed: Vec<FloatObserved> = floats
             .iter()
             .map(|&id| FloatObserved {

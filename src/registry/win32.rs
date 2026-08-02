@@ -879,22 +879,12 @@ pub fn is_alt_tab_visible(hwnd: HWND) -> bool {
 
 /// Read a window's live `WS_EX_TOPMOST` flag.
 ///
-/// Wraps `GetWindowLongW(GWL_EXSTYLE)` and tests the `WS_EX_TOPMOST` bit. This
-/// is the **reality check** the float-layer re-assertion pass uses to detect
-/// Z-order drift: another app can grab topmost or an event can clear the flag
-/// while the daemon's cached `floats_topmost` still believes it is set, so the
-/// re-assertion reads the live flag rather than trusting the cache.
+/// Whether `hwnd` currently holds the `WS_EX_TOPMOST` extended-style bit.
 ///
 /// # Fail-open
 ///
 /// Returns `false` on a `GetWindowLongW` failure or for an invalid / destroyed
-/// HWND. A `false` reading drives the re-assertion to (re-)apply `HWND_TOPMOST`,
-/// which is idempotent and harmless — strictly safer than failing open toward
-/// "already topmost", which would mask real drift.
-///
-/// # Arguments
-///
-/// * `hwnd` — Win32 window handle.
+/// HWND.
 #[must_use]
 pub fn is_topmost(hwnd: HWND) -> bool {
     let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };

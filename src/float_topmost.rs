@@ -1,51 +1,24 @@
 //! Pure TOPMOST-toggle decision for the float layer.
 //!
-//! This is the test seam for the "floats stay above the focused tile" feature.
-//! It is pure logic: given the foreground window's stacking kind and the float
-//! layer's current state, it decides whether every float must be pinned
-//! `WS_EX_TOPMOST` or dropped to non-topmost. It touches no Win32, the daemon,
-//! or the layout engine — so every rule below is a hermetic unit test, mirroring
-//! the codebase precedent of [`crate::hover::HoverController`] and
-//! [`crate::workspace::FloatingSpace`].
-//!
-//! The contract: a float is kept on top **iff the foreground is a flow-managed
-//! window that is not fullscreen**; otherwise the floats are dropped so they do
-//! not cover a fullscreen app or another application's windows. The wiring
-//! ([`crate::daemon::FlowWM::reconcile_float_topmost`]) evaluates this on every
-//! foreground change (the focus sink) **and** on the foreground window's own
-//! resize — so an F11 toggle in an already-focused app (no focus change) is
-//! caught by the geometry re-evaluation. [`is_foreground_location_change`]
-//! gates that second trigger. See (`docs/src/dev-guide/floating-space.md`).
+//! Hermetic decision logic for the "floats stay above the focused tile"
+//! invariant — no Win32, daemon, or layout coupling. The daemon wiring is
+//! [`crate::daemon::FlowWM::reconcile_float_topmost`].
+//! (`docs/src/dev-guide/floating-space.md`)
 
 /// Stacking-relevant kind of the current foreground window.
-///
-/// Reduces the foreground to exactly what the TOPMOST decision needs: is it a
-/// window flow is actively managing and that is not fullscreen?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForegroundKind {
     /// Flow-managed (actively tiled or floated) and not fullscreen.
-    ///
-    /// The floats stay on top of this foreground.
     Flow,
     /// The foreground covers the full screen with no chrome.
-    ///
-    /// Detected live (geometry + style) on the foreground window — fullscreen
-    /// video, a borderless game, or a flow window the user sent fullscreen.
-    /// Floats drop below it so they never cover fullscreen content.
     Fullscreen,
     /// A window flow does not manage (untracked, ignored, or foreign).
-    ///
-    /// Floats drop so they do not cover another application's windows.
     NonFlow,
 }
 
-/// Classify the live foreground window into a [`ForegroundKind`].
+/// Classify the foreground into a [`ForegroundKind`].
 ///
-/// `is_flow_managed` is "actively tiling or floating" (a tracked window that is
-/// NOT ignored); `is_fullscreen` is the **live** geometry+style check on the
-/// foreground, never the stored registry classification. Fullscreen takes
-/// precedence: a flow-managed window that is currently fullscreen still drops
-/// the floats.
+/// `is_fullscreen` takes precedence over `is_flow_managed`.
 #[must_use]
 pub fn classify_foreground(is_flow_managed: bool, is_fullscreen: bool) -> ForegroundKind {
     if is_fullscreen {
@@ -58,91 +31,51 @@ pub fn classify_foreground(is_flow_managed: bool, is_fullscreen: bool) -> Foregr
 }
 
 /// The TOPMOST-toggle action to apply to every float for one foreground change.
-///
-/// The wiring translates each variant into `SetWindowPos(HWND_TOPMOST …)` /
-/// `SetWindowPos(HWND_NOTOPMOST …)` calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopmostAction {
     /// Pin every float `WS_EX_TOPMOST`.
     Pin,
     /// Drop every float to non-topmost.
     Drop,
-    /// No Win32 calls: either no floats are present, or the desired state
-    /// already holds.
+    /// No Win32 calls: no floats are present, or the desired state already holds.
     NoOp,
 }
 
-/// A snapshot of the foreground and the float layer taken at one foreground
-/// change.
-///
-/// All inputs the decision needs, with no Win32 types so it is hermetic.
+/// Inputs to [`decide_float_topmost`] for one foreground change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloatTopmostSnapshot {
     /// Stacking kind of the current foreground window.
     pub foreground: ForegroundKind,
     /// Whether any floats exist on the active workspace.
     pub has_floats: bool,
-    /// Whether the floats are currently believed to be `WS_EX_TOPMOST`
-    /// (the last state the wiring applied).
+    /// Whether the floats are currently `WS_EX_TOPMOST` (last applied state).
     pub currently_topmost: bool,
 }
 
-// ── Re-assertion against drift (ticket #7) ─────────────────────────
-//
-// `WS_EX_TOPMOST` is not set-and-forget: other apps can grab topmost and
-// various events can clear the flag while the wiring's cached `floats_topmost`
-// still believes it is set. The toggle above only compares the target against
-// that cache, so drift on the TOPMOST-target path slips through silently. The
-// functions below re-assert against OBSERVED reality instead: read each float's
-// live flag and re-apply only what was actually lost. Pure over its inputs; the
-// Win32 read + conditional re-apply live in the thin `daemon::float_topmost`
-// shell. (`docs/src/dev-guide/floating-space.md`)
+// ── Re-assertion against drift (#7) ── (`docs/src/dev-guide/floating-space.md`)
 
-/// One float's observed reality for a re-assertion pass.
-///
-/// Pairs the float's opaque identity (its HWND value) with the **live**
-/// `WS_EX_TOPMOST` reading taken from Win32 — never the cache. The layer-level
-/// [`FloatTopmostSnapshot`] is not enough here, because drift can clear one
-/// float's real flag while leaving a sibling's set, so the re-assertion decision
-/// is per-float.
+/// One float's observed `WS_EX_TOPMOST` state for a re-assertion pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloatObserved {
-    /// Opaque float identity — the HWND value, carried through unchanged so the
-    /// wiring can act on exactly the floats the decision flags with no re-lookup.
+    /// Opaque float identity (the HWND value).
     pub id: isize,
-    /// The live `GetWindowLongW(GWL_EXSTYLE) & WS_EX_TOPMOST` reading — reality,
-    /// not the cached last-applied state.
+    /// The live `WS_EX_TOPMOST` reading for this float.
     pub observed_topmost: bool,
 }
 
-/// Per-float re-assertion verdict.
-///
-/// Output of [`decide_float_reapply`] for a single float under a TOPMOST target.
+/// Per-float re-assertion verdict, output of [`decide_float_reapply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopmostReapply {
     /// The float's real flag already matches the target — no `SetWindowPos`.
     Aligned,
-    /// The float lost its real TOPMOST flag while its target is topmost —
-    /// re-apply `HWND_TOPMOST`.
+    /// The float lost its real TOPMOST flag — re-apply `HWND_TOPMOST`.
     Repin,
 }
 
-/// Decide whether a single float needs its real `WS_EX_TOPMOST` flag
-/// re-applied.
+/// Re-apply verdict for one float under a `target_topmost`.
 ///
-/// The re-assertion core rule: verify reality, never the cache. A float is
-/// re-pinned **iff** its target is TOPMOST and its **observed** real flag reads
-/// non-topmost (drift). A float whose target is non-topmost is **never**
-/// re-pinned here, regardless of its observed state — dropping is the job of the
-/// [`TopmostAction::Drop`] path, and re-assertion must never force a
-/// non-topmost-target float back up.
-///
-/// Pure and side-effect-free. Idempotent: after the wiring re-applies the flag
-/// the float's observed state reads `true`, so re-running this returns
-/// [`TopmostReapply::Aligned`] — no further work. That is the single-pass
-/// convergence the no-busy-loop guarantee rests on (see
-/// [`reassert_float_topmost`]).
-///
+/// Returns [`TopmostReapply::Repin`] iff `target_topmost` is `true` and
+/// `observed_topmost` is `false`; a non-topmost target is never re-pinned here.
 /// (`docs/src/dev-guide/floating-space.md`)
 #[must_use]
 pub fn decide_float_reapply(target_topmost: bool, observed_topmost: bool) -> TopmostReapply {
@@ -153,22 +86,9 @@ pub fn decide_float_reapply(target_topmost: bool, observed_topmost: bool) -> Top
     }
 }
 
-/// Run the per-float re-assertion decision across the whole float layer.
+/// Ids of floats whose real `WS_EX_TOPMOST` flag must be re-applied.
 ///
-/// Returns the identities of the floats whose real `WS_EX_TOPMOST` flag must be
-/// re-applied. Pure over its inputs; the wiring translates each returned id into
-/// one `SetWindowPos(HWND_TOPMOST, … | NOACTIVATE)`.
-///
-/// Only floats whose **target is TOPMOST** are ever returned: when
-/// `target_topmost` is `false` the result is always empty — dropping is owned by
-/// the [`TopmostAction::Drop`] path, and re-assertion never forces a
-/// non-topmost-target float back up.
-///
-/// Converges in one pass: once the wiring has re-applied the returned flags,
-/// every float's observed state equals the target, so the next call returns an
-/// empty list — no repeated toggling, no busy-loop.
-///
-/// (`docs/src/dev-guide/floating-space.md`)
+/// Empty when `target_topmost` is `false`. (`docs/src/dev-guide/floating-space.md`)
 #[must_use]
 pub fn reassert_float_topmost(target_topmost: bool, floats: &[FloatObserved]) -> Vec<isize> {
     floats
@@ -182,13 +102,8 @@ pub fn reassert_float_topmost(target_topmost: bool, floats: &[FloatObserved]) ->
 
 /// The TOPMOST-toggle decision for one foreground change.
 ///
-/// Pure: no Win32, no side effects. Returns [`TopmostAction::NoOp`] when there
-/// are no floats or the desired state already holds, so the wiring performs no
-/// `SetWindowPos` churn in those cases.
-///
-/// Note: the `NoOp` for the TOPMOST-target case compares only against the cached
-/// state and so cannot see drift. The wiring therefore re-asserts against
-/// observed reality on that path (see [`reassert_float_topmost`]).
+/// Returns [`TopmostAction::NoOp`] when there are no floats or the desired
+/// state already holds.
 #[must_use]
 pub fn decide_float_topmost(snapshot: FloatTopmostSnapshot) -> TopmostAction {
     // No floats ⇒ nothing to toggle and no work to do (the no-overhead no-op).
@@ -205,29 +120,12 @@ pub fn decide_float_topmost(snapshot: FloatTopmostSnapshot) -> TopmostAction {
     }
 }
 
-// ── Foreground location-change trigger (ticket #6) ───────────────
-//
-// The TOPMOST toggle fires on foreground *changes* (the focus sink), which
-// catches alt-tabbing INTO a fullscreen app but misses F11 pressed in an
-// already-focused app: F11 resizes the window WITHOUT a focus change, so the
-// focus sink never runs. The foreground window's own `EVENT_OBJECT_LOCATIONCHANGE`
-// is the second trigger — re-run the (idempotent) toggle whenever the
-// foreground moves or resizes, and let idempotency swallow the ordinary
-// (non-fullscreen) cases. (`docs/src/dev-guide/floating-space.md`)
+// ── Foreground location-change trigger (#6) ── (`docs/src/dev-guide/floating-space.md`)
 
-/// Decide whether a window location-change event should re-run the float
-/// TOPMOST reconciliation.
+/// Whether a location-change event is for the foreground window (and so should
+/// re-run float TOPMOST reconciliation).
 ///
-/// Only the foreground window's own geometry can flip its live fullscreen
-/// classification (e.g. an F11 toggle in an already-focused app), so a location
-/// change for any other window is irrelevant to the toggle and is ignored. A
-/// `foreground_hwnd` of `0` (no foreground known yet) rejects every event, so
-/// no location change is misrouted before the first foreground is established.
-///
-/// Returning `true` only means the toggle should be re-evaluated: the
-/// underlying [`decide_float_topmost`] is idempotent, so a location change that
-/// does not cross the windowed↔fullscreen boundary is a [`TopmostAction::NoOp`]
-/// (no spurious toggle, no busy-loop). (`docs/src/dev-guide/floating-space.md`)
+/// Returns `false` when `foreground_hwnd` is `0`. (`docs/src/dev-guide/floating-space.md`)
 #[must_use]
 pub fn is_foreground_location_change(event_hwnd: isize, foreground_hwnd: isize) -> bool {
     foreground_hwnd != 0 && event_hwnd == foreground_hwnd
