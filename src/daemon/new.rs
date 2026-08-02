@@ -290,6 +290,7 @@ impl FlowWM {
             edge_dwell_deadline: None,
             last_hover_poll: None,
             last_foreground_sync: std::time::Instant::now(),
+            floats_topmost: false,
         };
         // Adopt pre-existing float-classified windows (found during the init
         // scan) into workspace 1's FloatingSpace, at their current on-screen
@@ -400,6 +401,7 @@ impl FlowWM {
             edge_dwell_deadline: None,
             last_hover_poll: None,
             last_foreground_sync: std::time::Instant::now(),
+            floats_topmost: false,
         }
     }
 }

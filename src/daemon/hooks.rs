@@ -412,6 +412,12 @@ impl FlowWM {
 
         // Bail for untracked/ignored windows (taskbar, tray, off-monitor).
         let Some(home_ws) = self.active_monitor().find_workspace_containing(target) else {
+            // The tiling side-effects below do not apply to an untracked /
+            // ignored foreground, but the TOPMOST toggle must still run so a
+            // fullscreen app or non-flow window drops the active workspace's
+            // floats below it. Evaluated before the bail so this foreground
+            // change still reaches the toggle.
+            self.reconcile_float_topmost(hwnd);
             return;
         };
 
@@ -444,6 +450,11 @@ impl FlowWM {
         {
             self.refresh_border_for(prev);
         }
+
+        // Re-evaluate the float TOPMOST toggle last: the active workspace is
+        // now settled (any cross-workspace switch above has run), so the float
+        // set reflects the workspace this foreground actually belongs to.
+        self.reconcile_float_topmost(hwnd);
     }
 
     /// Reconcile internal focus against the authoritative `GetForegroundWindow()`.

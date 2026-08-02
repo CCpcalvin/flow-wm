@@ -239,6 +239,17 @@ pub struct FlowWM {
     /// suppressed during a drag). (`docs/src/dev-guide/hover.md`)
     pub(super) edge_dwell_deadline: Option<std::time::Instant>,
 
+    /// Whether the active workspace's floats are currently pinned
+    /// `WS_EX_TOPMOST` (the last state the toggle applied).
+    ///
+    /// Drives the no-churn short-circuit in
+    /// [`reconcile_float_topmost`](super::FlowWM::reconcile_float_topmost):
+    /// the toggle only calls `SetWindowPos` when the desired TOPMOST state
+    /// differs from this value, preserving the floats' mutual z-order on
+    /// unchanged foreground changes. Re-evaluated on every foreground change
+    /// in the focus sink. (`docs/src/dev-guide/floating-space.md`)
+    pub(super) floats_topmost: bool,
+
     /// Timestamp of the most recent hover cursor poll. `None` until the first
     /// poll. Throttles the poll to `config.hover.poll_interval_ms` (the loop can
     /// wake far more often on hook activity) and anchors the hover poll deadline
@@ -322,7 +333,6 @@ impl FlowWM {
 
     /// Borrow the floating space of the active workspace.
     #[must_use]
-    #[allow(dead_code)] // API surface for upcoming floating-window management.
     pub(super) fn active_floating(&self) -> &FloatingSpace {
         self.active_monitor().active_floating()
     }

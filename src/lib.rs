@@ -20,6 +20,7 @@
 //! - [`animation`] — embedded animation crate (`WindowAnimator`, `DwmFlush` pacing)
 //! - [`daemon`] — `FlowWM` coordinator, hook handlers, dispatch
 //! - [`hover`] — pure focus-follows-mouse + edge-hover decision logic
+//! - [`float_topmost`] — pure TOPMOST-toggle decision for the float layer
 //! - [`ipc`] — named-pipe server and message protocol
 //! - [`config`] — TOML config (code is the single source of truth)
 //! - [`common`] — shared bridge types (`WindowId`, `Rect`, `Direction`)
@@ -42,6 +43,7 @@ pub mod borders;
 pub mod common;
 pub mod config;
 pub mod daemon;
+pub mod float_topmost;
 pub mod hover;
 pub mod ipc;
 pub mod layout;
