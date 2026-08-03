@@ -33,6 +33,13 @@ min_column_width_px = 640
 # height adjustment of individual rows.
 min_window_height_px = 100
 
+# Minimum row height in pixels — the dedicated vertical floor for drag-resize
+# of a single row. Dragging a row boundary cannot shrink either row below this,
+# and once the shrinking row hits it the edge elastically pins (overshoot during
+# the drag, snap back on release). Distinct from min_window_height_px (the
+# row-stack-count cap); the two are independent.
+min_row_height_px = 100
+
 # Whether `flow start` checks GitHub for a newer release and, if one exists,
 # prints a one-line notification prompting `flow update`. The check runs after
 # the daemon is ready, is bounded by a short timeout, and never blocks or

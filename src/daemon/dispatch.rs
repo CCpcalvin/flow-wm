@@ -1420,6 +1420,7 @@ impl FlowWM {
                     layout_config.column_width,
                     layout_config.min_column_width_px,
                     layout_config.min_window_height_px,
+                    layout_config.min_row_height_px,
                     layout_config.padding,
                     columns_per_screen,
                 );
@@ -1791,7 +1792,7 @@ mod tests {
             up: 0,
             down: 0,
         };
-        let mut scrolling = ScrollingSpace::new(monitor_info, 960, 320, 100, padding, 4);
+        let mut scrolling = ScrollingSpace::new(monitor_info, 960, 320, 100, 100, padding, 4);
         scrolling.add_window(WindowId(TEST_HWND));
 
         let workspace = Workspace::new(WorkspaceId(1), scrolling);

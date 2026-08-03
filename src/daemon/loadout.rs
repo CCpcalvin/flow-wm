@@ -1049,6 +1049,7 @@ mod tests {
             960,
             320,
             100,
+            100,
             Padding {
                 window_gap: GAP,
                 up: 0,

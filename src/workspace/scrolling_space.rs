@@ -101,6 +101,7 @@ fn build_mutation_config(
     column_width: u32,
     min_column_width_px: u32,
     min_window_height_px: u32,
+    min_row_height_px: u32,
     padding: Padding,
     columns_per_screen: u32,
 ) -> MutationConfig {
@@ -123,6 +124,7 @@ fn build_mutation_config(
         monitor_width: monitor_w,
         monitor_height: monitor_h,
         min_window_height_px,
+        min_row_height_px,
         column_width,
         min_column_width_px,
         max_n,
@@ -156,6 +158,7 @@ impl ScrollingSpace {
         column_width: u32,
         min_column_width_px: u32,
         min_window_height_px: u32,
+        min_row_height_px: u32,
         padding: Padding,
         columns_per_screen: u32,
     ) -> Self {
@@ -165,6 +168,7 @@ impl ScrollingSpace {
             column_width,
             min_column_width_px,
             min_window_height_px,
+            min_row_height_px,
             padding,
             columns_per_screen,
         );
@@ -196,6 +200,7 @@ impl ScrollingSpace {
         column_width: u32,
         min_column_width_px: u32,
         min_window_height_px: u32,
+        min_row_height_px: u32,
         padding: Padding,
         columns_per_screen: u32,
     ) -> ActualLayout {
@@ -204,6 +209,7 @@ impl ScrollingSpace {
             column_width,
             min_column_width_px,
             min_window_height_px,
+            min_row_height_px,
             padding,
             columns_per_screen,
         );
@@ -846,7 +852,7 @@ mod tests {
     }
 
     fn engine_with_three_columns() -> ScrollingSpace {
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -880,7 +886,7 @@ mod tests {
             up: 0,
             down: 0,
         };
-        engine.reconfigure(800, 300, 90, new_padding, 2);
+        engine.reconfigure(800, 300, 90, 90, new_padding, 2);
 
         // Virtual layout (columns + window order) is untouched.
         assert_eq!(engine.virtual_layout().columns.len(), order_before.len());
@@ -913,7 +919,7 @@ mod tests {
             up: 0,
             down: 0,
         };
-        let returned = engine.reconfigure(960, 320, 100, new_padding, 4);
+        let returned = engine.reconfigure(960, 320, 100, 100, new_padding, 4);
 
         // Cached padding reflects the new gap.
         assert_eq!(engine.padding().window_gap, 40);
@@ -948,6 +954,7 @@ mod tests {
             400,
             100,
             100,
+            100,
             Padding {
                 window_gap: 10,
                 up: 0,
@@ -964,6 +971,7 @@ mod tests {
         //   max_n         = (1720 - 400) / 500 = 2
         engine.reconfigure(
             400,
+            100,
             100,
             100,
             Padding {
@@ -993,7 +1001,7 @@ mod tests {
         //   abs_max_width = 1920 - 2*4 = 1912
         //   cw            = 2000
         //   abs_max_width > cw is false → max_n = 0.
-        let engine = ScrollingSpace::new(test_monitor(), 2000, 100, 100, test_padding(), 4);
+        let engine = ScrollingSpace::new(test_monitor(), 2000, 100, 100, 100, test_padding(), 4);
         assert_eq!(engine.config.abs_max_width, 1912);
         assert_eq!(
             engine.config.max_n, 0,
@@ -1012,7 +1020,7 @@ mod tests {
             up: 0,
             down: 0,
         };
-        let engine = ScrollingSpace::new(test_monitor(), 0, 0, 100, gapless, 4);
+        let engine = ScrollingSpace::new(test_monitor(), 0, 0, 100, 100, gapless, 4);
 
         // Assert: degenerate shift is guarded; abs_max_width is still well-defined.
         assert_eq!(
@@ -1093,7 +1101,7 @@ mod tests {
 
     #[test]
     fn engine_add_remove_roundtrip() {
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         assert_eq!(engine.virtual_layout().window_count(), 2);
@@ -1112,7 +1120,7 @@ mod tests {
     #[test]
     fn engine_full_lifecycle() {
         // Positive: empty → add 3 → mutate → remove all → verify state at each step
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
 
         // Step 1: Add windows
         let d1 = engine.add_window(WindowId(1));
@@ -1164,7 +1172,7 @@ mod tests {
     #[test]
     fn engine_focus_triggers_viewport_scroll() {
         // Positive: focus into off-screen column triggers viewport scroll
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1193,7 +1201,7 @@ mod tests {
     #[test]
     fn engine_single_window_all_operations() {
         // Positive: single window — swap, expand/shrink return None appropriately
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
 
         // Swap column left → None (no column to left)
@@ -1226,7 +1234,7 @@ mod tests {
     #[test]
     fn engine_empty_operations_return_none() {
         // Negative: all operations on empty engine return None or produce empty diffs
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
 
         assert!(engine.scroll_left().is_none());
         assert!(engine.scroll_right().is_none());
@@ -1240,7 +1248,7 @@ mod tests {
     #[test]
     fn engine_add_window_to_focused_column() {
         // Positive: add window as row to focused column
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         let diff = engine
             .add_window_to_focused_column(WindowId(2))
@@ -1254,7 +1262,7 @@ mod tests {
     #[test]
     fn engine_add_to_focused_column_no_focus_returns_none() {
         // Negative: no focus → can't add to focused column
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         assert!(engine.add_window_to_focused_column(WindowId(1)).is_none());
     }
 
@@ -1263,7 +1271,7 @@ mod tests {
     #[test]
     fn engine_insert_window_into_empty_layout() {
         // Positive: first window in empty layout → sole column, focused.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.insert_window(WindowId(1));
         assert_eq!(engine.virtual_layout().columns.len(), 1);
         assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
@@ -1343,7 +1351,7 @@ mod tests {
     fn engine_insert_window_scrolls_when_new_column_offscreen() {
         // Positive: many columns, insert creates a column off-screen right →
         // viewport scrolls to reveal it.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1359,7 +1367,7 @@ mod tests {
     fn engine_insert_window_after_remove_falls_back() {
         // Negative/edge: after removing the focused window, focus falls back
         // to the first column. Inserting then uses that focus as the anchor.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         // Remove focused (W2) → focus falls back to W1 (first column).
@@ -1373,7 +1381,7 @@ mod tests {
     #[test]
     fn engine_monocle_then_add_window() {
         // Positive: monocle on, add window (new column), toggle off on same column
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
 
         let d_on = engine.toggle_monocle(WindowId(1)).expect("monocle on");
@@ -1392,7 +1400,7 @@ mod tests {
     #[test]
     fn engine_expand_shrink_produces_pixel_diffs() {
         // Positive: expand → actual layout has different pixel sizes
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
 
@@ -1411,7 +1419,7 @@ mod tests {
     #[test]
     fn engine_swap_shifts_camera_when_target_offscreen() {
         // Positive: swap with adjacent column that is off-screen shifts the camera
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1442,7 +1450,7 @@ mod tests {
     #[test]
     fn engine_scroll_right_at_boundary() {
         // Negative: can't scroll past rightmost column
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1)); // single 960px column
 
         assert!(engine.scroll_right().is_none());
@@ -1451,7 +1459,7 @@ mod tests {
     #[test]
     fn engine_set_column_width() {
         // Positive: explicit column width setting
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
 
@@ -1468,7 +1476,7 @@ mod tests {
     #[test]
     fn engine_remove_focused_window_focus_falls_back() {
         // Positive: removing a focused middle window falls back to the LEFT column.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1483,7 +1491,7 @@ mod tests {
     fn engine_remove_focused_leftmost_falls_to_right() {
         // Removing the focused leftmost window has no left column, so focus
         // falls back to the RIGHT column's window.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1496,7 +1504,7 @@ mod tests {
     #[test]
     fn engine_remove_focused_rightmost_falls_to_left() {
         // Removing the focused rightmost window falls back to the LEFT column.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1509,7 +1517,7 @@ mod tests {
     #[test]
     fn engine_remove_only_window_clears_focus() {
         // Removing the only window leaves focus as None.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
 
         let _ = engine.remove_window(WindowId(1));
@@ -1520,7 +1528,7 @@ mod tests {
     #[test]
     fn engine_remove_nonfocused_keeps_focus() {
         // Removing a non-focused window must not change focus.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1559,7 +1567,7 @@ mod tests {
     fn engine_remove_from_multirow_column_preserves_column() {
         // Positive: removing a window from a multi-row column removes only the
         // row — the column persists with the remaining window.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         // Layout: [W1, W2] in one column. Focus on W2.
@@ -1589,7 +1597,7 @@ mod tests {
         // The viewport should still show the focused window correctly.
         // Layout: [W1][W2][W3], focus W3 (col 2). Remove W1 (col 0).
         // After removal: [W2][W3], W3 is now at col 1.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1616,7 +1624,7 @@ mod tests {
         // visible, so viewport doesn't scroll. Then test a case where successor
         // IS off-screen: focus col 3, scroll viewport so col 0 is visible only,
         // then remove col 3 → successor col 2 is off-screen → viewport adjusts.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1664,7 +1672,7 @@ mod tests {
                 height: 1080,
             },
         };
-        let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1685,7 +1693,7 @@ mod tests {
     fn engine_focus_returns_some_diff_when_viewport_scrolls() {
         // Positive: focus into off-screen column → diff is Some with non-empty moves.
         // This is the core Fix 1 behavior: the caller receives the AppliedLayout to animate.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -1718,7 +1726,7 @@ mod tests {
     fn engine_focus_vertical_never_produces_diff() {
         // Positive: vertical focus (Up/Down) never scrolls viewport, so diff is always None.
         // Even when the window has rows, vertical focus just changes the focused WindowId.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(1));
@@ -1739,7 +1747,7 @@ mod tests {
         // With a single multi-row column, focus has nowhere to go horizontally,
         // but vertical focus doesn't trigger scroll. This test verifies vertical focus
         // doesn't change the viewport offset.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(1));
@@ -1757,7 +1765,7 @@ mod tests {
     #[test]
     fn engine_swap_window_cross_column() {
         // Positive: engine swap_window moves individual windows between columns
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(5));
         engine.add_window(WindowId(2));
@@ -1789,7 +1797,7 @@ mod tests {
     #[test]
     fn engine_swap_window_same_column_vertical() {
         // Positive: engine swap_window Up/Down within column
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(2));
@@ -1811,12 +1819,12 @@ mod tests {
     #[test]
     fn engine_swap_window_none_when_no_focus() {
         // Negative: engine swap_window without focus → None
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         // Focus is already on WindowId(1) from add_window. Clear it.
         // We can't clear focus directly, so test with empty engine instead.
         let mut empty_engine =
-            ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+            ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         assert!(
             empty_engine
                 .swap_window(WindowId(1), Direction::Right)
@@ -1837,7 +1845,7 @@ mod tests {
     #[test]
     fn engine_swap_window_none_at_boundary() {
         // Negative: engine swap_window at layout boundary → None
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
@@ -1852,7 +1860,7 @@ mod tests {
     #[test]
     fn engine_merge_column_right_combines_columns() {
         // Positive: merge W1 right into W2's column. Layout: [W1][W2] → [W2, W1].
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.set_focus(WindowId(1));
@@ -1881,7 +1889,7 @@ mod tests {
     #[test]
     fn engine_merge_column_none_at_boundary() {
         // Negative: no neighbour in the requested direction.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
@@ -1896,7 +1904,7 @@ mod tests {
     #[test]
     fn engine_promote_right_splits_column() {
         // Positive: promote W2 out of [W1, W2] right → [W1][W2].
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window_to_focused_column(WindowId(2));
         engine.set_focus(WindowId(2));
@@ -1922,7 +1930,7 @@ mod tests {
     #[test]
     fn engine_promote_none_for_single_row_column() {
         // Negative: already alone in column → no-op per spec.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.set_focus(WindowId(1));
 
@@ -1949,7 +1957,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_empty() {
         // Positive: empty vec → empty layout, no focus
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let diff = engine.initialize_windows(vec![], None, None);
         assert!(diff.virtual_layout.columns.is_empty());
         assert!(engine.last_focused_window().is_none());
@@ -1958,7 +1966,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_single() {
         // Positive: single window → single column, focused
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let diff = engine.initialize_windows(vec![WindowId(1)], None, None);
         assert_eq!(diff.virtual_layout.columns.len(), 1);
         assert_eq!(engine.last_focused_window(), Some(WindowId(1)));
@@ -1969,7 +1977,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_multiple() {
         // Positive: multiple windows → multiple columns, focus on last
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let diff =
             engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], None, None);
         assert_eq!(diff.virtual_layout.columns.len(), 3);
@@ -1994,7 +2002,7 @@ mod tests {
         // NOT the last window. This tests the viewport-init fix: the engine
         // now respects the focus column from the foreground window lookup
         // instead of blindly picking the last column.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let diff = engine.initialize_windows(
             vec![WindowId(10), WindowId(20), WindowId(30)],
             Some(0),
@@ -2011,7 +2019,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_focus_middle_column() {
         // Positive: focus_col_idx=Some(1) → focused should be the second window.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.initialize_windows(
             vec![WindowId(10), WindowId(20), WindowId(30)],
             Some(1),
@@ -2027,7 +2035,7 @@ mod tests {
     #[test]
     fn engine_initialize_windows_none_focus_falls_back_to_last() {
         // Positive: focus_col_idx=None → fallback to last window (existing behavior).
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.initialize_windows(vec![WindowId(10), WindowId(20), WindowId(30)], None, None);
         assert_eq!(
             engine.last_focused_window(),
@@ -2041,7 +2049,7 @@ mod tests {
         // Positive: 4 cols, columns_per_screen=2 → scroll mode.
         // Focus on column 2 → viewport_offset should be non-zero,
         // and focused should be the window at column 2.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 2);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 2);
         let diff = engine.initialize_windows(
             vec![WindowId(1), WindowId(2), WindowId(3), WindowId(4)],
             Some(2),
@@ -2189,7 +2197,7 @@ mod tests {
         // actual_layout.entries. The projection parks them off-screen with
         // deterministic rects — they must not be omitted.
         // Use 5 columns: only ~2 visible at a time on a 1920px monitor.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         engine.add_window(WindowId(1));
         engine.add_window(WindowId(2));
         engine.add_window(WindowId(3));
@@ -2243,7 +2251,7 @@ mod tests {
         // test_monitor: 1920×1080, test_padding: gap=4.
         // Engine created with min_column_width_px=320.
         // abs_max = 1920 − 2×4 = 1912.
-        let engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let (min, max) = engine.column_width_bounds();
         assert_eq!(min, 320, "min should equal min_column_width_px");
         assert_eq!(max, 1912, "max should equal monitor_width − 2×gap");
@@ -2258,6 +2266,7 @@ mod tests {
             960,
             500, // min_column_width_px
             100, // min_window_height_px
+            100, // min_row_height_px
             Padding {
                 window_gap: 8,
                 up: 0,
@@ -2283,7 +2292,7 @@ mod tests {
         // Arrange: construct an engine with the canonical test padding.
         // Act/Assert: the accessor returns exactly the Padding handed to `new`,
         // unchanged — the dispatch path depends on this being the stored value.
-        let engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         assert_eq!(engine.padding(), test_padding());
     }
 
@@ -2298,7 +2307,7 @@ mod tests {
             up: 8,
             down: 40,
         };
-        let engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, custom, 4);
+        let engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, custom, 4);
         assert_eq!(engine.padding(), custom);
     }
 
@@ -2307,7 +2316,7 @@ mod tests {
 
     /// Build an engine with `col_width=400` for non-degenerate center tests.
     fn center_test_engine() -> ScrollingSpace {
-        ScrollingSpace::new(test_monitor(), 400, 100, 100, test_padding(), 4)
+        ScrollingSpace::new(test_monitor(), 400, 100, 100, 100, test_padding(), 4)
     }
 
     // --- Prefix-sum center operations (center_focused_column / center_canvas) ---
@@ -2610,7 +2619,7 @@ mod tests {
     fn set_layout_single_column_single_window() {
         // Positive: single column with one window — verify column count, focus,
         // viewport_offset echoed back, entries present.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let result = engine.set_layout(vec![(960, vec![WindowId(1)])], Some(WindowId(1)), 0);
         assert_eq!(result.virtual_layout.columns.len(), 1);
         assert_eq!(result.virtual_layout.columns[0].rows.len(), 1);
@@ -2626,7 +2635,7 @@ mod tests {
     #[test]
     fn set_layout_multi_column_one_window_each() {
         // Positive: multi-column, one window each — verify column order + widths + focus set.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let result = engine.set_layout(
             vec![
                 (960, vec![WindowId(10)]),
@@ -2658,7 +2667,7 @@ mod tests {
     fn set_layout_multirow_column() {
         // Positive: multi-row column (960, vec![W1, W2]) — verify 2 rows in one
         // column (the key capability initialize_windows can't express).
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let result = engine.set_layout(
             vec![(960, vec![WindowId(1), WindowId(2)])],
             Some(WindowId(1)),
@@ -2684,7 +2693,7 @@ mod tests {
     fn set_layout_focus_threaded_through() {
         // Positive: focus param threaded through — last_focused_window reflects
         // the passed focus even when it's not the last window.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let _ = engine.set_layout(
             vec![
                 (960, vec![WindowId(1)]),
@@ -2705,7 +2714,7 @@ mod tests {
     fn set_layout_viewport_offset_honored() {
         // Positive: viewport_offset honored — pass a non-zero offset, assert
         // it's in the returned virtual_layout.viewport_offset.
-        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, test_padding(), 4);
+        let mut engine = ScrollingSpace::new(test_monitor(), 960, 320, 100, 100, test_padding(), 4);
         let result = engine.set_layout(vec![(960, vec![WindowId(1)])], Some(WindowId(1)), 500);
         assert_eq!(
             result.virtual_layout.viewport_offset, 500,

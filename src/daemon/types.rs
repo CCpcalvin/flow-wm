@@ -37,6 +37,11 @@ pub(super) struct LayoutConfig {
     /// [`FlowConfig::min_window_height_px`].
     pub(super) min_window_height_px: u32,
 
+    /// Minimum row height in pixels — the dedicated vertical drag-resize floor
+    /// (ticket #10). Sourced directly from
+    /// [`FlowConfig::min_row_height_px`].
+    pub(super) min_row_height_px: u32,
+
     /// Padding converted from config types to layout types.
     pub(super) padding: crate::layout::types::Padding,
 }
