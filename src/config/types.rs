@@ -125,6 +125,19 @@ pub struct FlowConfig {
     /// distribution formula and the `merge-column` / `promote` operations.
     pub min_window_height_px: u32,
 
+    /// Minimum row height in pixels — the dedicated vertical floor for
+    /// drag-resize of a single row (ticket #10). Mirrors
+    /// [`min_column_width_px`](Self::min_column_width_px) on the vertical axis:
+    /// dragging a row boundary cannot shrink either row below this value, and
+    /// once the shrinking neighbor hits it the edge elastically pins (overshoot
+    /// during the drag, snap back on release).
+    ///
+    /// This is distinct from [`min_window_height_px`](Self::min_window_height_px),
+    /// which is the row-stack-count cap consulted by the add/remove/merge
+    /// mutations. The two are independent: a power user may want a higher
+    /// drag-floor than the stack cap, or vice versa. Both default to `100`.
+    pub min_row_height_px: u32,
+
     /// Padding settings.
     pub padding: Padding,
 
@@ -198,6 +211,7 @@ impl Default for FlowConfig {
             column_width: None,
             min_column_width_px: 640,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             padding: Padding::default(),
             animation: AnimationConfig::default(),
             minimize_restore: MinimizeRestore::default(),
@@ -313,6 +327,9 @@ impl FlowConfig {
         }
         if self.min_window_height_px == 0 {
             return Err("min_window_height_px must be positive, got 0".into());
+        }
+        if self.min_row_height_px == 0 {
+            return Err("min_row_height_px must be positive, got 0".into());
         }
         if let Some(cw) = self.column_width
             && self.min_column_width_px > cw
@@ -1082,6 +1099,7 @@ strategy = "original_slot"
             column_width: Some(1200),
             min_column_width_px: 400,
             min_window_height_px: 120,
+            min_row_height_px: 120,
             padding: Padding {
                 window_gap: 6,
                 up: 10,
@@ -1131,6 +1149,7 @@ strategy = "original_slot"
         assert_eq!(parsed.column_width, Some(1200));
         assert_eq!(parsed.min_column_width_px, 400);
         assert_eq!(parsed.min_window_height_px, 120);
+        assert_eq!(parsed.min_row_height_px, 120);
         assert_eq!(parsed.padding.window_gap, 6);
         assert_eq!(parsed.padding.up, 10);
         assert_eq!(parsed.padding.down, 40);

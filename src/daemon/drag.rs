@@ -15,14 +15,16 @@
 //! preview during the drag ([`FlowWM::on_translate_move`]) and the sole
 //! window-placement commit on release ([`FlowWM::on_translate_end`]).
 //!
-//! `Resize` (ticket #9, horizontal column resize) is a sibling state. During
-//! the drag it teleports the *other* windows to their boundary-move targets
-//! (direct `SetWindowPos`, bypassing the animator) so the moving boundary
-//! stays fused to the cursor; the committed `ScrollingSpace` layout stays
-//! **frozen** (non-committing), and the sole commit is on release, which runs
-//! the animator once. The viewport never scrolls mid-grab, and the resized
-//! column is brought into view on release via [`ensure_column_visible`]. A
-//! corner grip does horizontal-only for now (vertical is ticket #10).
+//! `Resize` (tickets #9 + #10: horizontal column, vertical row, and corner-
+//! compose edge/corner resize) is a sibling state. During the drag it
+//! teleports the *other* windows to their boundary-move targets (direct
+//! `SetWindowPos`, bypassing the animator) so the moving boundary stays fused
+//! to the cursor; the committed `ScrollingSpace` layout stays **frozen**
+//! (non-committing), and the sole commit is on release, which runs the
+//! animator once. The viewport never scrolls mid-grab, and the resized column
+//! is brought into view on release via [`ensure_column_visible`]. A corner
+//! grip composes the horizontal and vertical boundary-moves in one gesture
+//! (they touch disjoint fields, so they commute).
 //!
 //! Floating windows never enter [`DragMode`] (they stay on the real-time
 //! float-sync path in `run.rs`, which routes their `LOCATIONCHANGE` events to
@@ -50,7 +52,10 @@ use crate::common::{Direction, Rect, WindowId};
 use crate::layout::mutations::ensure_column_visible;
 use crate::layout::preview::{DropZone, preview_move, resolve_drop_zone};
 use crate::layout::projection;
-use crate::layout::resize::{DragKind, ResizeEdge, classify_drag, resize_column_boundary_move};
+use crate::layout::resize::{
+    DragKind, ResizeEdge, VerticalEdge, classify_drag, resize_column_boundary_move,
+    resize_row_boundary_move,
+};
 use crate::layout::types::AppliedLayout;
 use crate::registry::hooks::{clear_dragged_hwnd, set_dragged_hwnd};
 use crate::registry::types::{TilingState, WindowState};
@@ -156,24 +161,35 @@ pub(super) struct DragState {
     pub(super) edge_scroll_deadline: Option<Instant>,
 }
 
-/// State held during a horizontal column edge/corner resize (the `Resize`
-/// variant). Ticket #9.
+/// State held during an edge/corner resize (the `Resize` variant). Tickets
+/// #9 (horizontal) and #10 (vertical + corner compose).
 ///
-/// The grip edge and the resized column index are captured at classification
-/// time and frozen for the drag's duration. The committed layout is also
-/// frozen (the drag is non-committing); each move teleports the bystander
-/// windows to their boundary-move targets and the sole commit is on release.
+/// The grip edges and the resized column/row indices are captured at
+/// classification time and frozen for the drag's duration. The committed
+/// layout is also frozen (the drag is non-committing); each move teleports the
+/// bystander windows to their boundary-move targets and the sole commit is on
+/// release. A corner grip carries a non-`None` edge on both axes; the daemon
+/// composes them by applying the horizontal and vertical boundary-moves
+/// independently (they touch disjoint fields — column widths vs row heights —
+/// so they commute).
 pub(super) struct ResizeDrag {
     /// The layout-engine ID of the dragged (resized) window.
     pub(super) dragged_id: WindowId,
     /// The raw HWND value (for `GetWindowRect`, the `DRAGGED_HWND` global).
     pub(super) dragged_hwnd: isize,
-    /// Which horizontal edge the user grabbed. The opposite edge anchors.
-    pub(super) grip: ResizeEdge,
+    /// Which horizontal edge the user grabbed (`None` for a vertical-only
+    /// resize). The opposite edge anchors.
+    pub(super) grip_h: ResizeEdge,
+    /// Which vertical edge the user grabbed (`None` for a horizontal-only
+    /// resize). The opposite edge anchors.
+    pub(super) grip_v: VerticalEdge,
     /// The index of the resized column, captured at classification time. The
     /// column is found via [`WindowId`] so this index stays valid even though
     /// the committed layout is frozen.
     pub(super) col: usize,
+    /// The index of the dragged window's row within `col`, captured at
+    /// classification time. Frozen for the drag's duration.
+    pub(super) row: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -282,12 +298,13 @@ impl FlowWM {
     /// - [`DragKind::Translate`] → install `Translate(DragState)` with the
     ///   edge-scroll timings computed on demand, so the existing reorder path
     ///   works unchanged.
-    /// - [`DragKind::Resize`] with a `Left`/`Right` horizontal edge → install
-    ///   `Resize(ResizeDrag)` capturing the grip and the resized column index.
-    ///   A `Resize` whose horizontal edge is `None` (vertical-only, ticket #10)
-    ///   stays `Classifying`: this ticket delivers horizontal-only resize, so a
-    ///   vertical-only grip is left to the native geometry and snaps back on
-    ///   release (a no-op commit).
+    /// - [`DragKind::Resize`] with at least one real edge (a `Left`/`Right`
+    ///   horizontal edge, a `Top`/`Bottom` vertical edge, or both — a corner)
+    ///   → install `Resize(ResizeDrag)` capturing the grip(s) and the resized
+    ///   column + row indices. A `Resize` whose edges are both `None` (a
+    ///   degenerate size-only change with no identified grip) stays
+    ///   `Classifying`: the native geometry is shown mid-drag and the layout
+    ///   snaps back on release (a no-op commit).
     fn classify_and_promote(&mut self, hwnd: isize) {
         let classifying = match self.drag_state.take() {
             Some(DragMode::Classifying(c)) => c,
@@ -325,46 +342,49 @@ impl FlowWM {
                 }));
                 log::debug!("drag classify: hwnd={hwnd} → translate");
             }
-            DragKind::Resize { horizontal } => {
-                match horizontal {
-                    ResizeEdge::Left | ResizeEdge::Right => {
-                        // Resolve the resized column index from the committed
-                        // layout once; it is frozen for the drag's duration.
-                        let col = self
-                            .active_scrolling()
-                            .virtual_layout()
-                            .find_window(classifying.dragged_id)
-                            .map(|(c, _)| c);
-                        match col {
-                            Some(col) => {
-                                self.drag_state = Some(DragMode::Resize(ResizeDrag {
-                                    dragged_id: classifying.dragged_id,
-                                    dragged_hwnd: classifying.dragged_hwnd,
-                                    grip: horizontal,
-                                    col,
-                                }));
-                                log::debug!(
-                                    "drag classify: hwnd={hwnd} → resize grip={horizontal:?} col={col}"
-                                );
-                            }
-                            None => {
-                                // Window not in the committed layout (stale
-                                // focus / destroyed mid-classify). Restore
-                                // Classifying so the drag still completes on
-                                // MoveSizeEnd and snaps back, rather than
-                                // leaking the DRAGGED_HWND global.
-                                log::debug!(
-                                    "drag classify: hwnd={hwnd} not in layout; staying Classifying"
-                                );
-                                self.drag_state = Some(DragMode::Classifying(classifying));
-                            }
-                        }
+            DragKind::Resize {
+                horizontal,
+                vertical,
+            } => {
+                // Promote when the user grabbed a real edge on at least one
+                // axis (a Left/Right horizontal edge, a Top/Bottom vertical
+                // edge, or both — a corner). When neither edge moved (both
+                // `None`) the size-change was degenerate; stay Classifying so
+                // the release snaps back.
+                let has_h = matches!(horizontal, ResizeEdge::Left | ResizeEdge::Right);
+                let has_v = matches!(vertical, VerticalEdge::Top | VerticalEdge::Bottom);
+                if !has_h && !has_v {
+                    self.drag_state = Some(DragMode::Classifying(classifying));
+                    return;
+                }
+                // Resolve the resized column AND row index from the committed
+                // layout once; they are frozen for the drag's duration.
+                let pos = self
+                    .active_scrolling()
+                    .virtual_layout()
+                    .find_window(classifying.dragged_id);
+                match pos {
+                    Some((col, row)) => {
+                        self.drag_state = Some(DragMode::Resize(ResizeDrag {
+                            dragged_id: classifying.dragged_id,
+                            dragged_hwnd: classifying.dragged_hwnd,
+                            grip_h: horizontal,
+                            grip_v: vertical,
+                            col,
+                            row,
+                        }));
+                        log::debug!(
+                            "drag classify: hwnd={hwnd} → resize grip_h={horizontal:?} grip_v={vertical:?} col={col} row={row}"
+                        );
                     }
-                    ResizeEdge::None => {
-                        // Vertical-only resize (ticket #10). This ticket delivers
-                        // horizontal-only, so leave it un-promoted: the native
-                        // geometry is shown mid-drag and the layout snaps back
-                        // on release.
+                    None => {
+                        // Window not in the committed layout (stale focus /
+                        // destroyed mid-classify). Restore Classifying so the
+                        // drag still completes on MoveSizeEnd and snaps back,
+                        // rather than leaking the DRAGGED_HWND global.
+                        log::debug!(
+                            "drag classify: hwnd={hwnd} not in layout; staying Classifying"
+                        );
                         self.drag_state = Some(DragMode::Classifying(classifying));
                     }
                 }
@@ -395,25 +415,25 @@ impl FlowWM {
     /// window is excluded from the teleport — Win32 is already placing it. The
     /// viewport never scrolls mid-grab.
     fn on_resize_move(&mut self, hwnd: isize) {
-        let (dragged_hwnd, grip, col) = match self.drag_state.as_ref() {
-            Some(DragMode::Resize(r)) => (r.dragged_hwnd, r.grip, r.col),
+        let (dragged_hwnd, grip_h, grip_v, col, row) = match self.drag_state.as_ref() {
+            Some(DragMode::Resize(r)) => (r.dragged_hwnd, r.grip_h, r.grip_v, r.col, r.row),
             _ => return,
         };
         let hwnd_handle = HWND(dragged_hwnd as *mut _);
 
-        // The dragged window's native width tracks the cursor (overshoot and
-        // all). Translate the window rect to a *visible* width before feeding
-        // the layout: column widths are visible widths, and feeding the
-        // window-rect width would grow the column by the per-edge invisible
-        // borders on every drag.
-        let target_width = match registry_win32::get_window_rect(hwnd_handle) {
+        // The dragged window's native geometry tracks the cursor (overshoot and
+        // all). Translate the window rect to a *visible* rect before feeding
+        // the layout: column widths / row heights are visible quantities, and
+        // feeding the window-rect dimensions would grow them by the per-edge
+        // invisible borders on every drag.
+        let visible_rect = match registry_win32::get_window_rect(hwnd_handle) {
             Ok(r) => {
                 let invisible_bounds = self
                     .registry
                     .get_window(hwnd_handle)
                     .map(|w| w.invisible_bounds)
                     .unwrap_or_default();
-                invisible_bounds.window_to_visible(r).width
+                invisible_bounds.window_to_visible(r)
             }
             Err(e) => {
                 log::debug!("resize move: GetWindowRect failed for {hwnd}: {e}");
@@ -431,12 +451,48 @@ impl FlowWM {
             )
         };
 
-        let Some(preview_vl) = resize_column_boundary_move(&vl, col, grip, target_width, &config)
-        else {
-            // Clamped to no change (e.g. column pinned at the elastic ceiling):
-            // bystanders are already at their targets — nothing to teleport.
-            return;
+        // Compose the two axes. A corner grip applies both boundary-moves;
+        // they touch disjoint fields (column widths vs row heights) so they
+        // commute. Either may independently return None (clamped to no change),
+        // so the composition falls back to the current layout at each step.
+        let preview_vl = vl.clone();
+        let preview_vl = match grip_h {
+            ResizeEdge::Left | ResizeEdge::Right => {
+                match resize_column_boundary_move(
+                    &preview_vl,
+                    col,
+                    grip_h,
+                    visible_rect.width,
+                    &config,
+                ) {
+                    Some(v) => v,
+                    None => preview_vl,
+                }
+            }
+            ResizeEdge::None => preview_vl,
         };
+        let preview_vl = match grip_v {
+            VerticalEdge::Top | VerticalEdge::Bottom => {
+                match resize_row_boundary_move(
+                    &preview_vl,
+                    col,
+                    row,
+                    grip_v,
+                    visible_rect.height,
+                    &config,
+                ) {
+                    Some(v) => v,
+                    None => preview_vl,
+                }
+            }
+            VerticalEdge::None => preview_vl,
+        };
+
+        // If neither axis produced a change, bystanders are already at their
+        // targets — nothing to teleport.
+        if preview_vl == vl {
+            return;
+        }
 
         // Project with the FROZEN viewport (boundary-move preserves
         // viewport_offset) and teleport bystanders. The dragged window is
@@ -698,12 +754,13 @@ impl FlowWM {
         log::debug!("drag end (translate): hwnd={}", drag.dragged_hwnd);
     }
 
-    /// The `Resize` variant's release commit — the sole commit of a column
+    /// The `Resize` variant's release commit — the sole commit of an edge/corner
     /// drag-resize.
     ///
-    /// Reads the dragged window's final native width (the cursor position at
-    /// release), applies [`resize_column_boundary_move`] to the frozen
-    /// committed layout, brings the resized column into view via
+    /// Reads the dragged window's final native geometry (the cursor position at
+    /// release), applies the horizontal boundary-move ([`resize_column_boundary_move`])
+    /// and the vertical boundary-move ([`resize_row_boundary_move`]) to the
+    /// frozen committed layout, brings the resized column into view via
     /// [`ensure_column_visible`], then commits + animates once. `drag_state` is
     /// already `take()`n, so [`animate_layout`] includes the dragged window —
     /// it visibly snaps from its native overshoot rect into its clamped tile
@@ -714,41 +771,69 @@ impl FlowWM {
             (space.virtual_layout().clone(), *space.config())
         };
 
-        // Read the final native width (the cursor position at release) and
-        // translate it to a *visible* width — column widths are visible widths,
-        // so feeding the window-rect width would grow the column by the
-        // per-edge invisible borders on every drag.
+        // Read the final native geometry (the cursor position at release) and
+        // translate it to a *visible* rect — column widths and row heights are
+        // visible quantities, so feeding the window-rect dimensions would grow
+        // them by the per-edge invisible borders on every drag.
         let hwnd_handle = HWND(drag.dragged_hwnd as *mut _);
-        let fallback_width = vl
+        let (fallback_width, fallback_height) = vl
             .columns
             .get(drag.col)
-            .map(|c| c.width_px)
-            .unwrap_or(config.column_width as i32);
-        let target_width = match registry_win32::get_window_rect(hwnd_handle) {
+            .and_then(|c| c.rows.get(drag.row))
+            .map(|r| (vl.columns[drag.col].width_px, r.height))
+            .unwrap_or((config.column_width as i32, config.available_height()));
+        let visible_rect = match registry_win32::get_window_rect(hwnd_handle) {
             Ok(r) => {
                 let invisible_bounds = self
                     .registry
                     .get_window(hwnd_handle)
                     .map(|w| w.invisible_bounds)
                     .unwrap_or_default();
-                invisible_bounds.window_to_visible(r).width
+                invisible_bounds.window_to_visible(r)
             }
             Err(e) => {
                 log::debug!(
                     "resize end: GetWindowRect failed for {}: {e}; committing layout as-is",
                     drag.dragged_hwnd
                 );
-                // Fall back to the column's current width so the commit is a
-                // no-op snap-back rather than a silent drop.
-                fallback_width
+                // Fall back to the column/row's current geometry so the commit
+                // is a no-op snap-back rather than a silent drop.
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: fallback_width,
+                    height: fallback_height,
+                }
             }
         };
 
-        // Apply the boundary-move (clamps to [min, abs_max] — the elastic
-        // ceiling). If there is no change, snap back to the committed layout.
-        let target_vl =
-            resize_column_boundary_move(&vl, drag.col, drag.grip, target_width, &config)
-                .unwrap_or_else(|| vl.clone());
+        // Compose the two axes (corner grip = both; edge grip = one). Each
+        // boundary-move clamps to its axis's [min, max] (the elastic ceiling);
+        // if an axis reports no change it falls back to the layout as-is.
+        let target_vl = vl.clone();
+        let target_vl = match drag.grip_h {
+            ResizeEdge::Left | ResizeEdge::Right => resize_column_boundary_move(
+                &target_vl,
+                drag.col,
+                drag.grip_h,
+                visible_rect.width,
+                &config,
+            )
+            .unwrap_or(target_vl),
+            ResizeEdge::None => target_vl,
+        };
+        let target_vl = match drag.grip_v {
+            VerticalEdge::Top | VerticalEdge::Bottom => resize_row_boundary_move(
+                &target_vl,
+                drag.col,
+                drag.row,
+                drag.grip_v,
+                visible_rect.height,
+                &config,
+            )
+            .unwrap_or(target_vl),
+            VerticalEdge::None => target_vl,
+        };
 
         // Bring the resized column into view on release (the viewport never
         // scrolled mid-grab). drag_state is take()n, so animate_layout includes
@@ -760,10 +845,12 @@ impl FlowWM {
         self.refresh_border_for(drag.dragged_hwnd);
 
         log::debug!(
-            "drag end (resize): hwnd={} grip={:?} col={}",
+            "drag end (resize): hwnd={} grip_h={:?} grip_v={:?} col={} row={}",
             drag.dragged_hwnd,
-            drag.grip,
-            drag.col
+            drag.grip_h,
+            drag.grip_v,
+            drag.col,
+            drag.row,
         );
     }
 
@@ -771,10 +858,9 @@ impl FlowWM {
     /// stray native motion back to the unchanged committed layout.
     ///
     /// Reached when the gesture never produced a classifiable movement (a pure
-    /// click) or when it was a vertical-only resize (ticket #10 leaves that to
-    /// native geometry). The committed layout was never mutated mid-drag, so
-    /// re-committing it re-projects and animates the dragged window back to its
-    /// tile.
+    /// click) or when it was a degenerate size-change with no identified grip
+    /// edge. The committed layout was never mutated mid-drag, so re-committing
+    /// it re-projects and animates the dragged window back to its tile.
     fn on_classifying_end(&mut self, drag: ClassifyingDrag) {
         let vl = self.active_scrolling().virtual_layout().clone();
         let applied = self.active_scrolling_mut().commit_layout(vl);
