@@ -679,9 +679,12 @@ impl FlowWM {
     ///   boundary-move layout and runs the animator once; the dragged window
     ///   snaps from its native overshoot to its clamped tile).
     /// - [`DragMode::Classifying`] → [`Self::on_classifying_end`] (a click with
-    ///   no movement, or a vertical-only grip this ticket leaves to native
-    ///   geometry — re-commits the unchanged layout so any stray native motion
-    ///   snaps back).
+    ///   no movement — the gesture never produced a classifiable rect-diff, so
+    ///   it is still `Classifying` at release. Re-commits the unchanged layout
+    ///   so any stray native motion snaps back; the re-commit is defensive, not
+    ///   a real change). A genuine vertical, horizontal, or corner grip is
+    ///   promoted out of `Classifying` on the first location-change (see
+    ///   [`Self::classify_and_promote`]), so it never reaches this arm.
     ///
     /// Taking `drag_state` drops the translate edge-scroll scheduler and its
     /// armed deadline (translate variant), tearing down the auto-repeat timer —
@@ -858,9 +861,10 @@ impl FlowWM {
     /// stray native motion back to the unchanged committed layout.
     ///
     /// Reached when the gesture never produced a classifiable movement (a pure
-    /// click) or when it was a degenerate size-change with no identified grip
-    /// edge. The committed layout was never mutated mid-drag, so re-committing
-    /// it re-projects and animates the dragged window back to its tile.
+    /// click). The committed layout was never mutated mid-drag, so re-committing
+    /// it re-projects and animates the dragged window back to its tile. The
+    /// re-commit + animate is a defensive snap-back of an unchanged layout
+    /// (story #4 — "nothing changes"); it produces no visible move.
     fn on_classifying_end(&mut self, drag: ClassifyingDrag) {
         let vl = self.active_scrolling().virtual_layout().clone();
         let applied = self.active_scrolling_mut().commit_layout(vl);
