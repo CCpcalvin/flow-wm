@@ -100,12 +100,13 @@ impl FlowWM {
         self.set_floats_topmost(&drifted, true);
     }
 
-    /// Toggle every float HWND to topmost (`topmost == true`) or non-topmost.
+    /// Toggle every HWND in `floats` to topmost (`topmost == true`) or
+    /// non-topmost.
     ///
     /// A single `SetWindowPos(HWND_TOPMOST | HWND_NOTOPMOST)` per float with
     /// `NOMOVE | NOSIZE | NOACTIVATE` touches only the `WS_EX_TOPMOST` bit,
     /// preserving each float's position and not stealing focus.
-    fn set_floats_topmost(&self, floats: &[isize], topmost: bool) {
+    pub(super) fn set_floats_topmost(&self, floats: &[isize], topmost: bool) {
         let insert_after = if topmost {
             Some(HWND_TOPMOST)
         } else {
@@ -126,8 +127,9 @@ impl FlowWM {
             // promotes the overlay into the topmost band while the float is
             // pinned, so dropping the float must demote the overlay too —
             // otherwise it would stay topmost and render above a fullscreen /
-            // non-flow window. Tiled borders are never topmost, so this is a
-            // no-op in spirit for non-float HWNDs (none reach here).
+            // non-flow window. Tiled borders are otherwise never topmost; the
+            // one non-float caller is the float→tile toggle, which drops a
+            // departing float's pin here before it becomes a tile.
             // (`docs/src/dev-guide/floating-space.md`)
             if let Some(window) = self.registry.get_window(hwnd)
                 && let Some(border) = window.border.as_ref()

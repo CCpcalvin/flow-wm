@@ -1325,6 +1325,14 @@ impl FlowWM {
         // longer forwards this window (it is becoming a tiled window).
         remove_float_hwnd(focused.0);
 
+        // Drop the departing window (and its border overlay) from the topmost
+        // band — a tiled window is never topmost, and the WS_EX_TOPMOST bit the
+        // float layer pinned must not survive the toggle. Unconditional rather
+        // than gated on `floats_topmost`: that cache reflects the layer's
+        // intended state, not this window's live bit, which a third party can
+        // flip — so always clear, never skip on the cache's say-so.
+        self.set_floats_topmost(&[focused.0], false);
+
         // b) Insert into scrolling. insert_window places after
         //    last_focused_window, shifts right, sets last_focused_window,
         //    and calls ensure_column_visible internally.
