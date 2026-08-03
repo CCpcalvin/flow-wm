@@ -185,12 +185,16 @@ pub struct FlowWM {
 
     /// State for the in-progress tile-window drag, or `None` when idle.
     ///
-    /// Set by [`on_drag_start`](super::drag::FlowWM::on_drag_start) (MoveSizeStart
-    /// on a tiled window) and cleared by
-    /// [`on_drag_end`](super::drag::FlowWM::on_drag_end) (MoveSizeEnd). When
-    /// `Some`, layout-mutating IPC is rejected with
-    /// [`SocketResponse::Busy`](crate::ipc::message::SocketResponse::Busy).
-    pub(super) drag_state: Option<super::drag::DragState>,
+    /// A 4-state machine `Idle | Classifying | Translate | Resize`: `None`
+    /// (idle) is set by [`on_drag_start`](super::drag::FlowWM::on_drag_start)
+    /// (MoveSizeStart on a tiled window) to [`DragMode::Classifying`], promoted
+    /// on the first `LOCATIONCHANGE` to `Translate` or `Resize`, and cleared
+    /// by [`on_drag_end`](super::drag::FlowWM::on_drag_end) (MoveSizeEnd).
+    ///
+    /// When `Some`, layout-mutating IPC is rejected with
+    /// [`SocketResponse::Busy`](crate::ipc::message::SocketResponse::Busy) —
+    /// this covers resize automatically because it lives in the same field.
+    pub(super) drag_state: Option<super::drag::DragMode>,
 
     /// Timestamp of the most recent foreground-reconciliation pass.
     ///

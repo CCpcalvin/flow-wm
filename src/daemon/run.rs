@@ -393,7 +393,7 @@ impl FlowWM {
         let edge_scroll_deadline = self
             .drag_state
             .as_ref()
-            .and_then(|ds| ds.edge_scroll_deadline);
+            .and_then(|ds| ds.edge_scroll_deadline());
         compute_wait_timeout_inner(
             !self.pending_creations.is_empty(),
             self.float_resume_deadline,
@@ -498,7 +498,7 @@ impl FlowWM {
                     let is_dragged = self
                         .drag_state
                         .as_ref()
-                        .map(|ds| ds.dragged_hwnd == hwnd)
+                        .map(|ds| ds.dragged_hwnd() == hwnd)
                         .unwrap_or(false);
                     if is_dragged {
                         self.on_drag_move(hwnd);
