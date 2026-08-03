@@ -154,8 +154,10 @@ fn run(args: Args) -> Result<(), String> {
 
     flow.run();
 
-    // Graceful exit (Stop command or fatal wait error): rescue any windows
-    // stranded off-screen before tearing down. See `daemon::shutdown`.
+    // Graceful exit (Stop command or fatal wait error): release the float
+    // layer's `WS_EX_TOPMOST` pin (float HWNDs outlive the daemon) and rescue
+    // any windows stranded off-screen before tearing down. See `daemon::shutdown`.
+    flow.release_float_topmost();
     flow.rescue_stranded_windows();
 
     Ok(())

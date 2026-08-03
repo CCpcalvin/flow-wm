@@ -216,7 +216,7 @@ struct with no HWND) and returns a `WindowState`.
 flowchart TB
     C["WindowCandidate<br/>(exe, title, class, process_path)"] --> MAX{"IsZoomed?<br/>(maximized)"}
     MAX -- Yes --> IGMAX["Ignored(Maximized)<br/>ALWAYS wins"]
-    MAX -- No --> FS{"Fullscreen?<br/>(rect == screen,<br/>no caption/thickframe)"}
+    MAX -- No --> FS{"Fullscreen?<br/>(rect == its monitor,<br/>not maximized)"}
     FS -- Yes --> IGFS["Ignored(Fullscreen)<br/>ALWAYS wins"]
     FS -- No --> PIPE["ClassificationPipeline"]
 

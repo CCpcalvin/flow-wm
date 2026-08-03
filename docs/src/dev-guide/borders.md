@@ -329,6 +329,22 @@ Z-order is established once at `create` / re-asserted at `set_geometry`
 disturbing its place in the z-stack. `set_geometry` deliberately drops
 `SWP_NOZORDER` so it can re-assert the seat on every size/position command.
 
+#### One exception: float borders track the float's TOPMOST
+
+A float's border has a second z-order driver. While the float layer is pinned
+`WS_EX_TOPMOST` (see [floating space](./floating-space.md#stacking--floats-above-the-focused-tile)),
+`seat_above_target`'s `SetWindowPos(overlay, target)` *promotes the overlay
+into the topmost band too* (positioning a window above a topmost window places
+it in that band). That is desirable — the border must ride above its pinned
+float — but it means the border's `WS_EX_TOPMOST` flag no longer reflects a
+`seat_above_target` call the daemon can re-issue on demand; it was set
+implicitly by the float being topmost. So when the float layer is **dropped**
+(fullscreen / non-flow foreground), the daemon must demote the overlay
+explicitly too, or it would stay topmost above a fullscreen app. The float
+TOPMOST wiring therefore toggles each float **and** its overlay in lockstep via
+`Border::set_topmost`. Tiled borders are never topmost, so this path is
+float-only.
+
 ## Rendering Pipeline
 
 Each border overlay is a `WS_EX_LAYERED` window painted via

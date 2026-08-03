@@ -11,9 +11,13 @@
 //! on the rescue anchor).
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{
+    HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+};
 
 use super::types::FlowWM;
 use crate::common::{InvisibleBounds, Rect};
+use crate::registry::types::WindowState;
 use crate::registry::win32;
 
 impl FlowWM {
@@ -60,6 +64,41 @@ impl FlowWM {
         }
 
         log::info!("shutdown rescue: brought {rescued} stranded window(s) back on-screen");
+    }
+
+    /// Drop every flow-managed float window from the `WS_EX_TOPMOST` band.
+    ///
+    /// flow pins the float layer `WS_EX_TOPMOST` while a flow-managed window
+    /// holds the foreground. The float HWNDs belong to other processes
+    /// (browsers, editors), so their `WS_EX_TOPMOST` flag outlives the daemon
+    /// — without this pass those windows would stay pinned above everything
+    /// after flow stops. Iterates the whole registry (every workspace, not
+    /// just the active one) so parked-workspace floats are covered too.
+    /// (`docs/src/dev-guide/floating-space.md`)
+    ///
+    /// Border overlays are owned by the daemon process and are destroyed when
+    /// it tears down, so they need no explicit cleanup here.
+    ///
+    /// Failures (window vanished mid-loop, `SetWindowPos` rejected) are
+    /// counted out but never abort the pass.
+    pub fn release_float_topmost(&self) {
+        let mut released = 0_usize;
+        for window in self.registry.windows() {
+            if !matches!(window.state, WindowState::Floating(_)) {
+                continue;
+            }
+            // SAFETY: `SetWindowPos` with NOMOVE|NOSIZE|NOACTIVATE toggles only
+            // the WS_EX_TOPMOST bit. HWND_NOTOPMOST is a sentinel HWND value
+            // (not a real window). The float HWND is a live foreign window;
+            // an access-denied failure is logged-and-counted, never fatal.
+            let result = unsafe {
+                SetWindowPos(window.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE)
+            };
+            if result.is_ok() {
+                released += 1;
+            }
+        }
+        log::info!("shutdown: released {released} float window(s) from topmost");
     }
 }
 

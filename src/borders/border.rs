@@ -29,10 +29,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetWindowLongPtrW,
-    GetWindowRect, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSENDCHANGING, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
-    UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SIZE, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSENDCHANGING, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SIZE,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::PCWSTR;
 use windows::core::w;
@@ -355,6 +355,44 @@ impl Border {
                 0,
                 0,
                 SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_NOMOVE | SWP_NOSIZE,
+            )
+        };
+    }
+
+    /// Pin the overlay to the topmost band (`topmost == true`) or drop it to
+    /// non-topmost (`false`), without moving, resizing, or activating it.
+    ///
+    /// A floating window's border is normally seated just above its target via
+    /// [`seat_above_target`](Self::seat_above_target); while the float is pinned
+    /// `WS_EX_TOPMOST` that relative positioning promotes the overlay into the
+    /// topmost band too. When the float layer is dropped (a fullscreen or
+    /// non-flow foreground), the overlay must be dropped in lockstep — otherwise
+    /// it would stay topmost and render above a fullscreen app. Tiled borders
+    /// are never topmost, so this is only ever called for float overlays.
+    /// (`docs/src/dev-guide/floating-space.md`)
+    ///
+    /// Cheap: a single `SetWindowPos(HWND_TOPMOST | HWND_NOTOPMOST)` with
+    /// `NOMOVE | NOSIZE | NOACTIVATE` touches only the `WS_EX_TOPMOST` bit.
+    /// Safe to call with a destroyed overlay (no-op).
+    pub(crate) fn set_topmost(&self, topmost: bool) {
+        let raw = *self.inner.overlay.lock().expect("overlay mutex poisoned");
+        if raw == 0 {
+            return;
+        }
+        let overlay_hwnd = HWND(raw as *mut _);
+        let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        // SAFETY: SetWindowPos on our own overlay, toggling only the
+        // WS_EX_TOPMOST bit. HWND_TOPMOST / HWND_NOTOPMOST are special sentinel
+        // HWND values (not real windows).
+        let _ = unsafe {
+            SetWindowPos(
+                overlay_hwnd,
+                Some(insert_after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
             )
         };
     }

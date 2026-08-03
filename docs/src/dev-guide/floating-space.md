@@ -324,10 +324,15 @@ same mechanism Microsoft's own PowerToys Always-On-Top uses (`WS_EX_TOPMOST`):
 
 - While the foreground is a **flow-managed, non-fullscreen** window, every float
   is pinned `WS_EX_TOPMOST`, so focusing a tile (by focus-follows-mouse,
-  keyboard nav, or click) no longer raises that tile above the float.
+  keyboard nav, or click) no longer raises that tile above the float. Each
+  float's **border overlay is pinned/dropped in lockstep**: `seat_above_target`
+  promotes the overlay into the topmost band while the float is pinned, so the
+  Drop path must demote it again or it would stay topmost above a fullscreen
+  app. The toggle therefore issues `SetWindowPos(HWND_TOPMOST | HWND_NOTOPMOST)`
+  on both the float HWND and its overlay in one pass.
 - The moment the foreground moves to a **fullscreen app** or any **non-flow
-  window**, the floats are dropped to non-topmost so they never cover fullscreen
-  video / games or another application's windows.
+  window**, the floats (and their overlays) are dropped to non-topmost so they
+  never cover fullscreen video / games or another application's windows.
 
 ### Where it lives
 
@@ -388,10 +393,17 @@ Two facts drive the decision, both read **live** on the foreground window:
 
 - **flow-managed** — actively tiling or an active float on the active workspace
   (not `Ignored`, which must drop).
-- **fullscreen** — the live geometry+style check (`registry::win32::is_fullscreen`:
-  covers the full screen *and* no caption/thick-frame), **not** the stored
-  registry classification. This catches F11 in a tiled app, whose stored state
-  is still `Tiling`; fullscreen takes precedence over flow-managed.
+- **fullscreen** — the live geometry check (`registry::win32::is_fullscreen`:
+  the window covers its **own** monitor's full physical display bounds
+  (`MonitorFromWindow` + `GetMonitorInfoW` `rcMonitor`, not the primary screen)
+  **and** is not maximized (`IsZoomed`)), **not** the stored registry
+  classification. It deliberately does **not** key off caption/thick-frame style
+  bits: apps that enter fullscreen by resizing over the taskbar while keeping
+  their frame styles (an HTML5 video fullscreen button, games) would be falsely
+  rejected by a style check (the F11-vs-player-button regression), and maximized
+  windows are excluded via `WS_MAXIMIZE` instead. This catches F11 in a tiled
+  app, whose stored state is still `Tiling`; fullscreen takes precedence over
+  flow-managed.
 
 ### No-op and no churn
 
@@ -426,6 +438,18 @@ focus sink recursively; and after a re-apply the drifted floats read topmost
 again, so a re-evaluation is a no-op. The toggle is re-evaluated on every
 foreground change — the cadence at which Z-order drift is reintroduced —
 matching PowerToys' re-pin discipline.
+
+### Shutdown release
+
+Float HWNDs belong to other processes (browsers, editors), so the
+`WS_EX_TOPMOST` flag flow pins on them **outlives the daemon**. Without an
+explicit release on exit those windows would stay pinned above everything
+after `flow` stops. So the graceful-shutdown path runs
+`release_float_topmost` once (before the off-screen window rescue): it walks
+the whole registry (every workspace, not just the active one) and issues
+`SetWindowPos(HWND_NOTOPMOST)` on every `Floating` window. Border overlays
+are owned by the daemon process and are destroyed when it tears down, so they
+need no explicit cleanup.
 
 ## Configuration
 

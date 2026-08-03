@@ -122,6 +122,18 @@ impl FlowWM {
             if let Err(e) = unsafe { SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags) } {
                 log::warn!("float topmost toggle failed for hwnd {hwnd_val}: {e}");
             }
+            // Toggle the float's border overlay in lockstep. `seat_above_target`
+            // promotes the overlay into the topmost band while the float is
+            // pinned, so dropping the float must demote the overlay too —
+            // otherwise it would stay topmost and render above a fullscreen /
+            // non-flow window. Tiled borders are never topmost, so this is a
+            // no-op in spirit for non-float HWNDs (none reach here).
+            // (`docs/src/dev-guide/floating-space.md`)
+            if let Some(window) = self.registry.get_window(hwnd)
+                && let Some(border) = window.border.as_ref()
+            {
+                border.set_topmost(topmost);
+            }
         }
     }
 }

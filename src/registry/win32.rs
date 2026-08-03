@@ -43,12 +43,11 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetCursorPos,
-    GetForegroundWindow, GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_THICKFRAME, WindowFromPoint,
+    BringWindowToTop, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WM_CLOSE,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WindowFromPoint,
 };
 use windows::core::PWSTR;
 
@@ -936,13 +935,20 @@ pub fn is_cloaked(hwnd: HWND) -> bool {
 
 /// Detects whether the window is in exclusive or borderless fullscreen.
 ///
-/// This is a basic heuristic:
-/// 1. The window covers the full screen dimensions (`SM_CXSCREEN` × `SM_CYSCREEN`).
-/// 2. The window style does **not** include `WS_CAPTION | WS_THICKFRAME`
-///    (no title bar, no resize border).
+/// A window is fullscreen when it covers its **entire physical monitor**
+/// (the full `rcMonitor` bounds, including the taskbar area) **and** is not
+/// in the maximized state (`IsZoomed`). (`docs/src/dev-guide/floating-space.md`)
 ///
-/// A full monitor-aware implementation (using `MonitorFromWindow` /
-/// `GetMonitorInfo`) can replace this in a future iteration.
+/// This is monitor-aware: each window is compared against its **own** monitor
+/// (`MonitorFromWindow(..., MONITOR_DEFAULTTONEAREST)`), not the primary, so a
+/// fullscreen app on a secondary display is detected. It deliberately does
+/// **not** key off caption/thick-frame style bits: many apps (an HTML5 video
+/// fullscreen button, games, video players) enter fullscreen by resizing over
+/// the taskbar while keeping their frame styles, so a style check would falsely
+/// reject them (the F11-vs-player-button regression). Maximization is excluded
+/// via `IsZoomed` (`WS_MAXIMIZE`): a maximized window either covers only the
+/// work area (taskbar visible) or, with an auto-hidden taskbar, covers the full
+/// screen but still carries `WS_MAXIMIZE` — either way it is not fullscreen.
 ///
 /// # Arguments
 ///
@@ -950,24 +956,46 @@ pub fn is_cloaked(hwnd: HWND) -> bool {
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string if any Win32 call fails.
+/// Returns a human-readable error string if the geometry query fails.
 pub fn is_fullscreen(hwnd: HWND) -> Result<bool, String> {
     let rect = get_window_rect(hwnd)?;
+    let screen = monitor_screen_rect(hwnd)?;
+    // Equality (not containment): a window that merely overlaps the screen edge
+    // is not fullscreen — it must cover the full physical display.
+    Ok(rect == screen && !is_zoomed(hwnd))
+}
 
-    let screen_cx = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_cy = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+/// Full physical display bounds (`rcMonitor`) of the monitor `hwnd` is on.
+///
+/// `MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)` follows the window
+/// across a multi-monitor desktop, so the result is the monitor the window
+/// actually occupies rather than always the primary. Used by
+/// [`is_fullscreen`] to compare each window against its own screen.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if `GetMonitorInfoW` fails (extremely
+/// rare — only in sandboxed environments or during system shutdown).
+fn monitor_screen_rect(hwnd: HWND) -> Result<Rect, String> {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
 
-    // Check if window covers the entire screen.
-    if rect.x != 0 || rect.y != 0 || rect.width != screen_cx || rect.height != screen_cy {
-        return Ok(false);
-    }
-
-    // Check window style for absence of caption and thick frame.
-    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
-    let style = WINDOW_STYLE(style as u32);
-    let has_chrome = style & (WS_CAPTION | WS_THICKFRAME) != WINDOW_STYLE(0);
-
-    Ok(!has_chrome)
+    let hmonitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetMonitorInfoW(hmonitor, &mut mi) }
+        .ok()
+        .map_err(|e| format!("GetMonitorInfoW failed: {e}"))?;
+    let s = mi.rcMonitor;
+    Ok(Rect {
+        x: s.left,
+        y: s.top,
+        width: s.right - s.left,
+        height: s.bottom - s.top,
+    })
 }
 
 /// Retrieves the process ID (PID) of the window's owner process.
