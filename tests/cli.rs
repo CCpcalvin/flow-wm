@@ -41,6 +41,9 @@ mod events_window_moved;
 #[path = "cli/events_focus_changed.rs"]
 mod events_focus_changed;
 #[cfg(debug_assertions)]
+#[path = "cli/events_viewport_scrolled.rs"]
+mod events_viewport_scrolled;
+#[cfg(debug_assertions)]
 #[path = "cli/ping.rs"]
 mod ping;
 #[cfg(debug_assertions)]
