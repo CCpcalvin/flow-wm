@@ -5,6 +5,7 @@
 //! with JSON data.
 
 use crate::ipc::message::SocketResponse;
+use crate::events::WindowDescriptor;
 use windows::Win32::Foundation::HWND;
 
 use super::types::FlowWM;
@@ -108,9 +109,9 @@ impl FlowWM {
     /// [`SocketResponse`].
     pub(super) fn daemon_state_value(&self) -> serde_json::Value {
         let focused_window = self.registry.focused().and_then(|id| {
-            self.registry.get_window(HWND(id.0 as *mut _)).map(|w| {
+            self.window_descriptor(id).map(|w| {
                 serde_json::json!({
-                    "hwnd": w.hwnd.0 as isize,
+                    "hwnd": w.hwnd,
                     "title": w.title,
                     "exe": w.exe,
                     "class": w.class,
@@ -148,6 +149,21 @@ impl FlowWM {
             "active_monitor": self.active_monitor,
             "monitors": monitors_json,
             "focused_window": focused_window,
+        })
+    }
+
+    /// Build a [`WindowDescriptor`] for the given window id, or `None` if it is
+    /// not tracked.
+    ///
+    /// Shared by every event variant that carries a window reference so the
+    /// `{hwnd, title, exe, class}` shape is built in one place.
+    pub(super) fn window_descriptor(&self, id: crate::common::WindowId) -> Option<WindowDescriptor> {
+        let w = self.registry.get_window(HWND(id.0 as *mut _))?;
+        Some(WindowDescriptor {
+            hwnd: w.hwnd.0 as isize,
+            title: w.title.clone(),
+            exe: w.exe.clone(),
+            class: w.class.clone(),
         })
     }
 }

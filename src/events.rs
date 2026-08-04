@@ -19,6 +19,23 @@
 
 use serde::Serialize;
 
+/// A window descriptor carried by events that reference a specific window.
+///
+/// Serialized as a nested object `{ "hwnd", "title", "exe", "class" }` so a
+/// subscriber can render the active application without re-querying. Shared by
+/// every event variant that names a window.
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowDescriptor {
+    /// Win32 window handle value.
+    pub hwnd: isize,
+    /// Window title bar text.
+    pub title: String,
+    /// Executable name (e.g. `"code.exe"`).
+    pub exe: String,
+    /// Win32 window class name.
+    pub class: String,
+}
+
 /// A published semantic state change announced to subscribers.
 ///
 /// Serialized as newline-delimited JSON with a flat `"type"` tag, e.g.
