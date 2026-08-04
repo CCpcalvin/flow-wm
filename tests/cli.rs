@@ -35,6 +35,9 @@ mod events_subscribe;
 #[path = "cli/events_workspace_changed.rs"]
 mod events_workspace_changed;
 #[cfg(debug_assertions)]
+#[path = "cli/events_window_moved.rs"]
+mod events_window_moved;
+#[cfg(debug_assertions)]
 #[path = "cli/ping.rs"]
 mod ping;
 #[cfg(debug_assertions)]
