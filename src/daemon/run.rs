@@ -317,6 +317,14 @@ impl FlowWM {
                             }
 
                             if is_stop {
+                                // Announce graceful exit to every subscriber
+                                // before teardown. The `FlowWM` drop that
+                                // follows `return` closes the subscriber pipes,
+                                // so each subscriber then sees EOF. A crash
+                                // skips this — subscribers detect it via EOF
+                                // and follow the same reconnect path (ADR-0005).
+                                self.subscribers
+                                    .broadcast(&crate::events::Event::ApplicationExiting);
                                 log::info!("flowd: shutting down");
                                 return;
                             }
