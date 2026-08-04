@@ -957,6 +957,15 @@ impl FlowWM {
             }
         }
 
+        // The active workspace genuinely changed (callers short-circuit
+        // self-switches before reaching here). Announce it once, here, so both
+        // `switch-workspace` and the camera-follow of `move-to-workspace`
+        // surface a single `WorkspaceChanged` regardless of cause (ADR-0005).
+        self.subscribers.broadcast(&Event::WorkspaceChanged {
+            monitor: self.active_monitor,
+            workspace: target_id.0,
+        });
+
         true
     }
 
