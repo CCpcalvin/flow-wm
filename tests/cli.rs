@@ -38,6 +38,9 @@ mod events_workspace_changed;
 #[path = "cli/events_window_moved.rs"]
 mod events_window_moved;
 #[cfg(debug_assertions)]
+#[path = "cli/events_focus_changed.rs"]
+mod events_focus_changed;
+#[cfg(debug_assertions)]
 #[path = "cli/ping.rs"]
 mod ping;
 #[cfg(debug_assertions)]
