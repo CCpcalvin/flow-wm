@@ -426,20 +426,37 @@ impl FlowWM {
         // the layout: column widths / row heights are visible quantities, and
         // feeding the window-rect dimensions would grow them by the per-edge
         // invisible borders on every drag.
-        let visible_rect = match registry_win32::get_window_rect(hwnd_handle) {
+        let (visible_rect, border) = match registry_win32::get_window_rect(hwnd_handle) {
             Ok(r) => {
-                let invisible_bounds = self
-                    .registry
-                    .get_window(hwnd_handle)
-                    .map(|w| w.invisible_bounds)
-                    .unwrap_or_default();
-                invisible_bounds.window_to_visible(r)
+                let window = self.registry.get_window(hwnd_handle);
+                let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+                let visible_rect = invisible_bounds.window_to_visible(r);
+                // Clone the Border handle out of the borrow before any later
+                // `&mut self` (teleport / layout snapshot) so the NLL borrow of
+                // the registry closes here. `None` if this Tile has no overlay.
+                let border = window.and_then(|w| w.border.clone());
+                (visible_rect, border)
             }
             Err(e) => {
                 log::debug!("resize move: GetWindowRect failed for {hwnd}: {e}");
                 return;
             }
         };
+
+        // Border follows the window (direct set_geometry, not the animator).
+        // The resize Tile's Border is repositioned to the Tile's actual on-screen
+        // visible rect on every move so the ring stays glued to the window edge
+        // — including when the Tile Overshoots past a Clamp. This is the sibling
+        // of the translate-drag Border-follow; it deliberately does *not* outset
+        // (the resize window already *is* the cursor-tracked edge, so outsetting
+        // would float the ring off into a gap). Placed before the "no bystander
+        // change" early-return below so the Border still tracks when the resize
+        // is fully Clamped (bystanders stationary, only this Tile Overshoots).
+        // The active-drag exclusion in the animator/bystager path is unchanged:
+        // this set_geometry is the sole mover of the resizing Tile's Border.
+        if let Some(border) = border.as_ref() {
+            border.set_geometry(visible_rect);
+        }
 
         // Snapshot the frozen committed layout + config + monitor.
         let (vl, config, monitor) = {

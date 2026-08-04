@@ -61,7 +61,7 @@ use crate::layout::types::{ActualLayout, AppliedLayout, MonitorInfo, Padding, Vi
 /// let monitor = MonitorInfo {
 ///     work_area: Rect { x: 0, y: 0, width: 1920, height: 1080 },
 /// };
-/// let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, Padding { window_gap: 4, up: 0, down: 0 }, 4);
+/// let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, 100, Padding { window_gap: 4, up: 0, down: 0 }, 4);
 ///
 /// // Add windows (each becomes a new column, auto-focused)
 /// engine.add_window(WindowId(1));
@@ -564,7 +564,7 @@ impl ScrollingSpace {
     /// # let monitor = MonitorInfo {
     /// #     work_area: flow_wm::common::Rect { x: 0, y: 0, width: 1920, height: 1080 },
     /// # };
-    /// # let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, Padding { window_gap: 4, up: 0, down: 0 }, 4);
+    /// # let mut engine = ScrollingSpace::new(monitor, 960, 320, 100, 100, Padding { window_gap: 4, up: 0, down: 0 }, 4);
     /// engine.add_window(WindowId(1)); // col 0, focused
     /// engine.add_window(WindowId(2)); // col 1, focused
     /// engine.set_focus(WindowId(1));  // focus back to col 0
