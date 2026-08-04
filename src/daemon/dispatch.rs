@@ -219,6 +219,22 @@ impl FlowWM {
         }
     }
 
+    /// Broadcast a [`ViewportScrolled`](Event::ViewportScrolled) for the
+    /// active monitor’s current viewport state.
+    ///
+    /// Called by the explicit viewport commands (scroll-left/right, center)
+    /// after they have committed the layout diff, so the event reports the
+    /// offset the subscriber will actually see.
+    fn emit_viewport_scrolled(&mut self) {
+        let vl = self.active_scrolling().virtual_layout();
+        self.subscribers.broadcast(&Event::ViewportScrolled {
+            monitor: self.active_monitor,
+            workspace: self.active_monitor().active_workspace_id().0,
+            offset: vl.viewport_offset,
+            columns: vl.columns.len(),
+        });
+    }
+
     /// Dispatch a focus movement in the given direction.
     ///
     /// This performs only the layout work and the OS foreground push; **all
@@ -495,6 +511,7 @@ impl FlowWM {
         match self.active_scrolling_mut().scroll_left() {
             Some(diff) => {
                 self.animate_layout(&diff);
+                self.emit_viewport_scrolled();
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -508,6 +525,7 @@ impl FlowWM {
         match self.active_scrolling_mut().scroll_right() {
             Some(diff) => {
                 self.animate_layout(&diff);
+                self.emit_viewport_scrolled();
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {
@@ -646,6 +664,7 @@ impl FlowWM {
         match self.active_scrolling_mut().center_focused_column(id) {
             Some(diff) => {
                 self.animate_layout(&diff);
+                self.emit_viewport_scrolled();
                 SocketResponse::Ok
             }
             None => SocketResponse::Error {

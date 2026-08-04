@@ -78,6 +78,23 @@ pub enum Event {
         /// The now-active workspace id.
         workspace: u32,
     },
+
+    /// The viewport scrolled along the infinite horizontal canvas.
+    ///
+    /// Carries the monitor and workspace it concerns, the new viewport
+    /// offset (pixels along the canvas), and the total column count — enough
+    /// for a subscriber to render a "column N of M" scroll indicator unique to
+    /// flow-wm’s scrolling model (ADR-0005).
+    ViewportScrolled {
+        /// The monitor whose viewport scrolled.
+        monitor: usize,
+        /// The workspace whose viewport scrolled.
+        workspace: u32,
+        /// The new viewport offset in pixels along the horizontal canvas.
+        offset: i32,
+        /// The total number of columns on that workspace’s canvas.
+        columns: usize,
+    },
 }
 
 #[cfg(test)]
@@ -161,6 +178,24 @@ mod tests {
         assert_eq!(
             wire,
             r#"{"type":"workspace_changed","monitor":0,"workspace":2}"#
+        );
+    }
+
+    /// Positive: `ViewportScrolled` serializes to the documented flat-tagged
+    /// wire shape — `monitor`, `workspace`, `offset`, and `columns` are
+    /// siblings of `type`.
+    #[test]
+    fn viewport_scrolled_serializes_to_wire_shape() {
+        let event = Event::ViewportScrolled {
+            monitor: 0,
+            workspace: 1,
+            offset: 1280,
+            columns: 4,
+        };
+        let wire = serde_json::to_string(&event).expect("serialize event");
+        assert_eq!(
+            wire,
+            r#"{"type":"viewport_scrolled","monitor":0,"workspace":1,"offset":1280,"columns":4}"#
         );
     }
 }
