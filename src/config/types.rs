@@ -173,8 +173,7 @@ pub struct FlowConfig {
 
 /// Loadout save/restore configuration.
 ///
-/// Controls the file path and staleness threshold used when saving or
-/// restoring workspace loadouts.
+/// Controls the file path used when saving or restoring workspace loadouts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LoadoutConfig {
@@ -184,18 +183,12 @@ pub struct LoadoutConfig {
     /// The daemon resolves this relative to the user's config directory
     /// (`%USERPROFILE%\.config\flow\`). Defaults to `"loadout.json"`.
     pub default_path: String,
-    /// Maximum age in seconds before a saved loadout is considered stale and
-    /// rejected by `flow loadout restore`.
-    ///
-    /// Defaults to `60` seconds. Set to `0` to disable staleness checks.
-    pub max_age_secs: u64,
 }
 
 impl Default for LoadoutConfig {
     fn default() -> Self {
         Self {
             default_path: "loadout.json".into(),
-            max_age_secs: 60,
         }
     }
 }
@@ -1072,21 +1065,19 @@ strategy = "original_slot"
     }
 
     /// Positive: `LoadoutConfig::default()` ships `default_path = "loadout.json"`
-    /// and `max_age_secs = 60` — the canonical values the daemon resolves
-    /// against when no `[loadout]` block is present in the user's `flow.toml`.
+    /// — the canonical value the daemon resolves against when no `[loadout]`
+    /// block is present in the user's `flow.toml`.
     ///
     /// The `default-config.toml` sync test catches drift only when the example
     /// file is also updated; this focused check guards the compiled `Default`
     /// impl independently, mirroring `focus_config_default_interval_is_250ms`
     /// and `border_config_default_overlap_is_one`. A regression to a different
     /// `default_path` would silently break save/restore (file written to one
-    /// name, read from another); a regression to `max_age_secs = 0` would
-    /// disable the staleness safety net for crashes/hard-kills.
+    /// name, read from another).
     #[test]
     fn loadout_config_default_values() {
         let default = LoadoutConfig::default();
         assert_eq!(default.default_path, "loadout.json");
-        assert_eq!(default.max_age_secs, 60);
     }
 
     // --- Integration: Full field preservation through round-trip ---
@@ -1137,7 +1128,6 @@ strategy = "original_slot"
             },
             loadout: LoadoutConfig {
                 default_path: "my-loadout.json".into(),
-                max_age_secs: 120,
             },
             check_for_updates: false,
         };
@@ -1175,7 +1165,6 @@ strategy = "original_slot"
         assert_eq!(parsed.drag.edge_scroll_initial_delay_ms, 350);
         assert_eq!(parsed.drag.edge_scroll_repeat_interval_ms, 200);
         assert_eq!(parsed.loadout.default_path, "my-loadout.json");
-        assert_eq!(parsed.loadout.max_age_secs, 120);
         assert!(!parsed.check_for_updates);
     }
 

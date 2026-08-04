@@ -22,8 +22,7 @@
 //!
 //! # Load algorithm (no-partial guarantee)
 //!
-//! 1. Parse the file; reject on a non-current `version`; reject on a stale
-//!    timestamp (unless `force`).
+//! 1. Parse the file; reject on a non-current `version`.
 //! 2. Collect the set of live managed windows' `HWND`s (skipping `Ignored`).
 //! 3. **Phase B (resolve, no mutation):** for each loadout slot, pop its
 //!    stored `HWND` from the live set. If any slot's `HWND` is not live →
@@ -41,7 +40,7 @@ use crate::ipc::message::SocketResponse;
 use crate::layout::types::{ActualLayout, AppliedLayout};
 use crate::loadout::{
     ColumnSnapshot, FloatingEntry, LoadoutFile, RectJson, RowSnapshot, ScrollingSnapshot,
-    WindowRef, WorkspaceSnapshot, is_stale,
+    WindowRef, WorkspaceSnapshot,
 };
 use crate::registry::hooks::set_float_hwnds;
 use crate::registry::types::{FloatingState, WindowState};
@@ -250,15 +249,12 @@ impl FlowWM {
     /// Load a saved loadout and apply it to live windows (IPC dispatch).
     ///
     /// Thin wrapper over [`Self::apply_loadout`] that maps the `Result` to a
-    /// [`SocketResponse`] for the IPC layer. `force: true` (manual
-    /// `flow loadout load`) ignores staleness; `force: false` honors
-    /// `config.loadout.max_age_secs`.
+    /// [`SocketResponse`] for the IPC layer.
     pub(super) fn dispatch_loadout_load(
         &mut self,
         path: Option<PathBuf>,
-        force: bool,
     ) -> SocketResponse {
-        match self.apply_loadout(path, force) {
+        match self.apply_loadout(path) {
             Ok(()) => SocketResponse::Ok,
             Err(e) => {
                 log::warn!("loadout load failed: {e}");
@@ -272,21 +268,20 @@ impl FlowWM {
     /// Called from the daemon's boot sequence (see `main::run`) right after
     /// [`FlowWM::new`](Self::new) finishes initializing the registry and
     /// layout, and before the IPC event loop starts. Runs the same code path
-    /// as `dispatch_loadout_load` with `force: false`, so the
-    /// `max_age_secs` staleness guard applies.
+    /// as `dispatch_loadout_load`.
     ///
-    /// Never blocks startup: a missing file (first run), a stale loadout
-    /// (post-crash), a parse failure, or an unmatched-window abort are all
-    /// logged and silently continue — the just-built init layout remains in
-    /// place. Performing restore here (rather than via an IPC round-trip
-    /// from the CLI) sidesteps the startup pipe race entirely.
+    /// Never blocks startup: a missing file (first run), an unmatched-window
+    /// abort, or a parse failure are all logged and silently continue — the
+    /// just-built init layout remains in place. Performing restore here
+    /// (rather than via an IPC round-trip from the CLI) sidesteps the startup
+    /// pipe race entirely.
     pub fn try_restore_loadout_default(&mut self) {
         let default = self.config_dir.join(&self.config.loadout.default_path);
         if !default.exists() {
             log::debug!("loadout restore: no loadout file at {default:?}, starting fresh");
             return;
         }
-        if let Err(e) = self.apply_loadout(Some(default), false) {
+        if let Err(e) = self.apply_loadout(Some(default)) {
             log::info!("loadout restore skipped: {e}");
         }
     }
@@ -301,9 +296,8 @@ impl FlowWM {
     ///
     /// Returns `Err(String)` if the file cannot be read, parsed, or if any
     /// loadout slot cannot be matched to a live window (whole load aborted,
-    /// zero state touched). A stale loadout (when `force` is false) is a
-    /// silent `Ok` skip, not an error.
-    fn apply_loadout(&mut self, path: Option<PathBuf>, force: bool) -> Result<(), String> {
+    /// zero state touched).
+    fn apply_loadout(&mut self, path: Option<PathBuf>) -> Result<(), String> {
         let resolved =
             path.unwrap_or_else(|| self.config_dir.join(&self.config.loadout.default_path));
 
@@ -324,16 +318,7 @@ impl FlowWM {
             ));
         }
 
-        // 3. Staleness guard (silent skip, NOT an error)
-        if !force && is_stale(&file.saved_at, self.config.loadout.max_age_secs) {
-            log::info!(
-                "loadout load: skipping stale loadout from {}",
-                file.saved_at
-            );
-            return Ok(());
-        }
-
-        // 4. Phase B: resolve every loadout slot's HWND against the live set
+        // 3. Phase B: resolve every loadout slot's HWND against the live set
         //    (NO mutation of daemon state). Collect live managed windows by
         //    HWND first (skip Ignored — they belong to no loadout), then pop
         //    each slot's stored HWND from that set. `HWND` is the sole identity
@@ -398,7 +383,7 @@ impl FlowWM {
             });
         }
 
-        // 5. Leftover tiling windows: live windows still in `live` (not claimed
+        // 4. Leftover tiling windows: live windows still in `live` (not claimed
         //    by any slot) that are in the Tiling state. These are appended as
         //    new columns on the active workspace below. Floating leftovers are
         //    handled per-workspace by `replace_all`; Ignored windows never
@@ -414,7 +399,7 @@ impl FlowWM {
             }
         }
 
-        // 6. Phase D: apply per-workspace
+        // 5. Phase D: apply per-workspace
         for rw in resolved_workspaces {
             let ws_id = WorkspaceId(rw.workspace_id);
             // Find which monitor owns this workspace, and get its index.
@@ -472,7 +457,7 @@ impl FlowWM {
             }
         }
 
-        // 7. Leftover tiling windows: append as columns on the active workspace
+        // 6. Leftover tiling windows: append as columns on the active workspace
         for wid in leftovers {
             let applied = self.active_scrolling_mut().add_window(wid);
             // Sync registry for the added window.
@@ -481,7 +466,7 @@ impl FlowWM {
             self.registry.update_tiled_rects(&applied.actual_layout);
         }
 
-        // 8. Resolve the seating target. Preferred: the workspace that holds
+        // 7. Resolve the seating target. Preferred: the workspace that holds
         //    the OS foreground window — read-only (`GetForegroundWindow`, never
         //    `SetForegroundWindow`), so seating it keeps the focused window
         //    on-screen by construction and avoids the startup foreground lock.
@@ -498,10 +483,10 @@ impl FlowWM {
             &file.workspaces,
         );
 
-        // 9. Make the target workspace the visible one. The apply above set
+        // 8. Make the target workspace the visible one. The apply above set
         //    every workspace's logical layout; this selects which one is on
         //    screen — the first half of a workspace switch, without its
-        //    teleport step (see step 11 for why the teleport is wrong here).
+        //    teleport step (see step 10 for why the teleport is wrong here).
         //    The target is always present on the active monitor in the
         //    single-monitor daemon; the guard keeps a missing target from
         //    panicking and leaves the freshly-applied layout visible.
@@ -519,7 +504,7 @@ impl FlowWM {
             return Ok(());
         }
 
-        // 10. Rebuild the TARGET workspace's float-tracking set so
+        // 9. Rebuild the TARGET workspace's float-tracking set so
         //     LOCATIONCHANGE forwarding and animator float-suppression reflect
         //     the loaded layout (mirrors switch_workspace_layout). Parked
         //     workspaces' floats are excluded — they are off-screen and must
@@ -535,7 +520,7 @@ impl FlowWM {
             .collect();
         set_float_hwnds(&target_floats);
 
-        // 11. Seat the full workspace stack in one animation: the target
+        // 10. Seat the full workspace stack in one animation: the target
         //     workspace settles at offset 0 (visible) and every other
         //     non-empty workspace animates to its parking offset. This is the
         //     core fix — previously only the active workspace animated, so the
@@ -566,7 +551,6 @@ impl FlowWM {
         let workspaces = self.snapshot_workspaces();
         let file = LoadoutFile {
             version: LoadoutFile::CURRENT_VERSION,
-            saved_at: chrono::Utc::now().to_rfc3339(),
             workspaces,
         };
         let json = serde_json::to_string_pretty(&file)
@@ -718,15 +702,6 @@ mod tests {
                 height: 0
             }
         );
-    }
-
-    // ── is_stale delegation ──────────────────────────────────────────
-
-    /// Positive: is_stale is callable from loadout module.
-    #[test]
-    fn is_stale_callable() {
-        let old = "2020-01-01T00:00:00Z";
-        assert!(is_stale(old, 60));
     }
 
     // ── saved_active_target: saved active-workspace flag ───────────────

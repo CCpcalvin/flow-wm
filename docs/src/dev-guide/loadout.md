@@ -48,8 +48,7 @@ versioned JSON document:
 
 ```json
 {
-  "version": 2,
-  "saved_at": "2026-07-29T12:00:00Z",
+  "version": 3,
   "workspaces": [
     {
       "workspace_id": 0,
@@ -70,11 +69,11 @@ versioned JSON document:
 }
 ```
 
-- `version` — `LoadoutFile::CURRENT_VERSION` (`2`). The writer always emits
-  this; the loader rejects any other value. A legacy pre-`HWND` file cannot be
-  migrated (`HWND` cannot be synthesized), so it is skipped with a logged
-  reason rather than silently misread.
-- `saved_at` — RFC3339 timestamp used by the staleness guard.
+- `version` — `LoadoutFile::CURRENT_VERSION` (`3`). The writer always emits
+  this; the loader rejects any other value. A legacy file (pre-`HWND`, or the
+  earlier v2 that carried a `saved_at` timestamp) cannot be migrated (`HWND`
+  cannot be synthesized), so it is skipped with a logged reason rather than
+  silently misread.
 - `workspaces` — one snapshot per workspace: its tiling columns/rows (each row
   a `WindowRef` + height), the viewport scroll offset, the focused window, and
   any floating windows with their screen rectangles.
@@ -98,7 +97,7 @@ sequenceDiagram
 
     U->>D: flow start
     D->>D: init — scan existing windows, fresh-tile them
-    D->>F: read loadout (auto-restore, honors max_age_secs)
+    D->>F: read loadout (auto-restore)
     alt every saved HWND is live
         D->>D: apply saved layout (set_layout + floats)
         D->>D: append leftover windows as columns
@@ -127,24 +126,25 @@ The load path (`FlowWM::apply_loadout`) is shared by auto-restore and manual
 `flow loadout load`, so both behave identically:
 
 1. Parse; reject on a non-current `version`.
-2. Staleness guard — a snapshot older than `max_age_secs` is a silent skip
-   (unless `force`). A future timestamp (clock skew) is treated as fresh so a
-   slightly-ahead clock does not silently drop the loadout.
-3. Collect live managed windows' `HWND`s (skip `Ignored`).
-4. **Resolve** every saved slot's `HWND` against that set — no daemon mutation.
+2. Collect live managed windows' `HWND`s (skip `Ignored`).
+3. **Resolve** every saved slot's `HWND` against that set — no daemon mutation.
    The first missing `HWND` aborts the whole load.
-5. **Apply** per-workspace: `set_layout` replaces the tiling canvas, floating
+4. **Apply** per-workspace: `set_layout` replaces the tiling canvas, floating
    windows are placed at their saved rectangles, and registry state is synced.
    Focus is restored by its saved `HWND` directly.
-6. **Leftover** windows — open now but not referenced by the loadout — are
+5. **Leftover** windows — open now but not referenced by the loadout — are
    appended as new columns on the active workspace, so no open window
    disappears.
+
+There is no staleness check: a loadout is restored whenever every saved `HWND`
+is live, and the no-partial abort handles the rest. See the Design Decisions
+record, "Drop the loadout staleness guard", for why a time-based guard was
+removed as redundant with no-partial.
 
 ### Opt-outs and overrides
 
 - `--no-restore` — skip auto-restore at startup, starting completely fresh.
-- `flow loadout load` — manual restore; always forces past the staleness guard
-  (`force: true`) because the user explicitly asked for the arrangement.
+- `flow loadout load` — manual restore (same code path as auto-restore).
 
 ## What the loadout is (and is not)
 

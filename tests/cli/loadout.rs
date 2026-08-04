@@ -367,15 +367,9 @@ fn loadout_aborts_when_a_saved_window_is_missing() {
         "W2 must be destroyed (absent from registry) before load"
     );
 
-    // Force-load must abort (W2's HWND missing) — no partial application.
-    let resp = send_ipc_retry(
-        &pipe,
-        &SocketMessage::LoadoutLoad {
-            path: None,
-            force: true,
-        },
-    )
-    .expect("LoadoutLoad IPC");
+    // Load must abort (W2's HWND missing) — no partial application.
+    let resp =
+        send_ipc_retry(&pipe, &SocketMessage::LoadoutLoad { path: None }).expect("LoadoutLoad IPC");
     match resp {
         SocketResponse::Error { message } => {
             assert!(

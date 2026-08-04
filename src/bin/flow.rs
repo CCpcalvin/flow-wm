@@ -79,8 +79,8 @@ enum Commands {
         /// Skip restoring the last saved loadout after the daemon starts.
         ///
         /// By default `flow start` asks the daemon to restore the most recent
-        /// loadout (if fresh — within `max_age_secs`). Pass `--no-restore` to
-        /// start with whatever windows are already on screen, untiled.
+        /// loadout. Pass `--no-restore` to start with whatever windows are
+        /// already on screen, untiled.
         #[arg(long)]
         no_restore: bool,
     },
@@ -618,9 +618,7 @@ fn cmd_update(check: bool) -> Result<(), String> {
 /// Dispatch a loadout subcommand.
 ///
 /// Routes [`LoadoutCommands::Save`] and [`LoadoutCommands::Load`] to the
-/// daemon via IPC. Manual `flow loadout load` always sends `force: true`
-/// (ignores the staleness guard) because the user explicitly requested the
-/// arrangement.
+/// daemon via IPC.
 fn cmd_loadout(command: LoadoutCommands) -> Result<(), String> {
     match command {
         LoadoutCommands::Save { path } => send_command(
@@ -629,17 +627,12 @@ fn cmd_loadout(command: LoadoutCommands) -> Result<(), String> {
             },
             "loadout saved",
         ),
-        LoadoutCommands::Load { path } => {
-            // Manual `flow loadout load` always forces (ignores staleness) —
-            // the user explicitly asked for this arrangement.
-            send_command(
-                SocketMessage::LoadoutLoad {
-                    path: path.map(std::path::PathBuf::from),
-                    force: true,
-                },
-                "loadout loaded",
-            )
-        }
+        LoadoutCommands::Load { path } => send_command(
+            SocketMessage::LoadoutLoad {
+                path: path.map(std::path::PathBuf::from),
+            },
+            "loadout loaded",
+        ),
     }
 }
 

@@ -153,9 +153,7 @@ impl FlowWM {
             SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
             SocketMessage::ForgetAllApps => unimplemented_command("forget_all_apps"),
             SocketMessage::LoadoutSave { path } => self.dispatch_loadout_save(path.clone()),
-            SocketMessage::LoadoutLoad { path, force } => {
-                self.dispatch_loadout_load(path.clone(), *force)
-            }
+            SocketMessage::LoadoutLoad { path } => self.dispatch_loadout_load(path.clone()),
 
             // --- Workspace ---
             //

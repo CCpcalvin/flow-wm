@@ -280,14 +280,9 @@ pub enum SocketMessage {
     /// Restore a previously saved loadout.
     ///
     /// `path: None` means the daemon should use the config-default path.
-    /// `force: true` ignores staleness checks (used by manual
-    /// `flow loadout load`). `force: false` honours `max_age_secs`
-    /// (used by auto-restore on `flow start`).
     LoadoutLoad {
         /// Source file path, or `None` for the config default.
         path: Option<PathBuf>,
-        /// When `true`, skip staleness / `max_age_secs` checks.
-        force: bool,
     },
 }
 
@@ -729,44 +724,14 @@ mod tests {
         assert_eq!(parsed, msg);
     }
 
-    // Positive: round-trip LoadoutLoad with force=false (auto-restore)
+    // Positive: round-trip LoadoutLoad
     #[test]
-    fn roundtrip_loadout_load_auto_restore() {
-        let msg = SocketMessage::LoadoutLoad {
-            path: None,
-            force: false,
-        };
+    fn roundtrip_loadout_load() {
+        let msg = SocketMessage::LoadoutLoad { path: None };
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"type":"loadout_load","path":null,"force":false}"#);
+        assert_eq!(json, r#"{"type":"loadout_load","path":null}"#);
         let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            SocketMessage::LoadoutLoad {
-                path: None,
-                force: false
-            }
-        );
-    }
-
-    // Positive: round-trip LoadoutLoad with force=true (manual load)
-    #[test]
-    fn roundtrip_loadout_load_force() {
-        let msg = SocketMessage::LoadoutLoad {
-            path: Some(PathBuf::from("C:\\temp\\loadout.json")),
-            force: true,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"force\":true"));
-        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, msg);
-    }
-
-    // Negative: LoadoutLoad missing required force field fails to deserialize
-    #[test]
-    fn decode_loadout_load_missing_force_returns_none() {
-        let line = r#"{"type":"loadout_load","path":null}"#;
-        let msg: Option<SocketMessage> = decode_message(line);
-        assert_eq!(msg, None, "missing force field should fail");
+        assert_eq!(parsed, SocketMessage::LoadoutLoad { path: None });
     }
 
     // Negative: unknown loadout type tag returns None
@@ -867,13 +832,9 @@ mod tests {
             SocketMessage::LoadoutSave {
                 path: Some(PathBuf::from("C:\\temp\\loadout.json")),
             },
-            SocketMessage::LoadoutLoad {
-                path: None,
-                force: false,
-            },
+            SocketMessage::LoadoutLoad { path: None },
             SocketMessage::LoadoutLoad {
                 path: Some(PathBuf::from("C:\\temp\\loadout.json")),
-                force: true,
             },
         ];
 
