@@ -180,6 +180,13 @@ impl FlowWM {
             // (ADR-0005). It is read-only with respect to window/layout state,
             // so it is never blocked by the tile-drag busy gate.
             SocketMessage::Subscribe { pipe_name } => self.dispatch_subscribe(pipe_name.clone()),
+
+            // --- Reachability ---
+            //
+            // `Ping` is a side-effect-free probe: the daemon replies `Ok`
+            // without touching any state. It exists so a subscriber's
+            // reconnect loop can poll for daemon relaunch cheaply (ADR-0005).
+            SocketMessage::Ping => SocketResponse::Ok,
         }
     }
 
