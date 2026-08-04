@@ -78,6 +78,20 @@ pub enum Event {
         /// The now-active workspace id.
         workspace: u32,
     },
+
+    /// The focused window changed.
+    ///
+    /// Carries the now-focused window so a subscriber can render the active
+    /// application without re-querying. See
+    /// (`docs/adr/0005-event-broadcast-named-pipe.md`).
+    FocusChanged {
+        /// The monitor the focus change occurred on.
+        monitor: usize,
+        /// The now-active workspace id.
+        workspace: u32,
+        /// The now-focused window.
+        window: WindowDescriptor,
+    },
 }
 
 #[cfg(test)]
@@ -162,5 +176,33 @@ mod tests {
             wire,
             r#"{"type":"workspace_changed","monitor":0,"workspace":2}"#
         );
+    }
+
+    /// Positive: `FocusChanged` serializes to the documented flat-tagged wire
+    /// shape — `monitor` and `workspace` are siblings of `type`, and `window`
+    /// is a nested `{ hwnd, title, exe, class }` object.
+    #[test]
+    fn focus_changed_serializes_to_wire_shape() {
+        let event = Event::FocusChanged {
+            monitor: 0,
+            workspace: 1,
+            window: super::WindowDescriptor {
+                hwnd: 0x000a_0c20,
+                title: "Terminal".into(),
+                exe: "WindowsTerminal.exe".into(),
+                class: "CascadiaTerminal".into(),
+            },
+        };
+        let wire = serde_json::to_string(&event).expect("serialize event");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&wire).expect("wire is valid JSON");
+
+        assert_eq!(parsed["type"], "focus_changed", "wire: {wire}");
+        assert_eq!(parsed["monitor"], 0);
+        assert_eq!(parsed["workspace"], 1);
+        assert_eq!(parsed["window"]["hwnd"], 0x000a_0c20);
+        assert_eq!(parsed["window"]["title"], "Terminal");
+        assert_eq!(parsed["window"]["exe"], "WindowsTerminal.exe");
+        assert_eq!(parsed["window"]["class"], "CascadiaTerminal");
     }
 }

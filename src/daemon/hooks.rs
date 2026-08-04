@@ -21,6 +21,7 @@
 //! [`mutations::next_available_window`] (same-column sibling first, then left, then right).
 
 use crate::common::WindowId;
+use crate::events::Event;
 use crate::registry::hooks::remove_float_hwnd;
 use crate::registry::types::{FloatingState, ReclassifyResult, VisibilityChange, WindowState};
 use crate::registry::win32 as registry_win32;
@@ -437,6 +438,18 @@ impl FlowWM {
             && prev != hwnd
         {
             self.refresh_border_for(prev);
+        }
+
+        // Announce the focus change to subscribers. Only tracked windows reach
+        // here — the `find_workspace_containing` gate above returns early for
+        // untracked HWNDs (taskbar, tray, dialogs) — so the descriptor is
+        // always `Some`. The workspace switch above has already settled, so
+        // `active_workspace_id()` is the focused window's home workspace.
+        if let Some(window) = self.window_descriptor(target) {
+            let monitor = self.active_monitor;
+            let workspace = self.active_monitor().active_workspace_id().0;
+            self.subscribers
+                .broadcast(&Event::FocusChanged { monitor, workspace, window });
         }
     }
 
