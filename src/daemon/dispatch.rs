@@ -14,6 +14,7 @@ use crate::config::dirs::{history_rules_path_in, user_app_config_path_in, user_r
 use crate::config::types::WindowAction;
 use crate::config::{load_app_config, load_rules_config};
 use crate::events::Event;
+use crate::events::TileState;
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
 use crate::layout::projection;
 use crate::layout::types::{ActualLayout, AppliedLayout};
@@ -1231,6 +1232,15 @@ impl FlowWM {
         //    same app is auto-classified. See `record_learned_transition` for
         //    the idempotent save + pipeline-refresh logic.
         if matches!(response, SocketResponse::Ok) {
+            // Announce the tile/float flip (`NoOp` produces no event — no
+            // transition occurred). The descriptor is built from `focused`
+            // before the mutable history call below borrows `self`.
+            if let Some(state) = action_to_tile_state(action)
+                && let Some(window) = self.window_descriptor(focused)
+            {
+                self.subscribers
+                    .broadcast(&Event::TileStateChanged { window, state });
+            }
             self.record_learned_transition(action, &exe, &class);
         }
 
@@ -1589,6 +1599,21 @@ const fn action_to_learned(action: SetWindowAction) -> Option<WindowAction> {
     match action {
         SetWindowAction::MakeFloating => Some(WindowAction::Float),
         SetWindowAction::MakeTiling => Some(WindowAction::Tile),
+        SetWindowAction::NoOp => None,
+    }
+}
+
+/// Map a resolved transition to the new tile/float state for the
+/// [`TileStateChanged`](crate::events::Event::TileStateChanged) event.
+///
+/// Returns `None` for [`SetWindowAction::NoOp`] — a no-op transition does not
+/// change the window’s state and must not be announced. A `const fn` mirror of
+/// [`action_to_learned`] so the mapping stays unit-testable without
+/// constructing the daemon.
+const fn action_to_tile_state(action: SetWindowAction) -> Option<TileState> {
+    match action {
+        SetWindowAction::MakeFloating => Some(TileState::Float),
+        SetWindowAction::MakeTiling => Some(TileState::Tile),
         SetWindowAction::NoOp => None,
     }
 }
