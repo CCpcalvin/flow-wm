@@ -8,8 +8,9 @@
 //! | Lifecycle | `start`, `stop`, `enable-autostart`, `disable-autostart` |
 //! | Loadout | `loadout save|load [path]` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
-//! | Query | `query all` |
+//! | Query | `query all` | `query state` |
 //! | Dispatch | `dispatch focus\|swap-column\|move-window\|merge-column\|promote\|expand-column\|shrink-column\|center\|close-window\|set-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
+//! | Events | `subscribe <pipe>` |
 //!
 //! See the developer guide's *IPC & Watchdog* chapter
 //! (`docs/src/dev-guide/ipc-and-watchdog.md`) for the full command reference.
@@ -113,6 +114,18 @@ enum Commands {
         #[command(subcommand)]
         command: DispatchCommands,
     },
+    /// Register a subscriber-owned named pipe to receive live daemon
+    /// [`Event`](flow_wm::events::Event)s (ADR-0005).
+    ///
+    /// The subscriber (e.g. a status bar) creates its own named pipe, then
+    /// runs `flow subscribe <pipe>` so the daemon opens it and pushes
+    /// newline-delimited JSON events to it, starting with one
+    /// `state_snapshot`. A bare name is prefixed with `\\.\\pipe\`.
+    Subscribe {
+        /// Subscriber pipe name — either a full path (`\\.\\pipe\\mybar`)
+        /// or a bare suffix (`mybar`) which is prefixed with `\\.\\pipe\`.
+        pipe_name: String,
+    },
     /// Create the login autostart shortcut in `shell:startup`.
     EnableAutostart {
         /// Bake `--ahk` into the shortcut's args so login also launches
@@ -170,6 +183,10 @@ enum ConfigCommands {
 enum QueryCommands {
     /// Dump all tracked windows with full debug info (state, rect, col/row, etc.).
     All,
+    /// Dump the full daemon state — the same payload pushed as the
+    /// `state_snapshot` event on subscribe (monitors, workspaces, focused
+    /// window).
+    State,
 }
 
 /// Dispatch subcommands — one per action category.
@@ -391,6 +408,7 @@ fn main() {
         Commands::Config { command } => cmd_config(command),
         Commands::Query { command } => cmd_query(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
+        Commands::Subscribe { pipe_name } => cmd_subscribe(pipe_name),
         Commands::EnableAutostart { ahk } => cmd_enable_autostart(ahk),
         Commands::DisableAutostart => cmd_disable_autostart(),
         Commands::Update { check } => cmd_update(check),
@@ -768,9 +786,9 @@ fn cmd_config_check() -> Result<(), String> {
 fn cmd_query(command: QueryCommands) -> Result<(), String> {
     match command {
         QueryCommands::All => cmd_query_all(),
+        QueryCommands::State => cmd_query_state(),
     }
 }
-
 /// Dump all tracked windows from the daemon as pretty-printed JSON.
 fn cmd_query_all() -> Result<(), String> {
     let response = transport::send_message(&SocketMessage::QueryWindowsAll)
@@ -789,6 +807,61 @@ fn cmd_query_all() -> Result<(), String> {
             Ok(())
         }
         SocketResponse::Busy => Err("daemon is busy (drag in progress), retry shortly".to_string()),
+    }
+}
+
+/// Dump the full daemon state as pretty-printed JSON.
+///
+/// Sends [`SocketMessage::QueryState`] — the same payload the daemon pushes
+/// as the `state_snapshot` event on subscribe.
+fn cmd_query_state() -> Result<(), String> {
+    let response = transport::send_message(&SocketMessage::QueryState)
+        .map_err(|e| format!("failed to send command: {e}"))?;
+
+    match response {
+        SocketResponse::Data { payload } => {
+            let formatted =
+                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+            println!("{formatted}");
+            Ok(())
+        }
+        SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+        SocketResponse::Ok => {
+            println!("flow: ok");
+            Ok(())
+        }
+        SocketResponse::Busy => Err("daemon is busy (drag in progress), retry shortly".to_string()),
+    }
+}
+
+/// Register a subscriber-owned named pipe for event broadcasting.
+///
+/// Sends [`SocketMessage::Subscribe`]. The subscriber must have already
+/// created its pipe (server side) so the daemon can open it; see
+/// [`normalize_subscriber_pipe_name`] for how a bare name is turned into a
+/// full pipe path.
+fn cmd_subscribe(pipe_name: String) -> Result<(), String> {
+    let normalized = normalize_subscriber_pipe_name(&pipe_name);
+    send_command(
+        SocketMessage::Subscribe {
+            pipe_name: normalized.clone(),
+        },
+        &format!("subscribed to {normalized}"),
+    )
+}
+
+/// Turn a user-supplied subscriber pipe name into a full pipe path.
+///
+/// A bare name with no backslashes (`mybar`) is prefixed with `\\.\\pipe\`.
+/// Anything that already contains a backslash is passed through verbatim
+/// (assumed to be a full path) so callers can use non-default locations.
+fn normalize_subscriber_pipe_name(name: &str) -> String {
+    /// The Win32 named-pipe device prefix.
+    const PIPE_PREFIX: &str = r"\\.\\pipe\\";
+    if name.contains('\\') {
+        name.to_owned()
+    } else {
+        format!("{PIPE_PREFIX}{name}")
     }
 }
 
@@ -1328,6 +1401,35 @@ mod tests {
             result.is_err(),
             "'flow loadout bogus' with unknown subcommand should fail"
         );
+    }
+
+    // --- Subscribe / query state parsing ---
+
+    #[test]
+    fn parse_subscribe_bare_name() {
+        // Positive: `flow subscribe mybar` parses with the bare name verbatim.
+        let cli = Cli::try_parse_from(["flow", "subscribe", "mybar"]).unwrap();
+        match cli.command {
+            Commands::Subscribe { pipe_name } => assert_eq!(pipe_name, "mybar"),
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_bare_name_prefixes_pipe_device() {
+        // Positive: a bare name is prefixed with the Win32 pipe device path.
+        assert_eq!(
+            normalize_subscriber_pipe_name("mybar"),
+            r"\\.\\pipe\\mybar"
+        );
+    }
+
+    #[test]
+    fn normalize_full_path_passes_through() {
+        // Positive: a name that already contains a backslash is treated as a
+        // full path and passed through unchanged.
+        let full = r"\\.\\pipe\\flow-bar";
+        assert_eq!(normalize_subscriber_pipe_name(full), full);
     }
 
     #[test]

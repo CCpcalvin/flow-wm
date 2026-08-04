@@ -13,6 +13,7 @@ use crate::common::{Direction, Rect, Size, WindowId};
 use crate::config::dirs::{history_rules_path_in, user_app_config_path_in, user_rules_path_in};
 use crate::config::types::WindowAction;
 use crate::config::{load_app_config, load_rules_config};
+use crate::events::Event;
 use crate::ipc::message::{SocketMessage, SocketResponse, WindowMode};
 use crate::layout::projection;
 use crate::layout::types::{ActualLayout, AppliedLayout};
@@ -144,7 +145,7 @@ impl FlowWM {
             SocketMessage::QueryWindowsAll => self.query_windows_all(),
             SocketMessage::QueryLayoutVirtual => self.query_layout_virtual(),
             SocketMessage::QueryLayoutActual => self.query_layout_actual(),
-            SocketMessage::QueryState => unimplemented_command("query_state"),
+            SocketMessage::QueryState => self.query_state(),
 
             // --- Config mutation ---
             SocketMessage::ReloadConfig => self.dispatch_reload_config(),
@@ -170,6 +171,44 @@ impl FlowWM {
             SocketMessage::MoveWindowToWorkspace { workspace_id } => {
                 self.dispatch_move_window_to_workspace(*workspace_id)
             }
+
+            // --- Events ---
+            //
+            // `Subscribe` registers a subscriber-owned named pipe and pushes
+            // the initial `StateSnapshot`. The command pipe stays one-shot;
+            // event delivery happens over the subscriber’s own pipe
+            // (ADR-0005). It is read-only with respect to window/layout state,
+            // so it is never blocked by the tile-drag busy gate.
+            SocketMessage::Subscribe { pipe_name } => self.dispatch_subscribe(pipe_name.clone()),
+        }
+    }
+
+    /// Register a subscriber-owned named pipe and push the initial snapshot.
+    ///
+    /// Opens `\\.\\pipe\\<pipe_name>` as a handle on the main thread, then
+    /// immediately broadcasts a [`StateSnapshot`](Event::StateSnapshot) to it
+    /// (so the subscriber can first-paint with no separate query) before
+    /// acking. The snapshot is pushed *before* the `Ok` ack, so by the time
+    /// the `Subscribe` round trip returns the first event line is already on
+    /// the subscriber’s pipe.
+    ///
+    /// A failure to open the pipe surfaces an error. A failure to write the
+    /// snapshot evicts the just-registered subscriber silently (broken/closed
+    /// pipe) and still acks `Ok` — the subscription was registered; the
+    /// subscriber simply was not ready, and eviction is the documented
+    /// response to any write error.
+    fn dispatch_subscribe(&mut self, pipe_name: String) -> SocketResponse {
+        match self.subscribers.add(&pipe_name) {
+            Ok(()) => {
+                let snapshot = Event::StateSnapshot {
+                    state: self.daemon_state_value(),
+                };
+                self.subscribers.broadcast(&snapshot);
+                SocketResponse::Ok
+            }
+            Err(e) => SocketResponse::Error {
+                message: format!("failed to subscribe: {e}"),
+            },
         }
     }
 

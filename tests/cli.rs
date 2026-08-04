@@ -29,6 +29,9 @@ mod dispatch_swap;
 #[path = "cli/dispatch_workspace.rs"]
 mod dispatch_workspace;
 #[cfg(debug_assertions)]
+#[path = "cli/events_subscribe.rs"]
+mod events_subscribe;
+#[cfg(debug_assertions)]
 #[path = "cli/loadout.rs"]
 mod loadout;
 #[cfg(debug_assertions)]

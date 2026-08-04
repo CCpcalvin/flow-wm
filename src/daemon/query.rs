@@ -5,6 +5,7 @@
 //! with JSON data.
 
 use crate::ipc::message::SocketResponse;
+use windows::Win32::Foundation::HWND;
 
 use super::types::FlowWM;
 
@@ -83,6 +84,71 @@ impl FlowWM {
                 "entries": entries_json,
             }),
         }
+    }
+
+    /// Return full daemon state as JSON — the `QueryState` payload.
+    ///
+    /// This is the single state-shaping function shared by the `flow query
+    /// state` pull and the `state_snapshot` event push (ADR-0005: “one
+    /// serializer, two callers”). It reports the active monitor, every
+    /// monitor’s workspace stack (id, viewport offset, column / window
+    /// counts), and the focused window descriptor — enough for a status bar
+    /// to first-paint without any further query.
+    pub(super) fn query_state(&self) -> SocketResponse {
+        SocketResponse::Data {
+            payload: self.daemon_state_value(),
+        }
+    }
+
+    /// Build the full daemon-state payload shared by `QueryState` and
+    /// `StateSnapshot`.
+    ///
+    /// Kept separate from [`query_state`](Self::query_state) so the subscribe
+    /// path can push the same bytes without wrapping them in a
+    /// [`SocketResponse`].
+    pub(super) fn daemon_state_value(&self) -> serde_json::Value {
+        let focused_window = self.registry.focused().and_then(|id| {
+            self.registry.get_window(HWND(id.0 as *mut _)).map(|w| {
+                serde_json::json!({
+                    "hwnd": w.hwnd.0 as isize,
+                    "title": w.title,
+                    "exe": w.exe,
+                    "class": w.class,
+                })
+            })
+        });
+
+        let monitors_json: Vec<serde_json::Value> = self
+            .monitors
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| {
+                let workspaces_json: Vec<serde_json::Value> = monitor
+                    .workspaces()
+                    .iter()
+                    .map(|ws| {
+                        let vl = ws.scrolling.virtual_layout();
+                        serde_json::json!({
+                            "id": ws.id.0,
+                            "viewport_offset": vl.viewport_offset,
+                            "column_count": vl.columns.len(),
+                            "window_count": vl.window_count(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "index": index,
+                    "active_workspace": monitor.active_workspace_id().0,
+                    "workspaces": workspaces_json,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "active_monitor": self.active_monitor,
+            "monitors": monitors_json,
+            "focused_window": focused_window,
+        })
     }
 }
 

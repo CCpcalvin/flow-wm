@@ -41,6 +41,7 @@ pub mod borders;
 pub mod common;
 pub mod config;
 pub mod daemon;
+pub mod events;
 pub mod ipc;
 pub mod layout;
 pub mod loadout;

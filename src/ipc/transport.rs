@@ -502,7 +502,12 @@ unsafe fn await_overlapped(
 /// Loops until every byte is written, each chunk awaited via
 /// [`await_overlapped`]. Returns `TimedOut` if the deadline passes before the
 /// write completes.
-fn write_all_overlapped(handle: HANDLE, data: &[u8], deadline: Instant) -> io::Result<()> {
+///
+/// Shared with the event-broadcast subscriber writer
+/// ([`crate::daemon::subscribers`]) so a write to a blocked or full subscriber
+/// pipe surfaces a `TimedOut` error instead of blocking the main thread
+/// forever — the basis of write-error eviction.
+pub(crate) fn write_all_overlapped(handle: HANDLE, data: &[u8], deadline: Instant) -> io::Result<()> {
     let event = EventHandle::new()?;
     let mut total = 0usize;
 

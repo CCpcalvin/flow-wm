@@ -211,6 +211,15 @@ pub struct FlowWM {
     /// focus — closing the gap when `EVENT_SYSTEM_FOREGROUND` is dropped under
     /// rapid window churn. (`docs/src/dev-guide/event-pipelines.md`)
     pub(super) last_foreground_sync: std::time::Instant,
+
+    /// Registered event subscribers — named pipes the daemon writes
+    /// [`Event`](crate::events::Event)s to (ADR-0005).
+    ///
+    /// Owned on the main thread alongside every other field; event emission
+    /// is one more outbound write per state change, with no new concurrency
+    /// and no `Arc<Mutex>`. Any write error silently evicts the offending
+    /// subscriber (see [`subscribers`](super::subscribers)).
+    pub(super) subscribers: super::subscribers::SubscriberManager,
 }
 
 impl FlowWM {

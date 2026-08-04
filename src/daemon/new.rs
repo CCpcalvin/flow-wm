@@ -38,6 +38,7 @@ use windows::Win32::Foundation::HWND;
 
 use super::animation::animate_layout_raw;
 use super::config_derive;
+use super::subscribers::SubscriberManager;
 use super::types::FlowWM;
 
 impl FlowWM {
@@ -275,6 +276,7 @@ impl FlowWM {
             float_resume_deadline: None,
             drag_state: None,
             last_foreground_sync: std::time::Instant::now(),
+            subscribers: SubscriberManager::new(),
         };
         // Adopt pre-existing float-classified windows (found during the init
         // scan) into workspace 1's FloatingSpace, at their current on-screen
@@ -377,6 +379,7 @@ impl FlowWM {
             float_resume_deadline: None,
             drag_state: None,
             last_foreground_sync: std::time::Instant::now(),
+            subscribers: SubscriberManager::new(),
         }
     }
 }

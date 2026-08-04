@@ -289,6 +289,25 @@ pub enum SocketMessage {
         /// When `true`, skip staleness / `max_age_secs` checks.
         force: bool,
     },
+
+    // --- Events ---
+    //
+    // Event publishing is additive: the command pipe stays one-shot and
+    // sequential, and the daemon pushes newline-delimited JSON
+    // [`Event`](crate::events::Event)s over each subscriber’s own pipe
+    // (ADR-0005). `Subscribe` is the only command-pipe surface for it.
+    /// Register a subscriber-owned named pipe for event broadcasting.
+    ///
+    /// The subscriber creates `\\.\\pipe\\<pipe_name>` and sends this
+    /// message; the daemon opens that pipe on the main thread and pushes
+    /// newline-delimited JSON [`Event`](crate::events::Event)s to it,
+    /// starting with one `state_snapshot` immediately. Any later write error
+    /// silently evicts the subscriber. See ADR-0005
+    /// (`docs/adr/0005-event-broadcast-named-pipe.md`).
+    Subscribe {
+        /// Full path of the subscriber’s named pipe (e.g. `\\.\\pipe\\flow-bar`).
+        pipe_name: String,
+    },
 }
 
 impl SocketMessage {
@@ -761,6 +780,22 @@ mod tests {
         assert_eq!(parsed, msg);
     }
 
+    // Positive: round-trip Subscribe (event-broadcast registration)
+    #[test]
+    fn roundtrip_subscribe() {
+        let msg = SocketMessage::Subscribe {
+            pipe_name: r"\\.\\pipe\\flow-bar".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe","pipe_name":"\\\\.\\\\pipe\\\\flow-bar"}"#
+        );
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
     // Negative: LoadoutLoad missing required force field fails to deserialize
     #[test]
     fn decode_loadout_load_missing_force_returns_none() {
@@ -874,6 +909,9 @@ mod tests {
             SocketMessage::LoadoutLoad {
                 path: Some(PathBuf::from("C:\\temp\\loadout.json")),
                 force: true,
+            },
+            SocketMessage::Subscribe {
+                pipe_name: r"\\.\\pipe\\flow-bar".to_string(),
             },
         ];
 
@@ -1095,6 +1133,10 @@ mod tests {
             SocketMessage::ForgetAllApps,
             // Z-order only (no layout mutation)
             SocketMessage::PlaceAbove,
+            // Events (registers a subscriber pipe; no window/layout mutation)
+            SocketMessage::Subscribe {
+                pipe_name: r"\\.\\pipe\\flow-bar".to_string(),
+            },
         ];
 
         for msg in &read_only {

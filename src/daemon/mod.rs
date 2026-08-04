@@ -37,6 +37,8 @@
 //! - [`config_derive`] — configuration derivation helpers and tests
 //! - [`shutdown`] — graceful-shutdown window rescue
 //!   ([`FlowWM::rescue_stranded_windows`])
+//! - [`subscribers`] — subscriber-owned-pipe event delivery
+//!   ([`Event`](crate::events::Event) broadcast; ADR-0005)
 //!
 //! The threading model, the hook/IPC event pipelines, and per-event behavior
 //! tables are documented with sequence diagrams in the developer guide
@@ -55,6 +57,7 @@ mod new;
 mod query;
 mod run;
 mod shutdown;
+mod subscribers;
 mod types;
 
 pub use types::FlowWM;
