@@ -108,16 +108,14 @@ impl FlowWM {
     /// path can push the same bytes without wrapping them in a
     /// [`SocketResponse`].
     pub(super) fn daemon_state_value(&self) -> serde_json::Value {
-        let focused_window = self.registry.focused().and_then(|id| {
-            self.window_descriptor(id).map(|w| {
-                serde_json::json!({
-                    "hwnd": w.hwnd,
-                    "title": w.title,
-                    "exe": w.exe,
-                    "class": w.class,
-                })
-            })
-        });
+        // Serialize the shared `WindowDescriptor` rather than rebuilding the
+        // `{hwnd,title,exe,class}` object by hand — one shape for the focused
+        // window here and for every event variant that carries a window.
+        let focused_window = self
+            .registry
+            .focused()
+            .and_then(|id| self.window_descriptor(id))
+            .and_then(|w| serde_json::to_value(&w).ok());
 
         let monitors_json: Vec<serde_json::Value> = self
             .monitors
