@@ -48,6 +48,19 @@ pub enum Event {
         #[serde(flatten)]
         state: serde_json::Value,
     },
+
+    /// The active (visible) workspace on a monitor changed.
+    ///
+    /// Fires on every active-workspace switch regardless of cause — a direct
+    /// `switch-workspace`, or the camera-follow step of a `move-to-workspace`
+    /// — so a subscriber tracking only the current workspace never misses a
+    /// switch. See (`docs/adr/0005-event-broadcast-named-pipe.md`).
+    WorkspaceChanged {
+        /// The monitor the switch occurred on (index into the monitor stack).
+        monitor: usize,
+        /// The now-active workspace id.
+        workspace: u32,
+    },
 }
 
 #[cfg(test)]
@@ -117,5 +130,20 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&wire).expect("valid JSON");
         assert_eq!(parsed["type"], "state_snapshot");
         assert_eq!(parsed["monitors"][0]["active_workspace"], 1);
+    }
+
+    /// Positive: `WorkspaceChanged` serializes to the documented flat-tagged
+    /// wire shape — `monitor` and `workspace` are siblings of `type`.
+    #[test]
+    fn workspace_changed_serializes_to_wire_shape() {
+        let event = Event::WorkspaceChanged {
+            monitor: 0,
+            workspace: 2,
+        };
+        let wire = serde_json::to_string(&event).expect("serialize event");
+        assert_eq!(
+            wire,
+            r#"{"type":"workspace_changed","monitor":0,"workspace":2}"#
+        );
     }
 }
