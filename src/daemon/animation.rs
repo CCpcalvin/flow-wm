@@ -107,10 +107,10 @@ impl FlowWM {
         // When on_drag_end calls animate_layout, drag_state has already been
         // take()n so the filter does not trigger — the dragged window animates
         // to its final position as intended.
-        let excluded_id = self.drag_state.as_ref().map(|ds| ds.dragged_id);
+        let excluded_id = self.drag_state.as_ref().map(|ds| ds.dragged_id());
         let excluded_border_hwnd = self.drag_state.as_ref().and_then(|ds| {
             self.registry
-                .get_window(HWND(ds.dragged_hwnd as *mut _))
+                .get_window(HWND(ds.dragged_hwnd() as *mut _))
                 .and_then(|w| w.border.as_ref())
                 .map(|b| b.hwnd())
         });
@@ -405,6 +405,71 @@ impl FlowWM {
                         height: entry.rect.height,
                     });
                 }
+            }
+        }
+    }
+
+    /// Non-committing teleport preview for a resize drag.
+    ///
+    /// During a column drag-resize, [`on_resize_move`](super::drag::FlowWM::on_resize_move)
+    /// calls this to relocate the *bystander* tiled windows to their boundary-move
+    /// targets instantly (direct `SetWindowPos`, bypassing the animator) so the
+    /// moving boundary stays fused to the cursor. It is **non-committing**:
+    /// neither the registry nor
+    /// [`ScrollingSpace`](crate::workspace::ScrollingSpace) is touched — the
+    /// committed layout stays frozen for the drag, and the sole commit is
+    /// [`on_resize_end`](super::drag::FlowWM::on_resize_end) on release.
+    ///
+    /// The dragged window is omitted from the target list by the active-drag
+    /// exclusion filter (Win32 owns its geometry during the native move-size,
+    /// so its width already tracks the cursor, overshoot and all). This mirrors
+    /// [`teleport_workspaces`](Self::teleport_workspaces) but operates on a
+    /// single active-workspace [`AppliedLayout`] and honors the drag-exclusion
+    /// filter — the resize analog of [`animate_preview`](Self::animate_preview),
+    /// except it bypasses the animator (Teleport, not animation) per ADR-0004.
+    pub(super) fn teleport_preview(&self, preview: &AppliedLayout) {
+        let border_thickness = self.config.borders.thickness as i32;
+        let border_overlap = self.config.borders.overlap as i32;
+
+        // Active-drag exclusion filter — same intent as submit_animation's, so
+        // the animator-free teleport also leaves the dragged window alone.
+        let excluded_id = self.drag_state.as_ref().map(|ds| ds.dragged_id());
+        let excluded_border_hwnd = self.drag_state.as_ref().and_then(|ds| {
+            self.registry
+                .get_window(HWND(ds.dragged_hwnd() as *mut _))
+                .and_then(|w| w.border.as_ref())
+                .map(|b| b.hwnd())
+        });
+
+        for entry in &preview.actual_layout.entries {
+            if Some(entry.window_id) == excluded_id {
+                continue;
+            }
+            let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+            let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+            let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
+            if let Some(eb) = excluded_border_hwnd
+                && border_hwnd == Some(eb)
+            {
+                continue;
+            }
+
+            let window_rect = invisible_bounds
+                .visible_to_window(entry.rect)
+                .inset(border_thickness - border_overlap);
+            // Direct SetWindowPos — bypass the animator entirely so the boundary
+            // follows the cursor with no tween lag.
+            let _ = crate::registry::win32::set_window_rect(
+                entry.window_id.0,
+                window_rect.x,
+                window_rect.y,
+                window_rect.width,
+                window_rect.height,
+            );
+
+            // Teleport the border overlay to match (option<&Window> is Copy).
+            if let Some(border) = window.and_then(|w| w.border.as_ref()) {
+                border.set_geometry(entry.rect);
             }
         }
     }

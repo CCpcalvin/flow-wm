@@ -358,6 +358,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 200,
             max_n: 1,
