@@ -308,6 +308,15 @@ pub enum SocketMessage {
         /// Full path of the subscriber’s named pipe (e.g. `\\.\\pipe\\flow-bar`).
         pipe_name: String,
     },
+
+    /// Side-effect-free daemon reachability probe.
+    ///
+    /// A subscriber's reconnect loop sends this to check whether `flowd` is
+    /// up without registering a subscriber or mutating any state. The daemon
+    /// always replies [`SocketResponse::Ok`]; a connection failure (daemon
+    /// not running) surfaces as an error to the caller. See ADR-0005
+    /// (`docs/adr/0005-event-broadcast-named-pipe.md`).
+    Ping,
 }
 
 impl SocketMessage {
@@ -580,6 +589,7 @@ mod tests {
             SocketMessage::QueryLayoutActual,
             SocketMessage::QueryState,
             SocketMessage::ForgetAllApps,
+            SocketMessage::Ping,
         ];
 
         for msg in &variants {
@@ -796,6 +806,17 @@ mod tests {
         assert_eq!(parsed, msg);
     }
 
+    // Positive: round-trip Ping (side-effect-free reachability probe)
+    #[test]
+    fn roundtrip_ping() {
+        let msg = SocketMessage::Ping;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"ping"}"#);
+
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
     // Negative: LoadoutLoad missing required force field fails to deserialize
     #[test]
     fn decode_loadout_load_missing_force_returns_none() {
@@ -913,6 +934,7 @@ mod tests {
             SocketMessage::Subscribe {
                 pipe_name: r"\\.\\pipe\\flow-bar".to_string(),
             },
+            SocketMessage::Ping,
         ];
 
         for msg in &all_variants {
@@ -1137,6 +1159,8 @@ mod tests {
             SocketMessage::Subscribe {
                 pipe_name: r"\\.\\pipe\\flow-bar".to_string(),
             },
+            // Side-effect-free reachability probe (no state mutation)
+            SocketMessage::Ping,
         ];
 
         for msg in &read_only {

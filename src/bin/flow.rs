@@ -126,6 +126,12 @@ enum Commands {
         /// or a bare suffix (`mybar`) which is prefixed with `\\.\\pipe\`.
         pipe_name: String,
     },
+    /// Probe whether the daemon is reachable, without side effects.
+    ///
+    /// Sends a `Ping`; prints `daemon reachable` and exits 0 while `flowd`
+    /// is running, or fails when it is not. Intended for a subscriber's
+    /// reconnect loop (ADR-0005).
+    Ping,
     /// Create the login autostart shortcut in `shell:startup`.
     EnableAutostart {
         /// Bake `--ahk` into the shortcut's args so login also launches
@@ -409,6 +415,7 @@ fn main() {
         Commands::Query { command } => cmd_query(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
         Commands::Subscribe { pipe_name } => cmd_subscribe(pipe_name),
+        Commands::Ping => cmd_ping(),
         Commands::EnableAutostart { ahk } => cmd_enable_autostart(ahk),
         Commands::DisableAutostart => cmd_disable_autostart(),
         Commands::Update { check } => cmd_update(check),
@@ -862,6 +869,29 @@ fn normalize_subscriber_pipe_name(name: &str) -> String {
         name.to_owned()
     } else {
         format!("{PIPE_PREFIX}{name}")
+    }
+}
+
+/// Probe whether the daemon is reachable, without side effects.
+///
+/// Sends [`SocketMessage::Ping`]. On `Ok` the daemon is up; a connection
+/// failure means it is not. A subscriber's reconnect loop can poll this
+/// cheaply without registering a subscriber (ADR-0005).
+///
+/// # Errors
+///
+/// Returns an error string when the daemon is not running (so [`main`] exits
+/// non-zero) or when it returns an unexpected response.
+fn cmd_ping() -> Result<(), String> {
+    match transport::send_message(&SocketMessage::Ping) {
+        Ok(SocketResponse::Ok) => {
+            println!("flow: daemon reachable");
+            Ok(())
+        }
+        // The daemon should always reply `Ok` to Ping; any other successful
+        // response is unexpected and surfaced as an error.
+        Ok(other) => Err(format!("unexpected response to ping: {other:?}")),
+        Err(e) => Err(format!("daemon unreachable: {e}")),
     }
 }
 
@@ -1430,6 +1460,13 @@ mod tests {
         // full path and passed through unchanged.
         let full = r"\\.\\pipe\\flow-bar";
         assert_eq!(normalize_subscriber_pipe_name(full), full);
+    }
+
+    #[test]
+    fn parse_ping() {
+        // Positive: `flow ping` parses as the Ping command.
+        let cli = Cli::try_parse_from(["flow", "ping"]).unwrap();
+        assert!(matches!(cli.command, Commands::Ping));
     }
 
     #[test]
