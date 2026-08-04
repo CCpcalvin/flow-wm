@@ -78,6 +78,16 @@ pub enum Event {
         /// The now-active workspace id.
         workspace: u32,
     },
+
+    /// The daemon is shutting down gracefully.
+    ///
+    /// Pushed to every subscriber immediately before teardown, so a bar can
+    /// render a “disconnected” state instead of freezing on a stale last
+    /// frame. After this line the daemon closes the subscriber pipes, so the
+    /// subscriber’s read returns EOF. A crash gives no such event — the
+    /// subscriber detects it via EOF and follows the same reconnect path
+    /// (ADR-0005).
+    ApplicationExiting,
 }
 
 #[cfg(test)]
@@ -162,5 +172,13 @@ mod tests {
             wire,
             r#"{"type":"workspace_changed","monitor":0,"workspace":2}"#
         );
+    }
+
+    /// Positive: `ApplicationExiting` is a unit variant — it serializes to
+    /// just the flat `type` tag, with no payload keys.
+    #[test]
+    fn application_exiting_serializes_to_type_only() {
+        let wire = serde_json::to_string(&Event::ApplicationExiting).expect("serialize event");
+        assert_eq!(wire, r#"{"type":"application_exiting"}"#);
     }
 }

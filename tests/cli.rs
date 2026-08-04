@@ -32,6 +32,9 @@ mod dispatch_workspace;
 #[path = "cli/events_subscribe.rs"]
 mod events_subscribe;
 #[cfg(debug_assertions)]
+#[path = "cli/events_application_exiting.rs"]
+mod events_application_exiting;
+#[cfg(debug_assertions)]
 #[path = "cli/events_workspace_changed.rs"]
 mod events_workspace_changed;
 #[cfg(debug_assertions)]
