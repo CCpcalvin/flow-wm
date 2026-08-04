@@ -1133,6 +1133,19 @@ impl FlowWM {
             };
         }
 
+        // Announce the relocation detail. `WorkspaceChanged` already fired
+        // inside `switch_active_workspace` (the camera followed the moved
+        // window); this is the complementary contents-mutation event carrying
+        // the moved window and its from/to workspace ids (ADR-0005). `active_id`
+        // still holds the source (captured before the switch).
+        if let Some(window) = self.window_descriptor(focused) {
+            self.subscribers.broadcast(&Event::WindowMovedToWorkspace {
+                window,
+                from: active_id.0,
+                to: dest_id.0,
+            });
+        }
+
         SocketResponse::Ok
     }
 

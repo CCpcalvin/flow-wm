@@ -78,6 +78,22 @@ pub enum Event {
         /// The now-active workspace id.
         workspace: u32,
     },
+
+    /// A window was relocated from one workspace to another.
+    ///
+    /// Carries the moved window and its `from`/`to` workspace ids. Emitted
+    /// alongside [`WorkspaceChanged`](Self::WorkspaceChanged) by
+    /// `move-to-workspace`, because that command performs both a contents
+    /// mutation (the window moves) and a switch (the camera follows it). See
+    /// (`docs/adr/0005-event-broadcast-named-pipe.md`).
+    WindowMovedToWorkspace {
+        /// The window that was moved.
+        window: WindowDescriptor,
+        /// The source workspace id (where the window came from).
+        from: u32,
+        /// The destination workspace id (where the window now lives).
+        to: u32,
+    },
 }
 
 #[cfg(test)]
@@ -162,5 +178,32 @@ mod tests {
             wire,
             r#"{"type":"workspace_changed","monitor":0,"workspace":2}"#
         );
+    }
+
+    /// Positive: `WindowMovedToWorkspace` serializes to the documented
+    /// flat-tagged wire shape — `window` is a nested object, `from`/`to` are
+    /// siblings of `type`.
+    #[test]
+    fn window_moved_to_workspace_serializes_to_wire_shape() {
+        let event = Event::WindowMovedToWorkspace {
+            window: super::WindowDescriptor {
+                hwnd: 123,
+                title: "Notes".to_string(),
+                exe: "notepad.exe".to_string(),
+                class: "Notepad".to_string(),
+            },
+            from: 1,
+            to: 4,
+        };
+        let wire = serde_json::to_string(&event).expect("serialize event");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&wire).expect("wire is valid JSON");
+        assert_eq!(parsed["type"], "window_moved_to_workspace");
+        assert_eq!(parsed["from"], 1);
+        assert_eq!(parsed["to"], 4);
+        assert_eq!(parsed["window"]["hwnd"], 123);
+        assert_eq!(parsed["window"]["title"], "Notes");
+        assert_eq!(parsed["window"]["exe"], "notepad.exe");
+        assert_eq!(parsed["window"]["class"], "Notepad");
     }
 }
