@@ -125,6 +125,29 @@ pub enum Event {
         /// The total number of columns on that workspace’s canvas.
         columns: usize,
     },
+
+    /// A window’s tile/float decision flipped.
+    ///
+    /// Emitted on a successful `set-window`/`toggle-float` transition, with
+    /// the window’s descriptor and its *new* state. See (`docs/adr/0005-event-broadcast-named-pipe.md`).
+    TileStateChanged {
+        /// The window whose state changed.
+        window: WindowDescriptor,
+        /// The window’s new tile/float state.
+        state: TileState,
+    },
+}
+
+/// A window’s tile/float state, as carried on a [`Event::TileStateChanged`].
+///
+/// Serialized as `"tile"` / `"float"` (snake_case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TileState {
+    /// The window is tiled (managed by the scrolling tiling engine).
+    Tile,
+    /// The window is floating (free-floating above the tile layer).
+    Float,
 }
 
 #[cfg(test)]
@@ -281,5 +304,44 @@ mod tests {
             wire,
             r#"{"type":"viewport_scrolled","monitor":0,"workspace":1,"offset":1280,"columns":4}"#
         );
+    }
+
+    /// Helper: build a representative window descriptor for wire-shape tests.
+    fn sample_window() -> super::WindowDescriptor {
+        super::WindowDescriptor {
+            hwnd: 123,
+            title: "Notes".to_string(),
+            exe: "notes.exe".to_string(),
+            class: "NotesCls".to_string(),
+        }
+    }
+
+    /// Positive: `TileStateChanged` with the `float` state serializes to the
+    /// documented wire shape — `window` nests its descriptor and `state` is
+    /// the snake_case tag `"float"`.
+    #[test]
+    fn tile_state_changed_serializes_float() {
+        let event = Event::TileStateChanged {
+            window: sample_window(),
+            state: super::TileState::Float,
+        };
+        let wire = serde_json::to_string(&event).expect("serialize event");
+        assert_eq!(
+            wire,
+            r#"{"type":"tile_state_changed","window":{"hwnd":123,"title":"Notes","exe":"notes.exe","class":"NotesCls"},"state":"float"}"#
+        );
+    }
+
+    /// Positive: `TileStateChanged` with the `tile` state serializes `state`
+    /// as `"tile"`.
+    #[test]
+    fn tile_state_changed_serializes_tile() {
+        let event = Event::TileStateChanged {
+            window: sample_window(),
+            state: super::TileState::Tile,
+        };
+        let wire = serde_json::to_string(&event).expect("serialize event");
+        assert!(wire.contains(r#""type":"tile_state_changed""#));
+        assert!(wire.contains(r#""state":"tile""#));
     }
 }
