@@ -1,6 +1,6 @@
-# flow-wm
+# FlowWM
 
-A scrolling, infinite-horizontal-canvas tiling window manager for Windows. The daemon (`flowd`) owns all state; the CLI (`flow`) talks to it over named-pipe IPC. Window management sits *on top of* the Win32 window model — flow-wm does not own the OS's focus/raise primitives, it orchestrates them.
+A scrolling, infinite-horizontal-canvas tiling window manager for Windows. Windows live as columns on a canvas wider than the monitor; the viewport slides left/right instead of fitting a fixed grid. The daemon (`flowd`) owns all state; the CLI (`flow`) talks to it over named-pipe IPC. Window management sits *on top of* the Win32 window model — flow-wm does not own the OS's focus/raise primitives, it orchestrates them.
 
 ## Language
 
@@ -29,6 +29,16 @@ The top stacking layer. Holds floating windows, ordered by `FloatingSpace` (late
 **Stacking invariant**:
 The rule the daemon enforces on every foreground change: every float is always above every tile in Win32 Z-order, no matter which window holds focus or how focus moved there (FFM, keyboard nav, alt-tab, taskbar).
 
+## Cursor behavior
+
+**Focus-follows-mouse**:
+Hovering the cursor over a window moves OS focus to it (`SetForegroundWindow`), no click required.
+_Avoid_: hover-focus, sloppy-focus, follow_mouse (ambiguous — also covers edge-scroll-follows-mouse)
+
+**Edge-scroll-follows-mouse**:
+A cursor parked at the left/right screen edge scrolls the viewport — one immediate column-scroll, a longer dwell, then continuous auto-repeat — independent of any drag.
+_Avoid_: mouse edge-scroll, follow_mouse (ambiguous)
+
 ## Tile resize
 
 **Translate** (a.k.a. **tile drag**):
@@ -55,3 +65,25 @@ _Avoid_: hard pin
 **Teleport**:
 Placing a window at its target rect instantly, bypassing the animator. Used wherever tweening would be wrong — bystander workspaces during a switch, the initial snap, and every window moved during a resize drag. Contrast **animate** (tweened), for autonomous motion.
 _Avoid_: snap (ambiguous with snap-to-grid)
+
+## Event publishing
+
+**HookEvent**:
+A raw OS signal captured by the hook thread (`SystemForeground`, `ObjectCreate`, `MoveSizeStart`, etc.). Internal noise; never leaves the daemon.
+_Avoid_: event (when meaning the raw signal)
+
+**Event**:
+A published semantic state change the daemon announces to subscribers — the only thing that travels on the event stream. Derived from `HookEvent`s and command outcomes, never a raw hook signal itself.
+_Avoid_: notification, message (ambiguous with IPC command/response messages)
+
+**Subscriber**:
+An external application (e.g. a status bar) that owns its own named pipe, registers it with the daemon, and receives `Event`s as newline-delimited JSON. The daemon writes; the subscriber reads.
+_Avoid_: listener, client (ambiguous with the command-pipe `flow` client)
+
+**Workspace switch**:
+The active (visible) workspace on a monitor changes — what the user is looking at.
+_Avoid_: workspace change (ambiguous with contents mutation)
+
+**Workspace contents mutation**:
+A workspace's window-set changes (a window moved in or out) while the active workspace stays put. `move-to-workspace` performs *both* a contents mutation and a switch, because the camera follows the moved window.
+_Avoid_: workspace change (ambiguous with switch)
