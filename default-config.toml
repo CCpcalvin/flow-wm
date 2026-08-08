@@ -33,6 +33,13 @@ min_column_width_px = 640
 # height adjustment of individual rows.
 min_window_height_px = 100
 
+# Minimum row height in pixels — the dedicated vertical floor for drag-resize
+# of a single row. Dragging a row boundary cannot shrink either row below this,
+# and once the shrinking row hits it the edge elastically pins (overshoot during
+# the drag, snap back on release). Distinct from min_window_height_px (the
+# row-stack-count cap); the two are independent.
+min_row_height_px = 100
+
 # Whether `flow start` checks GitHub for a newer release and, if one exists,
 # prints a one-line notification prompting `flow update`. The check runs after
 # the daemon is ready, is bounded by a short timeout, and never blocks or
@@ -106,3 +113,32 @@ floating_color = "#AA00FF"
 #   The common (in-sync) pass is a single microsecond-scale read that no-ops.
 [focus]
 foreground_sync_interval_ms = 250
+
+# Tile-drag configuration.
+#
+# When a user drags a tiled window by its title bar, a live non-committing
+# preview reflows the other windows to the prospective layout on each zone
+# change; on release the move commits and the dragged window snaps into its
+# slot. Floating windows never enter the drag state machine.
+#
+# - edge_scroll_width:          px band at screen edge that triggers viewport scroll
+# - col_edge_ratio:             fraction of column width for column-insert edge band
+# - col_edge_max_px:            pixel cap on the column-insert hit band
+# - edge_scroll_initial_delay_ms:  gap (ms) from the immediate entry scroll to the
+#                                  first repeat; clamped up to the repeat interval
+# - edge_scroll_repeat_interval_ms: gap (ms) between successive column scrolls while
+#                                   held; clamped up to the animation duration and an
+#                                   internal spam-guard floor
+[drag]
+edge_scroll_width = 30
+col_edge_ratio = 0.18
+col_edge_max_px = 120
+edge_scroll_initial_delay_ms = 500
+edge_scroll_repeat_interval_ms = 240
+
+# Loadout save/restore settings.
+#
+# - default_path:  file name (relative to config dir) used by
+#                   `flow loadout save` and `flow loadout restore`
+[loadout]
+default_path = "loadout.json"

@@ -169,9 +169,13 @@ sequenceDiagram
 
 Every IPC command follows the same pattern:
 
-1. `dispatch()` matches on the `SocketMessage` variant and calls the appropriate
+1. **Busy gate**: if a tile drag is in progress (`drag_state.is_some()`) and
+   the command is layout-mutating (`is_layout_mutating()`), `dispatch()` returns
+   `SocketResponse::Busy` immediately. Read-only queries and daemon lifecycle
+   commands still pass through. See (tile-drag.md) for the full classification.
+2. `dispatch()` matches on the `SocketMessage` variant and calls the appropriate
    subsystem method.
-2. **Tiled-only ops** (focus / swap-window / swap-column / merge / promote /
+3. **Tiled-only ops** (focus / swap-window / swap-column / merge / promote /
    expand / shrink / set-column-width / toggle-monocle / center) first resolve
    the OS foreground via `registry.focused()`, look up the window, and verify
    `matches!(state, WindowState::Tiling(TilingState::Active { .. }))`. If the
@@ -180,14 +184,14 @@ Every IPC command follows the same pattern:
    no-op, not an error. This prevents the bug where a float foreground caused
    these ops to act on the stale `last_focused_window` tile cursor. See
    [Floating Space / Focus Model](./floating-space.md#focus-model-clarification).
-3. Layout commands call `active_scrolling_mut()` to reach the `ScrollingSpace`,
+4. Layout commands call `active_scrolling_mut()` to reach the `ScrollingSpace`,
    mutate the virtual layout, and receive an `AppliedLayout` or `Option<LayoutDiff>`.
    The target `WindowId` is now passed explicitly from the dispatch layer rather
    than re-resolved inside `ScrollingSpace` from `last_focused_window`.
-4. Some commands require OS-level side effects (e.g. `FocusLeft` calls
+ 5. Some commands require OS-level side effects (e.g. `FocusLeft` calls
    `SetForegroundWindow` and syncs the registry's focus tracking).
-5. `animate_layout()` converts the result to animation targets.
-6. A `SocketResponse` is written back to the CLI.
+ 6. `animate_layout()` converts the result to animation targets.
+ 7. A `SocketResponse` is written back to the CLI.
 
 Commands that close windows (`CloseWindow`) take a different path — they only
 queue `WM_CLOSE` and let the `EVENT_OBJECT_DESTROY` hook handle the actual
@@ -317,6 +321,32 @@ If the window now qualifies as tiling, it is appended to the layout via
 The handler only acts on windows currently in `Ignored(Maximized|Fullscreen)`
 state, so the common case (no recoverable windows) costs a single `HashMap`
 lookup.
+
+### MoveSize Start / End (`EVENT_SYSTEM_MOVESIZESTART` / `EVENT_SYSTEM_MOVESIZEEND`)
+
+| Condition | Action |
+|-----------|--------|
+| Not tracked | Skip |
+| Tracked, not `Tiling::Active` | Skip (float/ignored/minimized windows manage their own move) |
+| Tracked, `Tiling::Active` | `on_drag_start`: create `DragState`, `set_dragged_hwnd` (gates LOCATIONCHANGE filter) |
+| `MoveSizeEnd` with no active `DragState` | Skip (double-fire or spurious end) |
+| `MoveSizeEnd` with active `DragState` | `on_drag_end`: commit layout or snap-back, `clear_dragged_hwnd` |
+
+These events fire when the user grabs a tiled window's title bar. The full
+drag lifecycle — zone detection, preview reflow, commit — is documented in
+(tile-drag.md).
+
+### LocationChange (extended for tile drag)
+
+The `EVENT_OBJECT_LOCATIONCHANGE` hook was already filtered to active-workspace
+floats. Tile-drag extends the filter with a second condition: the callback also
+forwards the event when `hwnd == DRAGGED_HWND.load(Acquire)`. The main thread
+then routes based on whether `drag_state` is active:
+
+| Condition | Action |
+|-----------|--------|
+| `drag_state` is `Some` and `hwnd` matches dragged window | `on_drag_move`: border follow, zone detection, preview reflow |
+| `drag_state` is `None` or `hwnd` doesn't match | Fall through to float sync path (pre-existing behaviour) |
 
 ### Name Change (`EVENT_OBJECT_NAMECHANGE`)
 

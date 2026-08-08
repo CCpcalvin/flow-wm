@@ -113,6 +113,7 @@ impl FlowWM {
             layout_config.column_width,
             layout_config.min_column_width_px,
             layout_config.min_window_height_px,
+            layout_config.min_row_height_px,
             layout_config.padding,
             app_config.columns_per_screen,
         );
@@ -245,6 +246,7 @@ impl FlowWM {
                 layout_config.column_width,
                 layout_config.min_column_width_px,
                 layout_config.min_window_height_px,
+                layout_config.min_row_height_px,
                 layout_config.padding,
                 app_config.columns_per_screen,
             );
@@ -271,6 +273,7 @@ impl FlowWM {
             shutting_down: false,
             pending_creations: Vec::new(),
             float_resume_deadline: None,
+            drag_state: None,
             last_foreground_sync: std::time::Instant::now(),
         };
         // Adopt pre-existing float-classified windows (found during the init
@@ -372,6 +375,7 @@ impl FlowWM {
             shutting_down: false,
             pending_creations: Vec::new(),
             float_resume_deadline: None,
+            drag_state: None,
             last_foreground_sync: std::time::Instant::now(),
         }
     }

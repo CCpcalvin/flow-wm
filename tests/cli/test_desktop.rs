@@ -326,6 +326,14 @@ pub fn start_test_daemon_with_extra_args(
         let rules_path = config_dir.join("flow-rules.toml");
         std::fs::write(&rules_path, TEST_RULES_TOML)
             .map_err(|e| format!("failed to write test flow-rules.toml: {e}"))?;
+        // Clear any learned rules from a previous run. `history-flow-rules.toml`
+        // persists in this temp dir (keyed by pipe name) across `cargo test`
+        // invocations, and learned rules outrank `default_action` in the
+        // classifier. A prior test that floated a window (e.g. a loadout test
+        // calling `set-window float`) would otherwise teach the daemon to float
+        // every `cli-*`/`FlowTestClass` window, silently breaking tiling for
+        // every later test reusing this dir.
+        let _ = std::fs::remove_file(config_dir.join("history-flow-rules.toml"));
         eprintln!("[test] flowd config dir -> {}", config_dir.display());
         cmd.arg("--config").arg(&config_dir);
     }
@@ -454,6 +462,7 @@ pub fn query_windows(pipe: &str) -> Result<serde_json::Value, String> {
         SocketResponse::Data { payload } => Ok(payload),
         SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
         SocketResponse::Ok => Err("unexpected Ok response".into()),
+        SocketResponse::Busy => Err("daemon busy (tile drag in progress)".into()),
     }
 }
 
@@ -474,6 +483,7 @@ pub fn query_layout_virtual(pipe: &str) -> Result<serde_json::Value, String> {
         SocketResponse::Data { payload } => Ok(payload),
         SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
         SocketResponse::Ok => Err("unexpected Ok response".into()),
+        SocketResponse::Busy => Err("daemon busy (tile drag in progress)".into()),
     }
 }
 
@@ -593,6 +603,7 @@ pub fn query_layout_actual(pipe: &str) -> Result<serde_json::Value, String> {
         SocketResponse::Data { payload } => Ok(payload),
         SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
         SocketResponse::Ok => Err("unexpected Ok response".into()),
+        SocketResponse::Busy => Err("daemon busy (tile drag in progress)".into()),
     }
 }
 

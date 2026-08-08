@@ -53,8 +53,8 @@ impl FlowWM {
     }
 
     /// Read `hwnd`'s current on-screen rect and store it as the window's
-    /// float position, in both the active workspace's [`FloatingSpace`] and
-    /// the registry's [`FloatingState::Active`] mirror.
+    /// float position, in both the active workspace's [`FloatingSpace`] and the
+    /// registry's [`FloatingState::Active`] mirror.
     ///
     /// Unlike [`on_float_location_changed`](Self::on_float_location_changed),
     /// this does NOT check `FLOAT_TRACKING_ACTIVE` — the caller gates that.
@@ -63,7 +63,7 @@ impl FlowWM {
     ///
     /// Skips silently if `hwnd` is untracked, not an active float, or not in
     /// the active workspace's `FloatingSpace`.
-    fn store_float_rect(&mut self, hwnd: isize) {
+    pub(super) fn store_float_rect(&mut self, hwnd: isize) {
         let hwnd_handle = HWND(hwnd as *mut _);
 
         // Read the window-rect (full, including invisible borders).

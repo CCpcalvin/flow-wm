@@ -79,10 +79,41 @@ impl FlowWM {
         self.registry
             .update_tiling_slots_from_layout(&layout.virtual_layout);
         self.registry.update_tiled_rects(&layout.actual_layout);
+        self.submit_animation(layout);
+    }
 
+    /// Submit animation targets for `layout` WITHOUT syncing registry state or
+    /// committing to [`ScrollingSpace`](crate::workspace::ScrollingSpace).
+    ///
+    /// The pure-animation core shared by [`animate_layout`] (which syncs the
+    /// registry first) and [`animate_preview`] (which must not touch the
+    /// registry, since the preview is non-committing and reversible).
+    ///
+    /// Honors the active-drag exclusion filter: while `drag_state` is `Some`,
+    /// the dragged window and its border overlay are omitted from the target
+    /// list so the animator does not fight the user's mouse. When `on_drag_end`
+    /// calls [`animate_layout`], `drag_state` has already been `take()`n so the
+    /// filter does not trigger — the dragged window animates to its final
+    /// position as intended.
+    fn submit_animation(&mut self, layout: &AppliedLayout) {
         if layout.actual_layout.entries.is_empty() {
             return;
         }
+
+        // Safety net: during a tile drag, exclude the dragged window and its
+        // border overlay from animation targets so the animator doesn't fight
+        // the user's mouse. This covers code paths (e.g. window Created/
+        // Destroyed hooks) that call animate_layout while a drag is active.
+        // When on_drag_end calls animate_layout, drag_state has already been
+        // take()n so the filter does not trigger — the dragged window animates
+        // to its final position as intended.
+        let excluded_id = self.drag_state.as_ref().map(|ds| ds.dragged_id());
+        let excluded_border_hwnd = self.drag_state.as_ref().and_then(|ds| {
+            self.registry
+                .get_window(HWND(ds.dragged_hwnd() as *mut _))
+                .and_then(|w| w.border.as_ref())
+                .map(|b| b.hwnd())
+        });
 
         // Effective border inset. Each window's rect shrinks by
         // (thickness - overlap) px per edge so the overlay ring (the outer
@@ -92,67 +123,73 @@ impl FlowWM {
         let border_thickness = self.config.borders.thickness as i32;
         let border_overlap = self.config.borders.overlap as i32;
 
-        let targets: Vec<WindowTarget> = layout
-            .actual_layout
-            .entries
-            .iter()
-            .flat_map(|entry| {
-                // Look up the window once; extract invisible bounds and the
-                // border overlay HWND from the shared reference. Option<&Window>
-                // is Copy (all &T are Copy), so both .map calls below take
-                // independent copies without invalidating `window`.
-                let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
-                let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
-                let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
+        let mut targets: Vec<WindowTarget> = Vec::new();
+        for entry in &layout.actual_layout.entries {
+            // Skip the dragged window during an active drag.
+            if Some(entry.window_id) == excluded_id {
+                continue;
+            }
 
-                // Translate the layout engine's visible rect into a Win32
-                // window rect. This compensates for invisible borders so
-                // that SetWindowPos places the window's visible content
-                // exactly where the layout engine intended. Then shrink by
-                // the configured border thickness to leave room for the
-                // colored overlay ring.
-                let window_rect = invisible_bounds
-                    .visible_to_window(entry.rect)
-                    .inset(border_thickness - border_overlap);
+            // Look up the window once; extract invisible bounds and the
+            // border overlay HWND from the shared reference. Option<&Window>
+            // is Copy (all &T are Copy), so both .map calls below take
+            // independent copies without invalidating `window`.
+            let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+            let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+            let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
 
-                log::debug!(
-                    "animate: hwnd={} target ({},{},{},{}) [visible] \
-                     → ({},{},{},{}) [window]",
-                    entry.window_id.0,
-                    entry.rect.x,
-                    entry.rect.y,
-                    entry.rect.width,
-                    entry.rect.height,
-                    window_rect.x,
-                    window_rect.y,
-                    window_rect.width,
-                    window_rect.height,
-                );
+            // Skip the dragged window's border overlay.
+            if let Some(eb) = excluded_border_hwnd
+                && border_hwnd == Some(eb)
+            {
+                continue;
+            }
 
-                let window_target = WindowTarget::new(
-                    WindowRef(entry.window_id.0),
-                    IVec2::new(window_rect.x, window_rect.y),
-                    IVec2::new(window_rect.width, window_rect.height),
-                );
+            // Translate the layout engine's visible rect into a Win32
+            // window rect. This compensates for invisible borders so
+            // that SetWindowPos places the window's visible content
+            // exactly where the layout engine intended. Then shrink by
+            // the configured border thickness to leave room for the
+            // colored overlay ring.
+            let window_rect = invisible_bounds
+                .visible_to_window(entry.rect)
+                .inset(border_thickness - border_overlap);
 
-                // Flatten the border overlay into the same target list so
-                // the animator moves it in lockstep with the window. Border
-                // overlays sit at the layout engine's visible rect — no
-                // invisible-bounds translation, no thickness inset — because
-                // the ring occupies the gap between entry.rect and the
-                // inset window_rect. The animator's SetWindowPos-based
-                // backend treats the overlay HWND like any other window.
-                let border_target = border_hwnd.map(|b_hwnd| {
-                    WindowTarget::new(
-                        WindowRef(b_hwnd),
-                        IVec2::new(entry.rect.x, entry.rect.y),
-                        IVec2::new(entry.rect.width, entry.rect.height),
-                    )
-                });
+            log::debug!(
+                "animate: hwnd={} target ({},{},{},{}) [visible] \
+                 → ({},{},{},{}) [window]",
+                entry.window_id.0,
+                entry.rect.x,
+                entry.rect.y,
+                entry.rect.width,
+                entry.rect.height,
+                window_rect.x,
+                window_rect.y,
+                window_rect.width,
+                window_rect.height,
+            );
 
-                std::iter::once(window_target).chain(border_target)
-            })
-            .collect();
+            targets.push(WindowTarget::new(
+                WindowRef(entry.window_id.0),
+                IVec2::new(window_rect.x, window_rect.y),
+                IVec2::new(window_rect.width, window_rect.height),
+            ));
+
+            // Flatten the border overlay into the same target list so
+            // the animator moves it in lockstep with the window. Border
+            // overlays sit at the layout engine's visible rect — no
+            // invisible-bounds translation, no thickness inset — because
+            // the ring occupies the gap between entry.rect and the
+            // inset window_rect. The animator's SetWindowPos-based
+            // backend treats the overlay HWND like any other window.
+            if let Some(b_hwnd) = border_hwnd {
+                targets.push(WindowTarget::new(
+                    WindowRef(b_hwnd),
+                    IVec2::new(entry.rect.x, entry.rect.y),
+                    IVec2::new(entry.rect.width, entry.rect.height),
+                ));
+            }
+        }
 
         log::debug!(
             "animate_layout: submitting {} targets to animator",
@@ -162,6 +199,23 @@ impl FlowWM {
         if let Err(e) = self.animator.animate(targets) {
             log::warn!("animation error: {e}");
         }
+    }
+
+    /// Non-committing preview animation for a tile drag.
+    ///
+    /// During a tile drag, `on_drag_move` calls this to reflow the *other*
+    /// tiled windows toward their prospective landing positions so the user can
+    /// see where a release would drop the dragged window. It is
+    /// **non-committing**: neither the registry nor
+    /// [`ScrollingSpace`](crate::workspace::ScrollingSpace) is touched, so the
+    /// next preview (or the final commit in
+    /// [`on_drag_end`](super::drag::FlowWM::on_drag_end)) supersedes it. The
+    /// dragged window is omitted from the target list by [`submit_animation`]'s
+    /// active-drag exclusion filter, so it keeps following the mouse via the
+    /// direct `border.set_geometry` calls in `on_drag_move`.
+    /// (`docs/src/dev-guide/tile-drag.md`)
+    pub(super) fn animate_preview(&mut self, preview: &AppliedLayout) {
+        self.submit_animation(preview);
     }
 
     /// Submit a single combined animation batch spanning multiple workspaces.
@@ -351,6 +405,71 @@ impl FlowWM {
                         height: entry.rect.height,
                     });
                 }
+            }
+        }
+    }
+
+    /// Non-committing teleport preview for a resize drag.
+    ///
+    /// During a column drag-resize, [`on_resize_move`](super::drag::FlowWM::on_resize_move)
+    /// calls this to relocate the *bystander* tiled windows to their boundary-move
+    /// targets instantly (direct `SetWindowPos`, bypassing the animator) so the
+    /// moving boundary stays fused to the cursor. It is **non-committing**:
+    /// neither the registry nor
+    /// [`ScrollingSpace`](crate::workspace::ScrollingSpace) is touched — the
+    /// committed layout stays frozen for the drag, and the sole commit is
+    /// [`on_resize_end`](super::drag::FlowWM::on_resize_end) on release.
+    ///
+    /// The dragged window is omitted from the target list by the active-drag
+    /// exclusion filter (Win32 owns its geometry during the native move-size,
+    /// so its width already tracks the cursor, overshoot and all). This mirrors
+    /// [`teleport_workspaces`](Self::teleport_workspaces) but operates on a
+    /// single active-workspace [`AppliedLayout`] and honors the drag-exclusion
+    /// filter — the resize analog of [`animate_preview`](Self::animate_preview),
+    /// except it bypasses the animator (Teleport, not animation) per ADR-0004.
+    pub(super) fn teleport_preview(&self, preview: &AppliedLayout) {
+        let border_thickness = self.config.borders.thickness as i32;
+        let border_overlap = self.config.borders.overlap as i32;
+
+        // Active-drag exclusion filter — same intent as submit_animation's, so
+        // the animator-free teleport also leaves the dragged window alone.
+        let excluded_id = self.drag_state.as_ref().map(|ds| ds.dragged_id());
+        let excluded_border_hwnd = self.drag_state.as_ref().and_then(|ds| {
+            self.registry
+                .get_window(HWND(ds.dragged_hwnd() as *mut _))
+                .and_then(|w| w.border.as_ref())
+                .map(|b| b.hwnd())
+        });
+
+        for entry in &preview.actual_layout.entries {
+            if Some(entry.window_id) == excluded_id {
+                continue;
+            }
+            let window = self.registry.get_window(HWND(entry.window_id.0 as *mut _));
+            let invisible_bounds = window.map(|w| w.invisible_bounds).unwrap_or_default();
+            let border_hwnd = window.and_then(|w| w.border.as_ref()).map(|b| b.hwnd());
+            if let Some(eb) = excluded_border_hwnd
+                && border_hwnd == Some(eb)
+            {
+                continue;
+            }
+
+            let window_rect = invisible_bounds
+                .visible_to_window(entry.rect)
+                .inset(border_thickness - border_overlap);
+            // Direct SetWindowPos — bypass the animator entirely so the boundary
+            // follows the cursor with no tween lag.
+            let _ = crate::registry::win32::set_window_rect(
+                entry.window_id.0,
+                window_rect.x,
+                window_rect.y,
+                window_rect.width,
+                window_rect.height,
+            );
+
+            // Teleport the border overlay to match (option<&Window> is Copy).
+            if let Some(border) = window.and_then(|w| w.border.as_ref()) {
+                border.set_geometry(entry.rect);
             }
         }
     }

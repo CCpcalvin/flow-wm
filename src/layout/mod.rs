@@ -30,7 +30,9 @@
 //! chapters of the developer guide (`docs/src/dev-guide/layout/`).
 
 pub mod mutations;
+pub mod preview;
 pub mod projection;
+pub mod resize;
 pub mod types;
 
 pub use mutations::NeighborLocation;

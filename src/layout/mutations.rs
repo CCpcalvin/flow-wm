@@ -84,6 +84,13 @@ pub struct MutationConfig {
     /// min_window_height_px` (computed lazily by callers that need the cap).
     /// Adding a row that would push any row below this floor is rejected.
     pub min_window_height_px: u32,
+    /// Minimum allowed row height in pixels — the vertical drag-resize floor
+    /// (ticket #10). Mirrors [`min_column_width_px`](Self::min_column_width_px)
+    /// on the vertical axis: [`resize_row_boundary_move`](super::resize::resize_row_boundary_move)
+    /// clamps each row to `[min_row_height_px, derived_max_row_height]`. Sourced
+    /// from [`FlowConfig::min_row_height_px`](crate::config::types::FlowConfig::min_row_height_px);
+    /// distinct from `min_window_height_px` (the row-stack-count cap).
+    pub min_row_height_px: u32,
     /// Base column width in pixels. New columns are created at this width, and
     /// it is the `n = 0` rung of the expand/shrink slot ladder.
     pub column_width: u32,
@@ -1002,6 +1009,69 @@ pub fn initialize_windows(
     }
 }
 
+/// Build a complete [`VirtualLayout`] from an explicit column/row specification.
+///
+/// Unlike [`initialize_windows`] (which creates one column per window), this
+/// function accepts **multi-row columns** and **explicit widths**, so the
+/// daemon load path can reproduce a saved layout exactly.
+///
+/// Each `(width_px, row_window_ids)` tuple in `columns` becomes a [`Column`]
+/// whose `width_px` is **quantized** via [`quantize_to_ladder`] (ensuring saved
+/// widths round-trip consistently on the same config) and whose rows have
+/// heights distributed equally via [`distribute_heights`].
+///
+/// `viewport_offset` is set from the argument — the caller (workspace/daemon)
+/// is responsible for restoring the saved camera position.
+///
+/// # Arguments
+///
+/// * `config` — mutation parameters (monitor size, gap, width ladder).
+/// * `columns` — `(raw_width_px, row_window_ids)` pairs. `raw_width_px` is
+///   quantized before use; the `row_window_ids` list defines the vertical
+///   stacking order (top-to-bottom).
+/// * `viewport_offset` — camera position for the returned layout.
+///
+/// # Returns
+///
+/// A fresh [`VirtualLayout`] with quantized column widths, equally-distributed
+/// row heights, and the given viewport offset. Empty `columns` yields an empty
+/// layout with offset 0.
+///
+/// (`docs/src/dev-guide/layout/mutations.md`)
+#[must_use]
+pub fn set_layout(
+    config: &MutationConfig,
+    columns: Vec<(u32, Vec<WindowId>)>,
+    viewport_offset: i32,
+) -> VirtualLayout {
+    if columns.is_empty() {
+        return VirtualLayout::new();
+    }
+
+    let gap = config.padding.window_gap;
+    let available = config.available_height();
+
+    let built: Vec<Column> = columns
+        .into_iter()
+        .map(|(raw_width, row_ids)| {
+            let width = quantize_to_ladder(raw_width as i32, config);
+            let n = row_ids.len();
+            let heights = distribute_heights(n, available, gap);
+            let rows: Vec<Row> = row_ids
+                .into_iter()
+                .zip(heights)
+                .map(|(wid, h)| Row::new(wid, h))
+                .collect();
+            Column::with_rows(width, rows)
+        })
+        .collect();
+
+    VirtualLayout {
+        columns: built,
+        viewport_offset,
+    }
+}
+
 /// Add a window to the layout as a new column appended to the right.
 #[must_use]
 pub fn add_window(
@@ -1434,6 +1504,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 0,
@@ -1795,6 +1866,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -1828,6 +1900,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -2028,6 +2101,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,            // (1920-960)/960 = 1
@@ -2223,6 +2297,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,            // (1920-960)/960 = 1
@@ -3046,6 +3121,7 @@ mod tests {
             monitor_width,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width,
             min_column_width_px: column_width / 2,
             max_n,
@@ -3124,6 +3200,7 @@ mod tests {
             monitor_width: 2560,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,            // (2528-960)/976 = 1
@@ -3232,6 +3309,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -3281,6 +3359,7 @@ mod tests {
             monitor_width: 3840,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 2,
@@ -3441,6 +3520,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -4091,6 +4171,7 @@ mod tests {
         );
         let config = MutationConfig {
             min_window_height_px: 400,
+            min_row_height_px: 400,
             ..test_config()
         };
         assert!(merge_column(&layout, WindowId(1), Direction::Right, &config).is_none());
@@ -4114,6 +4195,7 @@ mod tests {
         );
         let config = MutationConfig {
             min_window_height_px: 354,
+            min_row_height_px: 354,
             ..test_config()
         };
         let result = merge_column(&layout, WindowId(1), Direction::Right, &config);
@@ -4146,6 +4228,7 @@ mod tests {
         );
         let config = MutationConfig {
             min_window_height_px: 355,
+            min_row_height_px: 355,
             ..test_config()
         };
         assert!(
@@ -4422,5 +4505,113 @@ mod tests {
             "promoted window inserted as its own column right after src"
         );
         assert_eq!(result.columns[3].rows[0].window_id, WindowId(4));
+    }
+
+    // --- set_layout ---
+
+    #[test]
+    fn set_layout_empty_columns() {
+        // Positive: empty input → empty layout with offset 0
+        let layout = set_layout(&test_config(), vec![], 500);
+        assert!(layout.columns.is_empty());
+        assert_eq!(
+            layout.viewport_offset, 0,
+            "empty columns override offset to 0"
+        );
+    }
+
+    #[test]
+    fn set_layout_single_column_single_row() {
+        // Positive: one column with one window → single-row column, height
+        // = distribute_heights(1, 1080, 4)[0] = 1072.
+        let layout = set_layout(&test_config(), vec![(960, vec![WindowId(1)])], 0);
+        assert_eq!(layout.columns.len(), 1);
+        assert_eq!(layout.columns[0].width_px, 960, "width quantized to base");
+        assert_eq!(layout.columns[0].rows.len(), 1);
+        assert_eq!(layout.columns[0].rows[0].window_id, WindowId(1));
+        assert_eq!(layout.columns[0].rows[0].height, 1072);
+        assert_eq!(layout.viewport_offset, 0);
+    }
+
+    #[test]
+    fn set_layout_multi_row_column() {
+        // Positive: one column with two windows → heights distributed equally.
+        // distribute_heights(2, 1080, 4) = [(1080-12)/2, (1080-12)/2] = [534, 534].
+        let layout = set_layout(
+            &test_config(),
+            vec![(960, vec![WindowId(1), WindowId(2)])],
+            0,
+        );
+        assert_eq!(layout.columns.len(), 1);
+        assert_eq!(layout.columns[0].width_px, 960);
+        assert_eq!(layout.columns[0].rows.len(), 2);
+        assert_eq!(layout.columns[0].rows[0].window_id, WindowId(1));
+        assert_eq!(layout.columns[0].rows[0].height, 534);
+        assert_eq!(layout.columns[0].rows[1].window_id, WindowId(2));
+        assert_eq!(layout.columns[0].rows[1].height, 534);
+    }
+
+    #[test]
+    fn set_layout_multi_column() {
+        // Positive: three columns with varying window counts.
+        let layout = set_layout(
+            &test_config(),
+            vec![
+                (960, vec![WindowId(1)]),
+                (960, vec![WindowId(2), WindowId(3)]),
+                (960, vec![WindowId(4)]),
+            ],
+            100,
+        );
+        assert_eq!(layout.columns.len(), 3);
+        assert_eq!(layout.columns[0].rows.len(), 1);
+        assert_eq!(layout.columns[1].rows.len(), 2);
+        assert_eq!(layout.columns[2].rows.len(), 1);
+        assert_eq!(layout.viewport_offset, 100, "viewport_offset honored");
+    }
+
+    #[test]
+    fn set_layout_width_quantized_to_ladder() {
+        // Positive: raw width 1450 → quantized via the same ladder as
+        // initialize_windows / insert_window_after_focused_with_width.
+        // test_config: base=960, max_n=0, abs_max=1912. Ladder = {960, 1912}.
+        // quantize_to_ladder(1450) → nearest rung: midpoint of (960,1912) = 1436.
+        // 1450 >= 1436 → snaps to 1912.
+        let layout = set_layout(&test_config(), vec![(1450, vec![WindowId(1)])], 0);
+        assert_eq!(
+            layout.columns[0].width_px, 1912,
+            "1450 quantized to nearest rung (1912) on the width ladder"
+        );
+    }
+
+    #[test]
+    fn set_layout_width_clamped_below_base() {
+        // Positive: raw width 200 < base(960) → quantized up to 960.
+        let layout = set_layout(&test_config(), vec![(200, vec![WindowId(1)])], 0);
+        assert_eq!(layout.columns[0].width_px, 960, "below base → clamped up");
+    }
+
+    #[test]
+    fn set_layout_viewport_offset_honored() {
+        // Positive: arbitrary viewport_offset passed through.
+        let layout = set_layout(&test_config(), vec![(960, vec![WindowId(1)])], -476);
+        assert_eq!(layout.viewport_offset, -476);
+    }
+
+    #[test]
+    fn set_layout_three_row_column_remainder_distribution() {
+        // Positive: three rows in a column → remainder goes to top rows.
+        // distribute_heights(3, 1080, 4) = [355, 355, 354].
+        let layout = set_layout(
+            &test_config(),
+            vec![(960, vec![WindowId(1), WindowId(2), WindowId(3)])],
+            0,
+        );
+        assert_eq!(layout.columns[0].rows[0].height, 355, "top row gets +1");
+        assert_eq!(layout.columns[0].rows[1].height, 355, "second row gets +1");
+        assert_eq!(
+            layout.columns[0].rows[2].height, 354,
+            "bottom row gets base"
+        );
     }
 }

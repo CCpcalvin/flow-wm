@@ -75,11 +75,25 @@ impl FlowWM {
     /// - **Layout commands**: call layout engine methods and animate the result.
     /// - **Query commands**: return registry data as JSON.
     /// - **Unimplemented commands**: return an error response.
+    ///
+    /// When a tile drag is in progress, layout-mutating commands return
+    /// [`SocketResponse::Busy`] to prevent layout conflicts.
     pub(super) fn dispatch(&mut self, msg: &SocketMessage) -> SocketResponse {
         log::debug!("ipc: dispatching {msg:?}");
+
+        // Reject layout-mutating commands while a tile drag is active — the
+        // layout is in a transient state and concurrent mutations would
+        // corrupt it.
+        if self.drag_state.is_some() && msg.is_layout_mutating() {
+            return SocketResponse::Busy;
+        }
+
         match msg {
             // --- Shutdown ---
             SocketMessage::Stop => {
+                if let Err(e) = self.try_save_loadout_default() {
+                    log::warn!("loadout save-on-stop failed: {e}");
+                }
                 self.shutting_down = true;
                 SocketResponse::Ok
             }
@@ -138,6 +152,8 @@ impl FlowWM {
             SocketMessage::SetConfigValue { .. } => unimplemented_command("set_config_value"),
             SocketMessage::ForgetApp { .. } => unimplemented_command("forget_app"),
             SocketMessage::ForgetAllApps => unimplemented_command("forget_all_apps"),
+            SocketMessage::LoadoutSave { path } => self.dispatch_loadout_save(path.clone()),
+            SocketMessage::LoadoutLoad { path } => self.dispatch_loadout_load(path.clone()),
 
             // --- Workspace ---
             //
@@ -1402,6 +1418,7 @@ impl FlowWM {
                     layout_config.column_width,
                     layout_config.min_column_width_px,
                     layout_config.min_window_height_px,
+                    layout_config.min_row_height_px,
                     layout_config.padding,
                     columns_per_screen,
                 );
@@ -1773,7 +1790,7 @@ mod tests {
             up: 0,
             down: 0,
         };
-        let mut scrolling = ScrollingSpace::new(monitor_info, 960, 320, 100, padding, 4);
+        let mut scrolling = ScrollingSpace::new(monitor_info, 960, 320, 100, 100, padding, 4);
         scrolling.add_window(WindowId(TEST_HWND));
 
         let workspace = Workspace::new(WorkspaceId(1), scrolling);

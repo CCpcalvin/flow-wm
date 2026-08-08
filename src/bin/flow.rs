@@ -6,6 +6,7 @@
 //! | Group | Commands |
 //! |-------|----------|
 //! | Lifecycle | `start`, `stop`, `enable-autostart`, `disable-autostart` |
+//! | Loadout | `loadout save|load [path]` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
 //! | Query | `query all` |
 //! | Dispatch | `dispatch focus\|swap-column\|move-window\|merge-column\|promote\|expand-column\|shrink-column\|center\|close-window\|set-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
@@ -75,12 +76,24 @@ enum Commands {
         /// and its PID is tracked so `flow stop --ahk` can terminate it.
         #[arg(long)]
         ahk: bool,
+        /// Skip restoring the last saved loadout after the daemon starts.
+        ///
+        /// By default `flow start` asks the daemon to restore the most recent
+        /// loadout. Pass `--no-restore` to start with whatever windows are
+        /// already on screen, untiled.
+        #[arg(long)]
+        no_restore: bool,
     },
     /// Stop the running flowd daemon.
     Stop {
         /// Also stop the AutoHotkey script launched by `flow start --ahk`.
         #[arg(long)]
         ahk: bool,
+    },
+    /// Save or restore a window arrangement (a "loadout").
+    Loadout {
+        #[command(subcommand)]
+        command: LoadoutCommands,
     },
     /// Manage configuration files.
     Config {
@@ -346,6 +359,23 @@ enum MoveDirection {
     Down,
 }
 
+/// Loadout subcommands.
+#[derive(Debug, Subcommand)]
+enum LoadoutCommands {
+    /// Save the current window arrangement to a loadout file.
+    Save {
+        /// Optional output path. Defaults to the config `loadout.default_path`.
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Restore a previously saved arrangement from a loadout file.
+    Load {
+        /// Optional input path. Defaults to the config `loadout.default_path`.
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -354,8 +384,10 @@ fn main() {
             config,
             log_file,
             ahk,
-        } => cmd_start(config, log_file, ahk),
+            no_restore,
+        } => cmd_start(config, log_file, ahk, no_restore),
         Commands::Stop { ahk } => cmd_stop(ahk),
+        Commands::Loadout { command } => cmd_loadout(command),
         Commands::Config { command } => cmd_config(command),
         Commands::Query { command } => cmd_query(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
@@ -406,6 +438,7 @@ fn cmd_start(
     config_override: Option<String>,
     log_file_override: Option<String>,
     ahk: bool,
+    no_restore: bool,
 ) -> Result<(), String> {
     // Set env var before any daemon interaction so the spawned child inherits it.
     if let Some(ref dir) = config_override {
@@ -426,10 +459,13 @@ fn cmd_start(
     let config_dir = config::dirs::resolve_config_dir(config_override.as_deref().map(Path::new));
     let config = preflight_config_check(&config_dir)?;
 
-    spawn_daemon(log_file_override.as_deref())?;
+    spawn_daemon(log_file_override.as_deref(), no_restore)?;
     wait_for_daemon()?;
 
     println!("flow: daemon started");
+    // The daemon auto-restores the last loadout during its own init (it is
+    // passed `--no-restore` when the user opted out), so no IPC round-trip
+    // happens here — this sidesteps the startup pipe race.
 
     if ahk {
         // Launch AHK after the daemon is listening so the first hotkey lands.
@@ -579,6 +615,27 @@ fn cmd_update(check: bool) -> Result<(), String> {
     }
 }
 
+/// Dispatch a loadout subcommand.
+///
+/// Routes [`LoadoutCommands::Save`] and [`LoadoutCommands::Load`] to the
+/// daemon via IPC.
+fn cmd_loadout(command: LoadoutCommands) -> Result<(), String> {
+    match command {
+        LoadoutCommands::Save { path } => send_command(
+            SocketMessage::LoadoutSave {
+                path: path.map(std::path::PathBuf::from),
+            },
+            "loadout saved",
+        ),
+        LoadoutCommands::Load { path } => send_command(
+            SocketMessage::LoadoutLoad {
+                path: path.map(std::path::PathBuf::from),
+            },
+            "loadout loaded",
+        ),
+    }
+}
+
 /// Dispatch a configuration subcommand.
 ///
 /// Most config commands operate locally (no daemon contact). Only `Reload`
@@ -724,6 +781,7 @@ fn cmd_query_all() -> Result<(), String> {
             println!("flow: ok");
             Ok(())
         }
+        SocketResponse::Busy => Err("daemon is busy (drag in progress), retry shortly".to_string()),
     }
 }
 
@@ -881,8 +939,10 @@ fn grant_foreground_permission() {
 /// activation permission (see [`grant_foreground_permission`]) so the
 /// daemon's `SetForegroundWindow` calls aren't blocked by the Windows
 /// foreground lock. Handles the three response variants:
-/// [`SocketResponse::Ok`], [`SocketResponse::Error`], and
-/// [`SocketResponse::Data`].
+/// Sends a command and maps the response to a [`Result`].
+///
+/// Handles [`SocketResponse::Ok`], [`SocketResponse::Error`],
+/// [`SocketResponse::Data`], and [`SocketResponse::Busy`].
 fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
     grant_foreground_permission();
 
@@ -899,6 +959,7 @@ fn send_command(msg: SocketMessage, success_msg: &str) -> Result<(), String> {
             println!("flow: {success_msg}");
             Ok(())
         }
+        SocketResponse::Busy => Err("daemon is busy (drag in progress), retry shortly".to_string()),
     }
 }
 
@@ -942,18 +1003,18 @@ fn resolve_editor() -> Result<String, String> {
 ///
 /// Falls back to a plain `spawn()` when the detached spawn fails (e.g., under
 /// WSL interop).
-fn spawn_daemon(log_file_override: Option<&str>) -> Result<(), String> {
+fn spawn_daemon(log_file_override: Option<&str>, no_restore: bool) -> Result<(), String> {
     let exe = find_daemon_exe()?;
 
     // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     const DETACHED: u32 = 0x00000200 | 0x08000000;
 
     // Try detached spawn first (native Windows), fall back to plain spawn (WSL).
-    // Both paths forward `--log-file` when provided.
-    let child = daemon_command(&exe, log_file_override)
+    // Both paths forward `--log-file` and `--no-restore` when provided.
+    let child = daemon_command(&exe, log_file_override, no_restore)
         .creation_flags(DETACHED)
         .spawn()
-        .or_else(|_| daemon_command(&exe, log_file_override).spawn())
+        .or_else(|_| daemon_command(&exe, log_file_override, no_restore).spawn())
         .map_err(|e| format!("failed to spawn daemon ({}): {e}", exe.display()))?;
 
     // Explicitly drop the Child handle so we don't wait on the process.
@@ -963,19 +1024,27 @@ fn spawn_daemon(log_file_override: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Build the daemon [`Command`] with any `--log-file` override applied.
+/// Build the daemon [`Command`] with any `--log-file` / `--no-restore` flags
+/// applied.
 ///
 /// Factored out so [`spawn_daemon`] can construct an identical command for
 /// both the native detached spawn and the WSL fallback spawn — the
-/// `--log-file` argument must be present on both paths for the override to
-/// take effect regardless of which spawn path succeeds.
+/// `--log-file` and `--no-restore` arguments must be present on both paths
+/// for the override to take effect regardless of which spawn path succeeds.
 ///
 /// The config directory is NOT passed here; it is propagated to the daemon
 /// via the inherited `FLOW_CONFIG_DIR` environment variable (see [`cmd_start`]).
-fn daemon_command(exe: &std::path::Path, log_file_override: Option<&str>) -> Command {
+fn daemon_command(
+    exe: &std::path::Path,
+    log_file_override: Option<&str>,
+    no_restore: bool,
+) -> Command {
     let mut cmd = Command::new(exe);
     if let Some(path) = log_file_override {
         cmd.arg("--log-file").arg(path);
+    }
+    if no_restore {
+        cmd.arg("--no-restore");
     }
     cmd
 }
@@ -1044,7 +1113,8 @@ mod tests {
             Commands::Start {
                 config: None,
                 log_file: None,
-                ahk: false
+                ahk: false,
+                no_restore: false
             }
         ));
     }
@@ -1103,6 +1173,7 @@ mod tests {
                 config: Some(ref c),
                 log_file: Some(ref p),
                 ahk: false,
+                ..
             } => {
                 assert_eq!(c, "C:\\custom\\flow");
                 assert_eq!(p, "C:\\tmp\\debug.log");
@@ -1131,6 +1202,7 @@ mod tests {
                 ahk: true,
                 config: Some(ref c),
                 log_file: Some(ref p),
+                ..
             } => {
                 assert_eq!(c, "C:\\custom\\flow");
                 assert_eq!(p, "C:\\tmp\\debug.log");
@@ -1153,6 +1225,7 @@ mod tests {
                 ahk: true,
                 config: None,
                 log_file: None,
+                ..
             } => {}
             other => panic!("expected Start {{ ahk: true, .. }}, got: {other:?}"),
         }
@@ -1171,6 +1244,82 @@ mod tests {
         assert!(
             result.is_err(),
             "'flow start' with a positional arg should fail"
+        );
+    }
+
+    #[test]
+    fn parse_start_no_restore_flag() {
+        // Positive: `flow start --no-restore` parses with no_restore = true.
+        let cli = Cli::try_parse_from(["flow", "start", "--no-restore"]).unwrap();
+        match cli.command {
+            Commands::Start {
+                no_restore: true, ..
+            } => {}
+            other => panic!("expected Start {{ no_restore: true, .. }}, got: {other:?}"),
+        }
+    }
+
+    // --- Loadout command parsing ---
+
+    #[test]
+    fn parse_loadout_save() {
+        // Positive: `flow loadout save` with no path.
+        let cli = Cli::try_parse_from(["flow", "loadout", "save"]).unwrap();
+        match cli.command {
+            Commands::Loadout {
+                command: LoadoutCommands::Save { path: None },
+            } => {}
+            other => panic!("expected Loadout::Save {{ path: None }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_loadout_save_with_path() {
+        // Positive: `flow loadout save C:\x.json` with explicit path.
+        let cli = Cli::try_parse_from(["flow", "loadout", "save", "C:\\x.json"]).unwrap();
+        match cli.command {
+            Commands::Loadout {
+                command: LoadoutCommands::Save { path: Some(ref p) },
+            } => {
+                assert_eq!(p, "C:\\x.json");
+            }
+            other => panic!("expected Loadout::Save {{ path: Some(..) }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_loadout_load() {
+        // Positive: `flow loadout load` with no path.
+        let cli = Cli::try_parse_from(["flow", "loadout", "load"]).unwrap();
+        match cli.command {
+            Commands::Loadout {
+                command: LoadoutCommands::Load { path: None },
+            } => {}
+            other => panic!("expected Loadout::Load {{ path: None }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_loadout_load_with_path() {
+        // Positive: `flow loadout load C:\x.json` with explicit path.
+        let cli = Cli::try_parse_from(["flow", "loadout", "load", "C:\\x.json"]).unwrap();
+        match cli.command {
+            Commands::Loadout {
+                command: LoadoutCommands::Load { path: Some(ref p) },
+            } => {
+                assert_eq!(p, "C:\\x.json");
+            }
+            other => panic!("expected Loadout::Load {{ path: Some(..) }}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_loadout_unknown_subcommand_fails() {
+        // Negative: `flow loadout bogus` should fail.
+        let result = Cli::try_parse_from(["flow", "loadout", "bogus"]);
+        assert!(
+            result.is_err(),
+            "'flow loadout bogus' with unknown subcommand should fail"
         );
     }
 

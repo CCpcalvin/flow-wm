@@ -22,7 +22,7 @@
 //!
 //! # Hook registration
 //!
-//! Seven hooks are registered. `STATECHANGE`, `NAMECHANGE`, and
+//! Eight hooks are registered. `STATECHANGE`, `NAMECHANGE`, and
 //! `LOCATIONCHANGE` are each registered as single-event hooks so the ranges
 //! between them stay disjoint:
 //!
@@ -30,11 +30,12 @@
 //! |------|-------------|---------|
 //! | CREATE/DESTROY | `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` | Window lifecycle |
 //! | FOREGROUND | `EVENT_SYSTEM_FOREGROUND` | Focus changes |
+//! | MOVESIZE | `EVENT_SYSTEM_MOVESIZESTART` → `EVENT_SYSTEM_MOVESIZEEND` | Tile-drag detection |
 //! | MINIMIZE | `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` | Minimize/restore |
 //! | SHOW/HIDE | `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` | Tray-hide, DWM cloak, re-show |
 //! | STATECHANGE | `EVENT_OBJECT_STATECHANGE` (single) | Maximized/fullscreen recovery |
 //! | NAMECHANGE | `EVENT_OBJECT_NAMECHANGE` (single) | Late-title recovery (e.g. Windows Terminal) |
-//! | LOCATIONCHANGE | `EVENT_OBJECT_LOCATIONCHANGE` (single) | Float-window drag tracking |
+//! | LOCATIONCHANGE | `EVENT_OBJECT_LOCATIONCHANGE` (single) | Float/tile-drag position tracking |
 //!
 //! `LOCATIONCHANGE` fires on every move/resize pixel system-wide, so the
 //! callback drops all of them except those for tracked active-workspace float
@@ -90,6 +91,12 @@ use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessag
 
 /// `EVENT_SYSTEM_FOREGROUND` — focus changed to a different window.
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+
+/// `EVENT_SYSTEM_MOVESIZESTART` — the user started dragging a window (title-bar drag).
+const EVENT_SYSTEM_MOVESIZESTART: u32 = 0x000A;
+
+/// `EVENT_SYSTEM_MOVESIZEEND` — the user released the drag.
+const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
 
 /// `EVENT_SYSTEM_MINIMIZESTART` — window was minimized.
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
@@ -260,6 +267,16 @@ pub enum HookEvent {
         /// The floating window whose position or size changed.
         hwnd: isize,
     },
+    /// The user started dragging a window via its title bar (`EVENT_SYSTEM_MOVESIZESTART`).
+    MoveSizeStart {
+        /// The window being dragged.
+        hwnd: isize,
+    },
+    /// The user released a title-bar drag (`EVENT_SYSTEM_MOVESIZEEND`).
+    MoveSizeEnd {
+        /// The window that was dragged.
+        hwnd: isize,
+    },
 }
 
 // ── Global sender ────────────────────────────────────────────────────
@@ -392,6 +409,34 @@ pub fn float_hwnds_snapshot() -> Vec<isize> {
         Some(set) => unpoison(set.lock()).iter().copied().collect(),
         None => Vec::new(),
     }
+}
+
+// ── Tile-drag tracking (shared with the hook callback) ──────────────
+
+/// HWND of the window currently being dragged (title-bar drag), or 0 if none.
+///
+/// Set by the daemon when a `MoveSizeStart` is processed on a tiled window, and
+/// cleared on `MoveSizeEnd`. The hook callback reads this to decide whether to
+/// forward `EVENT_OBJECT_LOCATIONCHANGE` for the dragged window (which is NOT
+/// in [`FLOAT_HWNS`] since it's a tiled window).
+///
+/// Stored as `AtomicIsize` (default 0) for lock-free reads from the hook thread.
+static DRAGGED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Returns the HWND currently being dragged, or 0 if no drag is active.
+#[must_use]
+pub fn dragged_hwnd() -> isize {
+    DRAGGED_HWND.load(Ordering::Acquire)
+}
+
+/// Sets the dragged HWND. Called by the daemon on MoveSizeStart.
+pub fn set_dragged_hwnd(hwnd: isize) {
+    DRAGGED_HWND.store(hwnd, Ordering::Release);
+}
+
+/// Clears the dragged HWND (sets to 0). Called by the daemon on MoveSizeEnd.
+pub fn clear_dragged_hwnd() {
+    DRAGGED_HWND.store(0, Ordering::Release);
 }
 
 // ── HookThreadHandle ─────────────────────────────────────────────────
@@ -670,6 +715,7 @@ fn run_hook_loop() {
 /// Hooks are registered:
 /// - `EVENT_OBJECT_CREATE` → `EVENT_OBJECT_DESTROY` (range; create + destroy)
 /// - `EVENT_SYSTEM_FOREGROUND` (single; focus change)
+/// - `EVENT_SYSTEM_MOVESIZESTART` → `EVENT_SYSTEM_MOVESIZEEND` (range; tile-drag detection)
 /// - `EVENT_SYSTEM_MINIMIZESTART` → `EVENT_SYSTEM_MINIMIZEEND` (range; minimize/restore)
 /// - `EVENT_OBJECT_SHOW` → `EVENT_OBJECT_HIDE` (range; tray-hide, DWM cloak, re-show)
 /// - `EVENT_OBJECT_STATECHANGE` (single; maximized/fullscreen recovery)
@@ -720,6 +766,28 @@ fn register_hooks() -> Vec<HWINEVENTHOOK> {
         log::debug!("hook registered: FOREGROUND");
     } else {
         log::error!("failed to hook FOREGROUND");
+    }
+
+    // Hook: EVENT_SYSTEM_MOVESIZESTART + EVENT_SYSTEM_MOVESIZEEND
+    // Detects when the user starts/stops dragging a window by its title bar.
+    // The daemon decides whether the dragged window is tiled and enters
+    // DragState accordingly.
+    let h = unsafe {
+        SetWinEventHook(
+            EVENT_SYSTEM_MOVESIZESTART,
+            EVENT_SYSTEM_MOVESIZEEND,
+            None,
+            Some(hook_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if is_valid_hook(h) {
+        hooks.push(h);
+        log::debug!("hook registered: MOVESIZE (drag detect)");
+    } else {
+        log::error!("failed to hook MOVESIZE");
     }
 
     // Hook: EVENT_SYSTEM_MINIMIZESTART + EVENT_SYSTEM_MINIMIZEEND
@@ -879,10 +947,12 @@ unsafe extern "system" fn hook_callback(
 
     // LOCATIONCHANGE is the ultra-noisy event: filter it hard. Only forward
     // when the window is a tracked active-workspace float AND tracking is
-    // currently enabled (disabled while flow animates floats). All other event
-    // types are forwarded unconditionally as before.
+    // currently enabled (disabled while flow animates floats), OR when the
+    // window is the currently-dragged tiled window (DRAGGED_HWND). All other
+    // event types are forwarded unconditionally as before.
     if event == EVENT_OBJECT_LOCATIONCHANGE
         && (!FLOAT_TRACKING_ACTIVE.load(Ordering::Acquire) || !is_float_hwnd(hwnd_val))
+        && DRAGGED_HWND.load(Ordering::Acquire) != hwnd_val
     {
         return;
     }
@@ -898,6 +968,8 @@ unsafe extern "system" fn hook_callback(
         EVENT_OBJECT_STATECHANGE => HookEvent::StateChange { hwnd: hwnd_val },
         EVENT_OBJECT_NAMECHANGE => HookEvent::NameChange { hwnd: hwnd_val },
         EVENT_OBJECT_LOCATIONCHANGE => HookEvent::LocationChange { hwnd: hwnd_val },
+        EVENT_SYSTEM_MOVESIZESTART => HookEvent::MoveSizeStart { hwnd: hwnd_val },
+        EVENT_SYSTEM_MOVESIZEEND => HookEvent::MoveSizeEnd { hwnd: hwnd_val },
         _ => return, // Ignore other events in the range.
     };
 
@@ -1018,5 +1090,79 @@ mod tests {
         set_float_tracking_active(true);
         assert!(float_tracking_active());
         set_float_tracking_active(original);
+    }
+
+    #[test]
+    fn event_system_movesize_constants_correct() {
+        // Microsoft Win32 event-constant values (verify invariant).
+        assert_eq!(EVENT_SYSTEM_MOVESIZESTART, 0x000A);
+        assert_eq!(EVENT_SYSTEM_MOVESIZEEND, 0x000B);
+        // START < END. Checked at compile time (operands are const).
+        const _: () = assert!(EVENT_SYSTEM_MOVESIZESTART < EVENT_SYSTEM_MOVESIZEEND);
+    }
+
+    #[test]
+    fn hook_event_move_size_start_carries_hwnd() {
+        let ev = HookEvent::MoveSizeStart { hwnd: 44444 };
+        match ev {
+            HookEvent::MoveSizeStart { hwnd } => assert_eq!(hwnd, 44444),
+            _ => panic!("expected MoveSizeStart"),
+        }
+    }
+
+    #[test]
+    fn hook_event_move_size_end_carries_hwnd() {
+        let ev = HookEvent::MoveSizeEnd { hwnd: 55555 };
+        match ev {
+            HookEvent::MoveSizeEnd { hwnd } => assert_eq!(hwnd, 55555),
+            _ => panic!("expected MoveSizeEnd"),
+        }
+    }
+
+    #[test]
+    fn dragged_hwnd_round_trip() {
+        // Start clean, then set/read/clear.
+        clear_dragged_hwnd();
+        assert_eq!(dragged_hwnd(), 0);
+        set_dragged_hwnd(98765);
+        assert_eq!(dragged_hwnd(), 98765);
+        clear_dragged_hwnd();
+        assert_eq!(dragged_hwnd(), 0);
+    }
+
+    // Positive: clear_dragged_hwnd is idempotent — clearing when the global is
+    // already 0 must be a no-op (not a panic, not a state corruption). The
+    // daemon's snap-back path calls clear unconditionally on MoveSizeEnd, so a
+    // duplicate or spurious clear (e.g. from a recovery hook) must stay safe.
+    #[test]
+    fn clear_dragged_hwnd_when_already_zero_is_noop() {
+        clear_dragged_hwnd();
+        assert_eq!(dragged_hwnd(), 0);
+        // Clear again — still 0, still no panic.
+        clear_dragged_hwnd();
+        assert_eq!(dragged_hwnd(), 0);
+        // And a third time for good measure (defends against accidental
+        // "toggle" semantics sneaking in via a refactor).
+        clear_dragged_hwnd();
+        assert_eq!(dragged_hwnd(), 0);
+    }
+
+    // Positive: set_dragged_hwnd overwrites a previously-stored value. This is
+    // the normal fast-path when one drag ends and another begins without an
+    // intervening clear (the daemon clears on MoveSizeEnd before the next
+    // MoveSizeStart, but defensive code must tolerate a set-over-set).
+    #[test]
+    fn set_dragged_hwnd_overwrites_previous_value() {
+        clear_dragged_hwnd();
+        set_dragged_hwnd(11111);
+        assert_eq!(dragged_hwnd(), 11111);
+        // Overwrite with a different HWND — must replace, not accumulate.
+        set_dragged_hwnd(22222);
+        assert_eq!(dragged_hwnd(), 22222);
+        // Overwrite with 0 directly (the value clear() writes) — equivalent to clear.
+        set_dragged_hwnd(0);
+        assert_eq!(dragged_hwnd(), 0);
+        // Cleanup for any test that runs after this one in the same process.
+        clear_dragged_hwnd();
     }
 }

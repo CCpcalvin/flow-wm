@@ -16,6 +16,7 @@
 
 use crate::common::Direction;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Target window mode for the [`SocketMessage::SetWindow`] command.
 ///
@@ -266,6 +267,65 @@ pub enum SocketMessage {
     },
     /// Remove all per-app learned preferences.
     ForgetAllApps,
+
+    // --- Loadout save / restore ---
+    /// Save the current workspace arrangement to a loadout file.
+    ///
+    /// `path: None` means the daemon should use the config-default path.
+    /// `path: Some(p)` overrides to the given file path.
+    LoadoutSave {
+        /// Destination file path, or `None` for the config default.
+        path: Option<PathBuf>,
+    },
+    /// Restore a previously saved loadout.
+    ///
+    /// `path: None` means the daemon should use the config-default path.
+    LoadoutLoad {
+        /// Source file path, or `None` for the config default.
+        path: Option<PathBuf>,
+    },
+}
+
+impl SocketMessage {
+    /// Whether this command mutates window positions or layout state.
+    ///
+    /// Returns `true` for commands that would conflict with an in-progress
+    /// tile drag (focus changes, swaps, resizes, mode toggles, workspace
+    /// switches, config reloads that re-apply geometry, and `CloseWindow`
+    /// whose async destroy reflows the layout). Read-only queries and pure
+    /// daemon lifecycle commands return `false`.
+    #[must_use]
+    pub fn is_layout_mutating(&self) -> bool {
+        matches!(
+            self,
+            Self::FocusLeft
+                | Self::FocusRight
+                | Self::FocusUp
+                | Self::FocusDown
+                | Self::SwapLeft
+                | Self::SwapRight
+                | Self::SwapUp
+                | Self::SwapDown
+                | Self::SwapColumn { .. }
+                | Self::MoveWindow { .. }
+                | Self::ScrollLeft
+                | Self::ScrollRight
+                | Self::ExpandColumn
+                | Self::ShrinkColumn
+                | Self::SetColumnWidth { .. }
+                | Self::Center
+                | Self::SetWindow { .. }
+                | Self::ToggleFloat
+                | Self::ToggleMonocle
+                | Self::Promote { .. }
+                | Self::MergeColumn { .. }
+                | Self::SwitchWorkspace { .. }
+                | Self::SwapWorkspace { .. }
+                | Self::MoveWindowToWorkspace { .. }
+                | Self::ReloadConfig
+                | Self::CloseWindow
+        )
+    }
 }
 
 /// A response sent from the `flowd` daemon back to the `flow` CLI.
@@ -284,6 +344,9 @@ pub enum SocketResponse {
         /// The query result payload.
         payload: serde_json::Value,
     },
+    /// The daemon is busy — a tile-window drag is in progress and layout-mutating
+    /// commands are temporarily rejected. The client may retry shortly.
+    Busy,
 }
 
 /// Serialise a message as a single line of JSON terminated by `\\n`.
@@ -638,6 +701,47 @@ mod tests {
         );
     }
 
+    // Positive: round-trip LoadoutSave with None path (config default)
+    #[test]
+    fn roundtrip_loadout_save_none_path() {
+        let msg = SocketMessage::LoadoutSave { path: None };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"loadout_save","path":null}"#);
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketMessage::LoadoutSave { path: None });
+    }
+
+    // Positive: round-trip LoadoutSave with explicit path
+    #[test]
+    fn roundtrip_loadout_save_some_path() {
+        let msg = SocketMessage::LoadoutSave {
+            path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"loadout_save\""));
+        assert!(json.contains("\"path\":\"C:\\\\temp\\\\loadout.json\""));
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    // Positive: round-trip LoadoutLoad
+    #[test]
+    fn roundtrip_loadout_load() {
+        let msg = SocketMessage::LoadoutLoad { path: None };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"loadout_load","path":null}"#);
+        let parsed: SocketMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketMessage::LoadoutLoad { path: None });
+    }
+
+    // Negative: unknown loadout type tag returns None
+    #[test]
+    fn decode_unknown_loadout_type_returns_none() {
+        let line = r#"{"type":"loadout_delete","path":null}"#;
+        let msg: Option<SocketMessage> = decode_message(line);
+        assert_eq!(msg, None, "unknown loadout type should return None");
+    }
+
     // --- encode_message error path ---
 
     // Negative: encode_message returns Err for a type that fails serialization
@@ -724,6 +828,14 @@ mod tests {
             SocketMessage::SwitchWorkspace { workspace_id: 1 },
             SocketMessage::SwapWorkspace { workspace_id: 2 },
             SocketMessage::MoveWindowToWorkspace { workspace_id: 3 },
+            SocketMessage::LoadoutSave { path: None },
+            SocketMessage::LoadoutSave {
+                path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+            },
+            SocketMessage::LoadoutLoad { path: None },
+            SocketMessage::LoadoutLoad {
+                path: Some(PathBuf::from("C:\\temp\\loadout.json")),
+            },
         ];
 
         for msg in &all_variants {
@@ -818,5 +930,193 @@ mod tests {
             resp, None,
             "message-shaped JSON should not parse as SocketResponse"
         );
+    }
+
+    // ── SocketResponse::Busy serialization ───────────────────────────────
+
+    // Positive: SocketResponse::Busy round-trips through serde with the
+    // `{"status":"busy"}` wire format. This is the variant the daemon returns
+    // when a tile drag is in progress and a layout-mutating command arrives.
+    #[test]
+    fn roundtrip_response_busy() {
+        let resp = SocketResponse::Busy;
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(json, r#"{"status":"busy"}"#);
+
+        let parsed: SocketResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SocketResponse::Busy);
+    }
+
+    // Positive: SocketResponse::Busy round-trips through the wire encode/decode
+    // helpers (newline-delimited transport) — same path the named-pipe transport uses.
+    #[test]
+    fn wire_format_roundtrip_response_busy() {
+        let wire = encode_message(&SocketResponse::Busy).unwrap();
+        assert_eq!(wire, "{\"status\":\"busy\"}\n");
+        let parsed: Option<SocketResponse> = decode_message(&wire);
+        assert_eq!(parsed, Some(SocketResponse::Busy));
+    }
+
+    // ── SocketMessage::is_layout_mutating ────────────────────────────────
+    //
+    // The dispatch busy gate (src/daemon/dispatch.rs) relies on this method to
+    // reject conflicting commands during a tile drag. The classification MUST
+    // match the daemon's actual mutation behaviour: every variant that touches
+    // window positions, focus, layout state, or workspace assignment must return
+    // `true`; pure queries and daemon-lifecycle commands must return `false`.
+    // A misclassification is a silent correctness bug (either a rejected
+    // read-only query, or an allowed mutating command that corrupts the drag),
+    // so the tests enumerate every variant explicitly.
+
+    // Positive: every layout-mutating variant returns true. The list is
+    // exhaustive — adding a new mutating variant without updating this list
+    // (and `is_layout_mutating`) would let a future command slip past the gate.
+    #[test]
+    fn is_layout_mutating_returns_true_for_mutating_variants() {
+        let mutating: Vec<SocketMessage> = vec![
+            // Focus (changes focused column/row — mutates layout-driven state)
+            SocketMessage::FocusLeft,
+            SocketMessage::FocusRight,
+            SocketMessage::FocusUp,
+            SocketMessage::FocusDown,
+            // Per-window swap
+            SocketMessage::SwapLeft,
+            SocketMessage::SwapRight,
+            SocketMessage::SwapUp,
+            SocketMessage::SwapDown,
+            // Column swap
+            SocketMessage::SwapColumn {
+                direction: Direction::Left,
+            },
+            // Semantic move
+            SocketMessage::MoveWindow {
+                direction: Direction::Right,
+            },
+            // Scroll (mutates viewport_offset)
+            SocketMessage::ScrollLeft,
+            SocketMessage::ScrollRight,
+            // Column resize
+            SocketMessage::ExpandColumn,
+            SocketMessage::ShrinkColumn,
+            SocketMessage::SetColumnWidth { width_px: 800 },
+            // Viewport center (mutates viewport_offset)
+            SocketMessage::Center,
+            // Window state
+            SocketMessage::SetWindow {
+                mode: WindowMode::Float,
+            },
+            SocketMessage::ToggleFloat,
+            SocketMessage::ToggleMonocle,
+            SocketMessage::Promote {
+                direction: Direction::Left,
+            },
+            SocketMessage::MergeColumn {
+                direction: Direction::Right,
+            },
+            // Workspace
+            SocketMessage::SwitchWorkspace { workspace_id: 1 },
+            SocketMessage::SwapWorkspace { workspace_id: 2 },
+            SocketMessage::MoveWindowToWorkspace { workspace_id: 3 },
+            // Config reload (re-applies geometry to every workspace)
+            SocketMessage::ReloadConfig,
+            // Close (async WM_CLOSE → destroy hook → layout reflow)
+            SocketMessage::CloseWindow,
+        ];
+
+        for msg in &mutating {
+            assert!(
+                msg.is_layout_mutating(),
+                "expected is_layout_mutating() == true for {msg:?}"
+            );
+        }
+    }
+
+    // Negative: every read-only / lifecycle variant returns false. Queries and
+    // daemon-control commands must never be blocked by the busy gate.
+    #[test]
+    fn is_layout_mutating_returns_false_for_read_only_variants() {
+        let read_only: Vec<SocketMessage> = vec![
+            // Daemon lifecycle
+            SocketMessage::Stop,
+            SocketMessage::CheckConfig,
+            // Queries
+            SocketMessage::QueryWindowsAll,
+            SocketMessage::QueryLayoutVirtual,
+            SocketMessage::QueryLayoutActual,
+            SocketMessage::QueryState,
+            // Runtime config mutation (does not move windows)
+            SocketMessage::SetConfigValue {
+                key: "gaps.inner".into(),
+                value: serde_json::json!(10),
+            },
+            // Per-app preferences (registry-only, no layout change)
+            SocketMessage::ForgetApp {
+                exe: "firefox.exe".into(),
+            },
+            SocketMessage::ForgetAllApps,
+            // Z-order only (no layout mutation)
+            SocketMessage::PlaceAbove,
+        ];
+
+        for msg in &read_only {
+            assert!(
+                !msg.is_layout_mutating(),
+                "expected is_layout_mutating() == false for {msg:?}"
+            );
+        }
+    }
+
+    // Positive: is_layout_mutating handles both Direction values for SwapColumn.
+    // Defends against a future refactor that special-cases one direction.
+    #[test]
+    fn is_layout_mutating_swap_column_both_directions() {
+        assert!(
+            SocketMessage::SwapColumn {
+                direction: Direction::Left
+            }
+            .is_layout_mutating()
+        );
+        assert!(
+            SocketMessage::SwapColumn {
+                direction: Direction::Right
+            }
+            .is_layout_mutating()
+        );
+    }
+
+    // Positive: is_layout_mutating handles both Direction values for MoveWindow.
+    #[test]
+    fn is_layout_mutating_move_window_both_directions() {
+        assert!(
+            SocketMessage::MoveWindow {
+                direction: Direction::Left
+            }
+            .is_layout_mutating()
+        );
+        assert!(
+            SocketMessage::MoveWindow {
+                direction: Direction::Right
+            }
+            .is_layout_mutating()
+        );
+    }
+
+    // Positive: is_layout_mutating handles all three WindowMode values for SetWindow.
+    #[test]
+    fn is_layout_mutating_set_window_all_modes() {
+        for mode in [WindowMode::Float, WindowMode::Tile, WindowMode::Cycle] {
+            assert!(
+                SocketMessage::SetWindow { mode }.is_layout_mutating(),
+                "SetWindow with mode {mode:?} should be layout-mutating"
+            );
+        }
+    }
+
+    // Positive: is_layout_mutating handles workspace_id of 0 (boundary).
+    #[test]
+    fn is_layout_mutating_workspace_commands_with_zero_id() {
+        assert!(SocketMessage::SwitchWorkspace { workspace_id: 0 }.is_layout_mutating());
+        assert!(SocketMessage::SwapWorkspace { workspace_id: 0 }.is_layout_mutating());
+        assert!(SocketMessage::MoveWindowToWorkspace { workspace_id: 0 }.is_layout_mutating());
     }
 }
