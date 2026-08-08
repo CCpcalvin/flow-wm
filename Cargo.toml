@@ -1,6 +1,6 @@
 [package]
 name = "flow-wm"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "A scrolling, infinite-horizontal-canvas tiling window manager for Windows"
 license = "MIT"
