@@ -29,6 +29,7 @@ use crate::hover::{HoverAction, HoverPoll, HoverTimings, edge_band_direction};
 use crate::registry::types::WindowState;
 use crate::registry::win32 as registry_win32;
 
+use super::drag::interaction_suppresses_hover;
 use super::types::FlowWM;
 
 /// Compute the already-clamped effective hover dwell durations from the config.
@@ -59,7 +60,7 @@ impl FlowWM {
     /// (the controller cancels any pending FFM dwell on band entry).
     pub(super) fn poll_hover(&mut self) {
         if (!self.config.hover.focus_follows_mouse && !self.config.hover.edge_scroll)
-            || self.drag_state.is_some()
+            || interaction_suppresses_hover(self.drag_state.as_ref())
         {
             return;
         }
@@ -133,7 +134,7 @@ impl FlowWM {
     pub(super) fn maybe_fire_focus_dwell(&mut self) {
         // Defense in depth: the hover subsystem is suppressed while a tile drag
         // is in progress (`on_drag_start` already clears this deadline).
-        if self.drag_state.is_some() {
+        if interaction_suppresses_hover(self.drag_state.as_ref()) {
             return;
         }
         if !self.config.hover.focus_follows_mouse {
@@ -171,7 +172,7 @@ impl FlowWM {
     pub(super) fn maybe_fire_edge_dwell(&mut self) {
         // Defense in depth: the hover subsystem is suppressed while a tile drag
         // is in progress (`on_drag_start` already clears this deadline).
-        if self.drag_state.is_some() {
+        if interaction_suppresses_hover(self.drag_state.as_ref()) {
             return;
         }
         if !self.config.hover.edge_scroll {
