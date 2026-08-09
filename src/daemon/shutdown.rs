@@ -92,7 +92,15 @@ impl FlowWM {
             // (not a real window). The float HWND is a live foreign window;
             // an access-denied failure is logged-and-counted, never fatal.
             let result = unsafe {
-                SetWindowPos(window.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE)
+                SetWindowPos(
+                    window.hwnd,
+                    Some(HWND_NOTOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                )
             };
             if result.is_ok() {
                 released += 1;

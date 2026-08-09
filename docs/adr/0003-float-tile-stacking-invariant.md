@@ -2,6 +2,8 @@
 
 > **Revision.** The original decision (raise-then-restore via `SetWindowPos` seat-above in the focus sink) was **disproved by the #2 spike**: `SetWindowPos` succeeds but cannot keep a normal app window above the *foreground* window — Windows re-asserts the foreground on top (validated against `debug.log` + Win32 docs/SO). This revision records the pivot to a **TOPMOST toggle**, backed by PowerToys Always-On-Top as first-party prior art.
 
+> **Partial supersession by [ADR-0007](0007-drop-lowers-floats-below-foreground.md).** The *invariant* below still holds. But the *drop mechanism* — "dropped to non-topmost" implemented as a single `SetWindowPos(HWND_NOTOPMOST)` — was disproved: clearing `WS_EX_TOPMOST` leaves the float at the top of the non-topmost band, *above* a non-topmost fullscreen foreground, so the float never actually hides. ADR-0007 corrects "drop" to mean demote-**and-lower** below the foreground. Read both together.
+
 Floating windows are kept `WS_EX_TOPMOST` **while flow owns the foreground**, and dropped to non-topmost the moment the foreground moves to a fullscreen app or any non-flow window. The invariant is enforced in `on_focus_changed` — the single sink for all foreground changes — and re-evaluated on the foreground window's own resize (so F11 in any app is caught). "Focus" and "raise" stay distinct vocabulary (`CONTEXT.md`): focusing a tile gives it input + active border + scroll-to-reveal; the float simply stays on top because it is TOPMOST, not because it was re-seated. This ships **always-on, with no configuration knob.**
 
 ## Context

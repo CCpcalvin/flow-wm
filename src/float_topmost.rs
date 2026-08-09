@@ -41,6 +41,44 @@ pub enum TopmostAction {
     NoOp,
 }
 
+/// How a [`TopmostAction::Drop`] should lower the float layer below the
+/// foreground. The pure [`decide_float_topmost`] answers only *whether* to
+/// drop; this answers *how*, branched on the foreground kind per
+/// ADR-0007 (`docs/adr/0007-drop-lowers-floats-below-foreground.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropMechanism {
+    /// Demote (clear `WS_EX_TOPMOST`) and send to `HWND_BOTTOM` so a
+    /// non-topmost fullscreen foreground covers the float entirely. The
+    /// fullscreen app covers the screen, so bottoming self-containedly hides
+    /// the float without ever touching the foreign window.
+    ToBottom,
+    /// Demote and re-raise the foreign foreground above the float
+    /// (`SetWindowPos(foreground, HWND_TOP, NOACTIVATE)`), so a small non-flow
+    /// app yields the float without sinking it below every tile. **Scaffold**:
+    /// the wiring keeps the pre-ADR-0007 plain-demote behavior for non-flow
+    /// foregrounds until #23 lands this op.
+    ReRaiseForeground,
+}
+
+/// Choose the lowering [`DropMechanism`] for a `Drop` from the foreground kind.
+///
+/// A [`ForegroundKind::Fullscreen`] foreground uses
+/// [`DropMechanism::ToBottom`] (the fullscreen app covers the whole screen, so
+/// bottoming hides the float self-containedly). A [`ForegroundKind::NonFlow`]
+/// foreground will use [`DropMechanism::ReRaiseForeground`] once #23 lands the
+/// re-raise op; until then the wiring treats it as a plain demote.
+/// [`ForegroundKind::Flow`] never produces a `Drop` from [`decide_float_topmost`]
+/// — the value returned here for `Flow` is unreachable in the wiring and exists
+/// only for exhaustiveness.
+/// (`docs/adr/0007-drop-lowers-floats-below-foreground.md`)
+#[must_use]
+pub fn decide_drop_mechanism(foreground: ForegroundKind) -> DropMechanism {
+    match foreground {
+        ForegroundKind::Fullscreen => DropMechanism::ToBottom,
+        ForegroundKind::NonFlow | ForegroundKind::Flow => DropMechanism::ReRaiseForeground,
+    }
+}
+
 /// Inputs to [`decide_float_topmost`] for one foreground change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloatTopmostSnapshot {
@@ -259,6 +297,78 @@ mod tests {
                 TopmostAction::NoOp
             );
         }
+    }
+
+    // ── decide_drop_mechanism (ticket #22): how a Drop lowers ────────
+
+    /// Criterion: a fullscreen foreground chooses the ToBottom mechanism —
+    /// demote + `HWND_BOTTOM` — so a non-topmost fullscreen app covers the
+    /// float entirely. Pure decision asserted, never any `SetWindowPos`.
+    #[test]
+    fn fullscreen_foreground_chooses_to_bottom_drop() {
+        assert_eq!(
+            decide_drop_mechanism(ForegroundKind::Fullscreen),
+            DropMechanism::ToBottom,
+        );
+    }
+
+    /// Criterion: a non-flow foreground maps to the ReRaiseForeground
+    /// mechanism. Today this is scaffold — the wiring keeps plain-demote
+    /// behavior — but the pure decision already records #23's intent so the
+    /// branch is in place.
+    #[test]
+    fn non_flow_foreground_chooses_re_raise_scaffold() {
+        assert_eq!(
+            decide_drop_mechanism(ForegroundKind::NonFlow),
+            DropMechanism::ReRaiseForeground,
+        );
+    }
+
+    /// A `Flow` foreground never reaches a `Drop` in the wiring (the snapshot
+    /// decision returns `Pin` or `NoOp` for `Flow`), so the mechanism returned
+    /// here is unreachable. Asserted for exhaustiveness and to lock the
+    /// non-bottom default: a future change that accidentally routes `Flow` to
+    /// `ToBottom` would silently bottom floats under a flow foreground.
+    #[test]
+    fn flow_foreground_never_chooses_to_bottom() {
+        assert_eq!(
+            decide_drop_mechanism(ForegroundKind::Flow),
+            DropMechanism::ReRaiseForeground,
+        );
+    }
+
+    /// End-to-end transition sequence: windowed flow app (Pin) → fullscreen
+    /// transition (Drop + ToBottom) → exit fullscreen (Pin). The mechanism
+    /// tracks the live fullscreen verdict alongside the snapshot decision.
+    #[test]
+    fn drop_mechanism_tracks_fullscreen_transition() {
+        // Focused flow app, windowed → floats pin; no Drop, no mechanism.
+        let pin = decide_float_topmost(FloatTopmostSnapshot {
+            foreground: classify_foreground(true, false),
+            has_floats: true,
+            currently_topmost: false,
+        });
+        assert_eq!(pin, TopmostAction::Pin);
+
+        // F11 → fullscreen. Drop decision + ToBottom mechanism.
+        let drop = decide_float_topmost(FloatTopmostSnapshot {
+            foreground: classify_foreground(true, true),
+            has_floats: true,
+            currently_topmost: true,
+        });
+        assert_eq!(drop, TopmostAction::Drop);
+        assert_eq!(
+            decide_drop_mechanism(classify_foreground(true, true)),
+            DropMechanism::ToBottom,
+        );
+
+        // Exit F11 → windowed again → re-pin.
+        let re_pin = decide_float_topmost(FloatTopmostSnapshot {
+            foreground: classify_foreground(true, false),
+            has_floats: true,
+            currently_topmost: false,
+        });
+        assert_eq!(re_pin, TopmostAction::Pin);
     }
 
     // ── re-assertion (ticket #7): per-float reality check ───────────
