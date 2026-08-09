@@ -54,9 +54,7 @@ pub enum DropMechanism {
     ToBottom,
     /// Demote and re-raise the foreign foreground above the float
     /// (`SetWindowPos(foreground, HWND_TOP, NOACTIVATE)`), so a small non-flow
-    /// app yields the float without sinking it below every tile. **Scaffold**:
-    /// the wiring keeps the pre-ADR-0007 plain-demote behavior for non-flow
-    /// foregrounds until #23 lands this op.
+    /// app yields the float without sinking it below every tile.
     ReRaiseForeground,
 }
 
@@ -65,8 +63,8 @@ pub enum DropMechanism {
 /// A [`ForegroundKind::Fullscreen`] foreground uses
 /// [`DropMechanism::ToBottom`] (the fullscreen app covers the whole screen, so
 /// bottoming hides the float self-containedly). A [`ForegroundKind::NonFlow`]
-/// foreground will use [`DropMechanism::ReRaiseForeground`] once #23 lands the
-/// re-raise op; until then the wiring treats it as a plain demote.
+/// foreground uses [`DropMechanism::ReRaiseForeground`] — the demoted float
+/// yields to the focused app without sinking below the tiles.
 /// [`ForegroundKind::Flow`] never produces a `Drop` from [`decide_float_topmost`]
 /// — the value returned here for `Flow` is unreachable in the wiring and exists
 /// only for exhaustiveness.
@@ -313,11 +311,11 @@ mod tests {
     }
 
     /// Criterion: a non-flow foreground maps to the ReRaiseForeground
-    /// mechanism. Today this is scaffold — the wiring keeps plain-demote
-    /// behavior — but the pure decision already records #23's intent so the
-    /// branch is in place.
+    /// mechanism — demote the floats, then re-raise the foreign foreground
+    /// (`HWND_TOP`) above them so they yield without sinking below the tiles.
+    /// Pure decision asserted, never any `SetWindowPos`.
     #[test]
-    fn non_flow_foreground_chooses_re_raise_scaffold() {
+    fn non_flow_foreground_chooses_re_raise() {
         assert_eq!(
             decide_drop_mechanism(ForegroundKind::NonFlow),
             DropMechanism::ReRaiseForeground,
