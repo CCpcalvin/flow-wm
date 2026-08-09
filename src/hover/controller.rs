@@ -21,9 +21,13 @@
 //!   sufficient dwell also rejects jitter; see `docs/src/dev-guide/hover.md`).
 //!   The first poll has
 //!   no previous position, so it never arms — the cursor must actually move.
-//! - **Alt-tab respect:** any foreground-change event cancels the dwell. After
-//!   the cancel the cursor has not moved, so the dwell cannot re-arm until the
-//!   mouse moves — no steal-back, with no keyboard detection or cooldown.
+//! - **Alt-tab respect:** any foreground-change event cancels the dwell. This
+//!   holds a steal-back at bay **only while the cursor is still** — a cursor
+//!   that keeps moving re-arms on the next poll and can steal focus back. The
+//!   moving-cursor case (notably during an IPC-driven workspace switch or
+//!   viewport scroll) is handled upstream by suppressing the whole hover
+//!   subsystem for the animation's duration; see
+//!   `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
 //! - **Edge-band precedence:** when the cursor is in an edge band the edge path
 //!   owns the poll and any pending focus-follows-mouse dwell is cancelled.
 //! - **Edge-dwell:** entry arms an edge-dwell timer; its expiry emits

@@ -200,11 +200,14 @@ impl FlowWM {
     ///
     /// An external focus change (alt-tab, click, or a self-induced push) cancels
     /// any pending focus-follows-mouse dwell, so the window the mouse happens to
-    /// sit on does not immediately steal focus back. After the cancel the cursor
-    /// has not moved, so the dwell cannot re-arm until the mouse actually moves
-    /// — the movement-gate defeats the classic alt-tab steal-back with no
-    /// keyboard detection or cooldown. Called from
-    /// [`FlowWM::on_focus_changed`].
+    /// sit on does not immediately steal focus back while the cursor is still.
+    /// Note this cancel only holds **while the cursor is still**: a cursor that
+    /// keeps moving re-arms on the next poll and can steal focus back — the
+    /// moving-cursor case (during an IPC-driven workspace switch or viewport
+    /// scroll) is handled by suspending hover for the animation's duration, not
+    /// here. See
+    /// `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+    /// Called from [`FlowWM::on_focus_changed`].
     pub(super) fn on_hover_foreground_change(&mut self) {
         let action = self.hover.on_foreground_change();
         self.apply_hover_action(action);
