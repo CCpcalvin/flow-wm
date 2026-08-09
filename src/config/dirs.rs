@@ -485,10 +485,7 @@ mod tests {
             Some(val) => unsafe { std::env::set_var(CONFIG_DIR_ENV, val) },
             None => unsafe { std::env::remove_var(CONFIG_DIR_ENV) },
         }
-        assert_eq!(
-            dir, expected,
-            "env var should override default"
-        );
+        assert_eq!(dir, expected, "env var should override default");
     }
 
     /// Positive: default path is used when neither override nor env var is set.
