@@ -106,6 +106,17 @@ impl DragMode {
     }
 }
 
+/// Whether an in-progress interaction should suppress focus-follows-mouse and
+/// edge-hover-scroll.
+///
+/// Pure and Win32-free so it is unit-testable. The three hover entry points
+/// (`poll_hover`, `maybe_fire_focus_dwell`, `maybe_fire_edge_dwell`) consult
+/// this instead of inlining `drag_state.is_some()`.
+#[must_use]
+pub(super) fn interaction_suppresses_hover(mode: Option<&DragMode>) -> bool {
+    mode.is_some()
+}
+
 /// Provisional `Classifying` payload: identity + the start rect.
 pub(super) struct ClassifyingDrag {
     /// The layout-engine ID of the dragged window.
@@ -1110,5 +1121,57 @@ mod tests {
             None
         );
         assert_eq!(scroll_direction(None), None);
+    }
+
+    fn classifying() -> DragMode {
+        DragMode::Classifying(ClassifyingDrag {
+            dragged_id: WindowId(1),
+            dragged_hwnd: 1,
+            start_rect: Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+        })
+    }
+
+    fn translate() -> DragMode {
+        DragMode::Translate(DragState {
+            dragged_id: WindowId(1),
+            dragged_hwnd: 1,
+            current_zone: None,
+        })
+    }
+
+    fn resize() -> DragMode {
+        DragMode::Resize(ResizeDrag {
+            dragged_id: WindowId(1),
+            dragged_hwnd: 1,
+            grip_h: ResizeEdge::default(),
+            grip_v: VerticalEdge::default(),
+            col: 0,
+            row: 0,
+        })
+    }
+
+    #[test]
+    fn idle_does_not_suppress_hover() {
+        assert!(!interaction_suppresses_hover(None));
+    }
+
+    #[test]
+    fn classifying_drag_suppresses_hover() {
+        assert!(interaction_suppresses_hover(Some(&classifying())));
+    }
+
+    #[test]
+    fn translate_drag_suppresses_hover() {
+        assert!(interaction_suppresses_hover(Some(&translate())));
+    }
+
+    #[test]
+    fn resize_drag_suppresses_hover() {
+        assert!(interaction_suppresses_hover(Some(&resize())));
     }
 }
