@@ -822,6 +822,10 @@ strategy = "original_slot"
             contents.contains("min_column_width_px = 640"),
             "flow.toml should be the full example, not an empty stub"
         );
+        assert!(
+            contents.contains("min_row_height_px = 100"),
+            "flow.toml should carry the min_row_height_px default (ticket #10)"
+        );
 
         // flow-rules.toml should start with the schema header.
         let contents = std::fs::read_to_string(dir.join("flow-rules.toml")).unwrap();

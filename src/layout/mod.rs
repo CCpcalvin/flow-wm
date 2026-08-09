@@ -32,6 +32,7 @@
 pub mod mutations;
 pub mod preview;
 pub mod projection;
+pub mod resize;
 pub mod types;
 
 pub use mutations::NeighborLocation;

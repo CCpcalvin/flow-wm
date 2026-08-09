@@ -462,8 +462,9 @@ mod tests {
     /// Positive: CLI override is used when provided.
     #[test]
     fn resolve_config_dir_with_override_uses_override() {
-        let custom = Path::new("C:\\my-custom-config");
-        let dir = resolve_config_dir(Some(custom));
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("my-custom-config");
+        let dir = resolve_config_dir(Some(custom.as_path()));
         assert_eq!(dir, custom, "CLI override should be used directly");
     }
 
@@ -475,7 +476,9 @@ mod tests {
     fn resolve_config_dir_without_override_uses_env() {
         let _guard = ENV_LOCK.lock().unwrap();
         let original = std::env::var(CONFIG_DIR_ENV).ok();
-        unsafe { std::env::set_var(CONFIG_DIR_ENV, "C:\\env-config\\flow") };
+        let tmp = tempfile::tempdir().unwrap();
+        let expected = tmp.path().join("flow");
+        unsafe { std::env::set_var(CONFIG_DIR_ENV, expected.as_os_str()) };
         let dir = resolve_config_dir(None);
         // Restore
         match original {
@@ -483,8 +486,7 @@ mod tests {
             None => unsafe { std::env::remove_var(CONFIG_DIR_ENV) },
         }
         assert_eq!(
-            dir,
-            PathBuf::from("C:\\env-config\\flow"),
+            dir, expected,
             "env var should override default"
         );
     }
@@ -520,11 +522,14 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         // Arrange: set FLOW_CONFIG_DIR to a different directory.
         let original = std::env::var(CONFIG_DIR_ENV).ok();
-        unsafe { std::env::set_var(CONFIG_DIR_ENV, "C:\\env-config\\flow") };
+        let env_tmp = tempfile::tempdir().unwrap();
+        let env_val = env_tmp.path().join("flow");
+        unsafe { std::env::set_var(CONFIG_DIR_ENV, env_val.as_os_str()) };
 
         // Act: resolve with a CLI override that differs from the env var.
-        let cli_path = Path::new("C:\\cli-override\\flow");
-        let dir = resolve_config_dir(Some(cli_path));
+        let cli_tmp = tempfile::tempdir().unwrap();
+        let cli_path = cli_tmp.path().join("flow");
+        let dir = resolve_config_dir(Some(cli_path.as_path()));
 
         // Restore env.
         match original {
@@ -538,8 +543,7 @@ mod tests {
             "CLI override must win over FLOW_CONFIG_DIR env var"
         );
         assert_ne!(
-            dir,
-            PathBuf::from("C:\\env-config\\flow"),
+            dir, env_val,
             "env var path must not be returned when CLI override is given"
         );
     }

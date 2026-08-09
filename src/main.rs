@@ -46,8 +46,8 @@ struct Args {
 
     /// Skip auto-restore of the last loadout at startup. Forwarded by
     /// `flow start --no-restore`. When absent, the daemon restores the
-    /// config-default loadout after initialization (honoring `max_age_secs`);
-    /// a missing or stale loadout silently starts fresh.
+    /// config-default loadout after initialization; a missing loadout
+    /// silently starts fresh.
     #[arg(long)]
     no_restore: bool,
 
@@ -146,7 +146,7 @@ fn run(args: Args) -> Result<(), String> {
     // 6. Auto-restore the last loadout unless the user opted out. Runs
     //    in-process (not via IPC), after the registry + layout are
     //    initialized and before the event loop starts, so there is no
-    //    startup pipe race. Best-effort: a missing/stale/unmatched loadout
+    //    startup pipe race. Best-effort: a missing/unmatched loadout
     //    never blocks startup.
     if !args.no_restore {
         flow.try_restore_loadout_default();
