@@ -175,12 +175,19 @@ impl FlowWM {
         // seat-below-window-X primitive; `SetWindowPos(A, B)` seats A above B).
         let fg_hwnd = HWND(foreground as *mut _);
         let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
-        // SAFETY: `SetWindowPos` on a foreground flow may not own.
-        // NOACTIVATE|NOMOVE|NOSIZE restricts the effect to Z-order. `HWND_TOP`
-        // is a sentinel HWND (value 0) seating the window at the top of its
-        // band. An elevated foreground (Task Manager, `uiAccess`, UWP) denies
-        // with `ERROR_ACCESS_DENIED` — logged and skipped, never fatal; the
-        // float stays above such an app (ADR-0007's accepted UIPI wall).
+        // SAFETY: `SetWindowPos` on a foreground flow may not own — the
+        // deliberate, bounded cost ADR-0007 accepts for correct non-flow
+        // behavior. `NOACTIVATE|NOMOVE|NOSIZE` touches only Z-order, so the
+        // focused app is neither reactivated nor moved/resized. `HWND_TOP` is a
+        // sentinel HWND (value 0) that seats the window at the top of its band,
+        // going *with* Windows' own foreground preference — not the
+        // seat-*above*-foreground that ADR-0003's #2 spike disproved. An
+        // elevated foreground (Task Manager, `uiAccess`, UWP) denies with
+        // `ERROR_ACCESS_DENIED` — logged and skipped, never fatal; the float
+        // stays above such an app (the same UIPI wall ADR-0003 accepts for
+        // elevated floats). Idempotent: once the foreground is already above the
+        // float the next reconcile is a `NoOp` (floats_topmost == false), so any
+        // hook echo the re-raise fires converges in one pass — no busy-loop.
         if let Err(e) = unsafe { SetWindowPos(fg_hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags) } {
             log::warn!("foreground re-raise failed for hwnd {foreground}: {e}");
         }
