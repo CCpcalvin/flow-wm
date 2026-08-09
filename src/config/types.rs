@@ -829,8 +829,10 @@ pub struct FloatingConfig {
 /// When a user drags a tiled window by its title bar, a live non-committing
 /// preview reflows the other windows to the prospective layout on each zone
 /// change; on release the move commits and the dragged window snaps into its
-/// slot. Floating windows never enter the drag state machine. See
-/// (`docs/src/dev-guide/tile-drag.md`).
+/// slot. Floating windows now occupy the drag state machine via
+/// `DragMode::Float` for the duration of a move-size gesture (see
+/// `docs/adr/0008-floats-enter-dragmode.md`); these knobs remain tile-only.
+/// See (`docs/src/dev-guide/tile-drag.md`).
 ///
 /// Only the drag-specific column-insert hit-band knobs live here; the shared
 /// edge-scroll band width and auto-repeat timings live in [`EdgeScrollConfig`].

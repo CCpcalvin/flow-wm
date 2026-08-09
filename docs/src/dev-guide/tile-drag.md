@@ -7,8 +7,12 @@ window snaps into its tile.
 
 The drag works **entirely within the tiling model**. A tile never becomes a
 float mid-drag, and a float never becomes a tile. Dragging a floating window
-is handled by the ordinary float-sync path (`store_float_rect`), not by this
-module. There is no config flag — the feature is always on.
+*does* enter the shared `drag_state` (as `DragMode::Float`, solely so the
+existing `drag_state`-suppresses-hover invariant covers the gesture), but its
+`LOCATIONCHANGE` arm just calls the ordinary float-sync path
+(`store_float_rect`) — no drop-zone resolution, no preview reflow, no layout
+commit. Those tile-only mechanics are the subject of this chapter. There is
+no config flag — the feature is always on.
 
 This is a deliberate departure from the earlier design, which converted the
 dragged window to a float for the duration of the drag and converted it back
@@ -139,14 +143,25 @@ else                               { on_float_location_changed(hwnd) }
 
 `MoveSizeStart` routes to `on_drag_start`; `MoveSizeEnd` to `on_drag_end`.
 
-### Why float drags need no special routing
+### Why float drags need no special routing in *this* chapter
 
-Because `on_drag_start` early-returns for any window that is not
-`Tiling::Active`, a floating window's `drag_state` is never set. Its
-`LOCATIONCHANGE` events therefore continue routing to
-`on_float_location_changed` → `store_float_rect` for the entire drag — the
-float follows the mouse in real time, exactly as it does outside a drag. That
-is the whole float-drag behavior, with zero wiring in this module.
+A floating window does enter the drag state machine — on a `Floating`-hwnd
+`MoveSizeStart`, `on_drag_start` installs `DragMode::Float` directly (skipping
+`Classifying`), and `drag_state` stays occupied for the whole
+`MoveSizeStart`→`MoveSizeEnd` window so the shared
+`drag_state`-suppresses-hover invariant disables FFM and edge-scroll for the
+duration. That occupancy is *why* the router below sends a dragged float's
+`LOCATIONCHANGE` events to `on_drag_move`, whose float arm simply calls
+`store_float_rect` — the same logic the passive float-sync path uses — so the
+stored rect keeps syncing live. There is no layout to commit on release (the
+final rect was already synced on the last location-change), so the float arm
+of `on_drag_end` clears `drag_state` and does nothing else. The tile-only
+machinery documented in this chapter — drop-zone resolution, preview reflow,
+classify-then-commit — does not apply to floats; the float variant is a thin
+wrapper around `store_float_rect`. The boundary reversal that pulled floats
+into `drag_state` is recorded in `docs/adr/0008-floats-enter-dragmode.md`;
+programmatic float changes (which do not fire `MoveSizeStart`) stay on the
+passive sync path, unaffected.
 
 For the general hook pipeline architecture — how the hook thread, the mpsc
 channel, and `WaitForMultipleObjects` interact — see *Event Pipelines*
@@ -503,4 +518,7 @@ exactly once, in the way the preview promised, or it did not change at all.
   mutate-then-project pipeline that `resolve_drop_zone` reads and
   `preview_move` writes.
 - (floating-space.md) — the float-sync path (`store_float_rect`) that handles
-  floating-window drags; the tile drag never enters it.
+  programmatic float changes; the tile drag never enters it. A user-initiated
+  float drag routes to `on_drag_move`'s float arm, which calls the same
+  `store_float_rect` while occupying `DragMode::Float`
+  (`docs/adr/0008-floats-enter-dragmode.md`).

@@ -26,9 +26,15 @@
 //! grip composes the horizontal and vertical boundary-moves in one gesture
 //! (they touch disjoint fields, so they commute).
 //!
-//! Floating windows never enter [`DragMode`] (they stay on the real-time
-//! float-sync path in `run.rs`, which routes their `LOCATIONCHANGE` events to
-//! `on_float_location_changed` because `drag_state` is never set for them).
+//! Floating windows enter [`DragMode::Float`] on a `Floating`-hwnd
+//! `MoveSizeStart` and hold `drag_state` for the whole
+//! `MoveSizeStart`→`MoveSizeEnd` window, so the existing
+//! `drag_state`-suppresses-hover invariant covers them too (no parallel flag).
+//! Their `LOCATIONCHANGE` events route to [`FlowWM::on_drag_move`] — which
+//! writes the live rect back via [`FlowWM::store_float_rect`] — instead of the
+//! passive float-sync path, because `run.rs` keys off
+//! [`DragMode::dragged_hwnd`]. This reverses the earlier "floats never enter
+//! `DragMode`" boundary; see `docs/adr/0008-floats-enter-dragmode.md`.
 //!
 //! Because resize lives in the same `drag_state` field, the existing IPC
 //! `Busy` guard (layout-mutating commands rejected while `drag_state` is
@@ -218,7 +224,7 @@ pub(super) struct FloatDrag {
 // Handler methods on FlowWM
 //
 // Called from `process_hook_events` in `run.rs` on MoveSizeStart/MoveSizeEnd
-// and LocationChange events during a tile drag.
+// and LocationChange events during a tile or float drag.
 
 /// Compute the already-clamped effective edge-scroll timings from the shared
 /// edge-scroll config.
