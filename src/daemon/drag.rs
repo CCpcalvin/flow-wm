@@ -82,6 +82,14 @@ pub(super) enum DragMode {
     Translate(DragState),
     /// Horizontal edge/corner column resize — ticket #9.
     Resize(ResizeDrag),
+    /// Floating-window move/resize — ticket #26. Entered directly on a float
+    /// `MoveSizeStart` (skipping [`Classifying`](DragMode::Classifying)) and held
+    /// for the whole `MoveSizeStart`→`MoveSizeEnd` window so the existing
+    /// `drag_state`-suppresses-hover invariant covers floats. Its move handler
+    /// calls [`FlowWM::store_float_rect`] so the stored rect keeps syncing live
+    /// (the passive float-sync path is bypassed while the float owns
+    /// `drag_state`); its end handler performs no layout commit.
+    Float(FloatDrag),
 }
 
 impl DragMode {
@@ -92,6 +100,7 @@ impl DragMode {
             DragMode::Classifying(c) => c.dragged_id,
             DragMode::Translate(t) => t.dragged_id,
             DragMode::Resize(r) => r.dragged_id,
+            DragMode::Float(f) => f.dragged_id,
         }
     }
 
@@ -102,6 +111,7 @@ impl DragMode {
             DragMode::Classifying(c) => c.dragged_hwnd,
             DragMode::Translate(t) => t.dragged_hwnd,
             DragMode::Resize(r) => r.dragged_hwnd,
+            DragMode::Float(f) => f.dragged_hwnd,
         }
     }
 }
@@ -186,6 +196,24 @@ pub(super) struct ResizeDrag {
     pub(super) row: usize,
 }
 
+/// State held during a floating-window move or resize (the `Float` variant).
+/// Ticket #26.
+///
+/// One variant covers both title-bar drag and edge resize for the whole
+/// `MoveSizeStart`→`MoveSizeEnd` window: there is no move/resize split, since
+/// both just write the rect back to the registry/`FloatingSpace` via
+/// [`FlowWM::store_float_rect`] on each `LOCATIONCHANGE`. No `start_rect` is
+/// captured (no rect-diff classification — floats skip `Classifying`) and no
+/// grip edges are tracked (no layout commit on release). Identity alone is
+/// carried so `dragged_hwnd()` routes the float's `LOCATIONCHANGE` events here
+/// instead of to the passive float-sync path.
+pub(super) struct FloatDrag {
+    /// The layout-engine ID of the dragged float.
+    pub(super) dragged_id: WindowId,
+    /// The raw HWND value (for the `DRAGGED_HWND` global / event routing).
+    pub(super) dragged_hwnd: isize,
+}
+
 // ---------------------------------------------------------------------------
 // Handler methods on FlowWM
 //
@@ -211,15 +239,28 @@ pub(super) fn edge_scroll_timings_for(config: &FlowConfig) -> EdgeScrollTimings 
 }
 
 impl FlowWM {
-    /// Begin a tile-window drag (tiles only).
+    /// Begin a window drag — tiles (classify → translate/resize) and floats.
     ///
-    /// Called on `MoveSizeStart` for any tracked window. Enters the
-    /// [`DragMode::Classifying`] provisional state only when the window is
-    /// `Tiling(Active)`; otherwise it returns early. Crucially, **floating
-    /// windows never set `drag_state`**, so `run.rs` keeps routing their
-    /// `LOCATIONCHANGE` events to the real-time float-sync path
-    /// (`on_float_location_changed`) — that is the entire float-drag behavior,
-    /// with no wiring change needed here.
+    /// Called on `MoveSizeStart` for any tracked window. Two admission paths:
+    /// - `Tiling(Active)` → enter [`DragMode::Classifying`] (the provisional
+    ///   state that classifies into [`Translate`](DragMode::Translate) or
+    ///   [`Resize`](DragMode::Resize) on the first `LOCATIONCHANGE`).
+    /// - [`Floating`](WindowState::Floating) → enter [`DragMode::Float`]
+    ///   directly, skipping classification. The float owns `drag_state` for the
+    ///   whole `MoveSizeStart`→`MoveSizeEnd` window, so the existing
+    ///   `drag_state`-suppresses-hover invariant disables focus-follows-mouse
+    ///   (and edge-scroll) for the duration — no parallel flag. The float's
+    ///   `LOCATIONCHANGE` events route to [`Self::on_drag_move`] (which writes
+    ///   the live rect back to the registry/`FloatingSpace`) instead of the
+    ///   passive float-sync path, because `run.rs` keys off
+    ///   [`DragMode::dragged_hwnd`].
+    ///
+    /// Both paths perform the same FFM teardown at grab start — reset the shared
+    /// edge-scroll scheduler + timings, clear `edge_scroll_deadline`, clear the
+    /// armed focus-dwell and edge-dwell deadlines, and `hover.reset()` — so an
+    /// already-armed dwell can't fire into the gesture. The tile border recolor
+    /// (focused) is tile-only: floats keep their own border handling on the
+    /// float-sync path.
     ///
     /// Entering `Classifying` immediately routes the dragged tile's subsequent
     /// `LOCATIONCHANGE` events into the drag path (not the float-sync path),
@@ -228,40 +269,29 @@ impl FlowWM {
     /// `Resize` via [`classify_drag`] (see [`Self::classify_and_promote`]). A
     /// click with no movement stays `Classifying` and is a no-op on release.
     ///
-    /// No-op if the window is not found or is not an active tile.
+    /// No-op if the window is not found or is neither an active tile nor a float.
     pub(super) fn on_drag_start(&mut self, hwnd: isize) {
         let hwnd_handle = HWND(hwnd as *mut _);
         let Some(window) = self.registry.get_window(hwnd_handle) else {
             return;
         };
-        // Only tiles enter the drag state machine. Floats stay on the normal
-        // float-sync path (run.rs routes their LOCATIONCHANGE to
-        // on_float_location_changed because drag_state is never set for them).
-        if !matches!(
-            window.state,
-            WindowState::Tiling(TilingState::Active { .. })
-        ) {
-            return;
+        match window.state {
+            WindowState::Tiling(TilingState::Active { .. }) => {
+                self.start_tile_drag(hwnd, hwnd_handle);
+            }
+            WindowState::Floating(_) => {
+                self.start_float_drag(hwnd);
+            }
+            // Non-active tiles and anything else: no drag state.
+            _ => {}
         }
+    }
 
-        // Arm the shared edge-scroll scheduler fresh for this drag (mirrors the
-        // old per-drag `EdgeScrollScheduler::new()`), set this drag's clamped
-        // timings (read from the shared `[edge_scroll]` config block via
-        // [`edge_scroll_timings_for`]), and clear any stale deadline. The
-        // scheduler is a single instance on the orchestrator now — shared by the
-        // drag feed (a `Translate` drag) and the hover edge-dwell feed — so it
-        // is reset here at grab start; see `edge_scroll`.
-        self.edge_scroll = EdgeScrollScheduler::new();
-        self.edge_scroll_timings = edge_scroll_timings_for(&self.config);
-        self.edge_scroll_deadline = None;
-        // The entire hover subsystem is suppressed during a drag: cancel any
-        // armed focus/edge dwell so neither can fire mid-drag (the drag owns the
-        // shared scheduler while `drag_state` is set), and reset the controller
-        // so edge-hover-scroll re-arms cleanly when polling resumes after the
-        // drag — even if the cursor never leaves the band.
-        self.focus_dwell_deadline = None;
-        self.edge_dwell_deadline = None;
-        self.hover.reset();
+    /// Tile admission path of [`Self::on_drag_start`]: perform the shared FFM
+    /// teardown, capture the start rect for the rect-diff classifier, install
+    /// [`DragMode::Classifying`], and recolor the tile border focused.
+    fn start_tile_drag(&mut self, hwnd: isize, hwnd_handle: HWND) {
+        self.teardown_hover_for_drag();
 
         // Capture the start rect for the rect-diff classifier. Falls back to a
         // zero rect on failure (classify_drag will then see the first move as a
@@ -293,6 +323,44 @@ impl FlowWM {
         log::debug!("drag start: hwnd={hwnd} (classifying)");
     }
 
+    /// Float admission path of [`Self::on_drag_start`]: perform the shared FFM
+    /// teardown and install [`DragMode::Float`]. Floats skip `Classifying` (no
+    /// rect-diff classification) and the tile border recolor (floats keep their
+    /// own border handling on the float-sync path).
+    fn start_float_drag(&mut self, hwnd: isize) {
+        self.teardown_hover_for_drag();
+
+        self.drag_state = Some(DragMode::Float(FloatDrag {
+            dragged_id: WindowId(hwnd),
+            dragged_hwnd: hwnd,
+        }));
+
+        set_dragged_hwnd(hwnd);
+
+        log::debug!("drag start: hwnd={hwnd} (float)");
+    }
+
+    /// Shared FFM teardown performed at the start of every drag (tile or float):
+    /// reset the shared edge-scroll scheduler + timings, clear its armed
+    /// deadline, cancel any armed focus/edge dwell so neither can fire mid-drag,
+    /// and reset the hover controller so edge-hover-scroll re-arms cleanly when
+    /// polling resumes after the drag.
+    fn teardown_hover_for_drag(&mut self) {
+        // Arm the shared edge-scroll scheduler fresh for this drag (mirrors the
+        // old per-drag `EdgeScrollScheduler::new()`), set this drag's clamped
+        // timings (read from the shared `[edge_scroll]` config block via
+        // [`edge_scroll_timings_for`]), and clear any stale deadline. The
+        // scheduler is a single instance on the orchestrator now — shared by the
+        // drag feed (a `Translate` drag) and the hover edge-dwell feed — so it
+        // is reset here at grab start; see `edge_scroll`.
+        self.edge_scroll = EdgeScrollScheduler::new();
+        self.edge_scroll_timings = edge_scroll_timings_for(&self.config);
+        self.edge_scroll_deadline = None;
+        self.focus_dwell_deadline = None;
+        self.edge_dwell_deadline = None;
+        self.hover.reset();
+    }
+
     /// Dispatch a `LOCATIONCHANGE` for the dragged window to the active drag
     /// variant.
     ///
@@ -304,6 +372,10 @@ impl FlowWM {
     ///   title-bar reorder preview).
     /// - [`DragMode::Resize`] → [`Self::on_resize_move`] (the boundary-move
     ///   teleport preview).
+    /// - [`DragMode::Float`] → [`Self::store_float_rect`] (live rect-sync: the
+    ///   same logic the passive float-sync path uses, so the stored rect / float
+    ///   layer ordering stay accurate during the gesture). No layout commit, no
+    ///   preview, no classification.
     pub(super) fn on_drag_move(&mut self, hwnd: isize) {
         // First, classify if we are still in the provisional state. Promotion
         // may install a Translate or Resize state; we then dispatch the move to
@@ -314,6 +386,11 @@ impl FlowWM {
         match self.drag_state.as_ref() {
             Some(DragMode::Translate(_)) => self.on_translate_move(hwnd),
             Some(DragMode::Resize(_)) => self.on_resize_move(hwnd),
+            // Float: write the live rect back via the shared float-sync logic.
+            // `run.rs` routes here (not to `on_float_location_changed`) while
+            // the float owns `drag_state`, so this is the single live-rect
+            // update during the gesture — no layout commit, no preview.
+            Some(DragMode::Float(_)) => self.store_float_rect(hwnd),
             // Still Classifying (no movement yet), or None — nothing to do.
             _ => {}
         }
@@ -725,6 +802,8 @@ impl FlowWM {
     ///   a real change). A genuine vertical, horizontal, or corner grip is
     ///   promoted out of `Classifying` on the first location-change (see
     ///   [`Self::classify_and_promote`]), so it never reaches this arm.
+    /// - [`DragMode::Float`] → no layout commit (the final rect was already
+    ///   synced on the last location-change via [`Self::store_float_rect`]).
     ///
     /// Taking `drag_state` tears down the shared edge-scroll scheduler and clears
     /// its armed deadline, so no leftover scroll continues after release. The
@@ -757,6 +836,7 @@ impl FlowWM {
             DragMode::Translate(t) => self.on_translate_end(t),
             DragMode::Resize(r) => self.on_resize_end(r),
             DragMode::Classifying(c) => self.on_classifying_end(c),
+            DragMode::Float(f) => self.on_float_end(f),
         }
     }
 
@@ -912,6 +992,18 @@ impl FlowWM {
         self.animate_layout(&applied);
         self.refresh_border_for(drag.dragged_hwnd);
         log::debug!("drag end (classifying/no-op): hwnd={}", drag.dragged_hwnd);
+    }
+
+    /// The `Float` variant's release — no layout commit (ticket #26).
+    ///
+    /// The float's final rect was already synced to the registry / active
+    /// workspace's `FloatingSpace` on the last location-change via
+    /// [`Self::store_float_rect`] (the shared float-sync logic the drag arm in
+    /// [`Self::on_drag_move`] calls). The destroyed-mid-drag guard at the top of
+    /// [`Self::on_drag_end`] already handled a vanished window, so this arm has
+    /// nothing to do — the log is for symmetry with the other variant arms.
+    fn on_float_end(&mut self, drag: FloatDrag) {
+        log::debug!("drag end (float): hwnd={}", drag.dragged_hwnd);
     }
 
     /// Perform one column scroll in `direction` and report whether the viewport
@@ -1155,6 +1247,13 @@ mod tests {
         })
     }
 
+    fn float() -> DragMode {
+        DragMode::Float(FloatDrag {
+            dragged_id: WindowId(1),
+            dragged_hwnd: 1,
+        })
+    }
+
     #[test]
     fn idle_does_not_suppress_hover() {
         assert!(!interaction_suppresses_hover(None));
@@ -1173,5 +1272,13 @@ mod tests {
     #[test]
     fn resize_drag_suppresses_hover() {
         assert!(interaction_suppresses_hover(Some(&resize())));
+    }
+
+    #[test]
+    fn float_drag_suppresses_hover() {
+        // Ticket #26: a floating-window move/resize occupies `drag_state` for
+        // the whole MoveSizeStart→MoveSizeEnd window, so the existing
+        // suppression invariant must cover the Float variant too.
+        assert!(interaction_suppresses_hover(Some(&float())));
     }
 }
