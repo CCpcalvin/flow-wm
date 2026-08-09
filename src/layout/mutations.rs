@@ -84,6 +84,13 @@ pub struct MutationConfig {
     /// min_window_height_px` (computed lazily by callers that need the cap).
     /// Adding a row that would push any row below this floor is rejected.
     pub min_window_height_px: u32,
+    /// Minimum allowed row height in pixels — the vertical drag-resize floor
+    /// (ticket #10). Mirrors [`min_column_width_px`](Self::min_column_width_px)
+    /// on the vertical axis: [`resize_row_boundary_move`](super::resize::resize_row_boundary_move)
+    /// clamps each row to `[min_row_height_px, derived_max_row_height]`. Sourced
+    /// from [`FlowConfig::min_row_height_px`](crate::config::types::FlowConfig::min_row_height_px);
+    /// distinct from `min_window_height_px` (the row-stack-count cap).
+    pub min_row_height_px: u32,
     /// Base column width in pixels. New columns are created at this width, and
     /// it is the `n = 0` rung of the expand/shrink slot ladder.
     pub column_width: u32,
@@ -1497,6 +1504,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 0,
@@ -1858,6 +1866,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -1891,6 +1900,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -2091,6 +2101,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,            // (1920-960)/960 = 1
@@ -2286,6 +2297,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,            // (1920-960)/960 = 1
@@ -3109,6 +3121,7 @@ mod tests {
             monitor_width,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width,
             min_column_width_px: column_width / 2,
             max_n,
@@ -3187,6 +3200,7 @@ mod tests {
             monitor_width: 2560,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,            // (2528-960)/976 = 1
@@ -3295,6 +3309,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -3344,6 +3359,7 @@ mod tests {
             monitor_width: 3840,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 2,
@@ -3504,6 +3520,7 @@ mod tests {
             monitor_width: 1920,
             monitor_height: 1080,
             min_window_height_px: 100,
+            min_row_height_px: 100,
             column_width: 960,
             min_column_width_px: 480,
             max_n: 1,
@@ -4154,6 +4171,7 @@ mod tests {
         );
         let config = MutationConfig {
             min_window_height_px: 400,
+            min_row_height_px: 400,
             ..test_config()
         };
         assert!(merge_column(&layout, WindowId(1), Direction::Right, &config).is_none());
@@ -4177,6 +4195,7 @@ mod tests {
         );
         let config = MutationConfig {
             min_window_height_px: 354,
+            min_row_height_px: 354,
             ..test_config()
         };
         let result = merge_column(&layout, WindowId(1), Direction::Right, &config);
@@ -4209,6 +4228,7 @@ mod tests {
         );
         let config = MutationConfig {
             min_window_height_px: 355,
+            min_row_height_px: 355,
             ..test_config()
         };
         assert!(

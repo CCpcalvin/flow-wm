@@ -410,7 +410,9 @@ impl FlowWM {
                     )
             });
         // The orchestrator's armed edge-scroll deadline (if a repeat is
-        // mid-flight). `None` when no timer is armed.
+        // mid-flight). `None` when no timer is armed. The single scheduler is
+        // fed by the drag feed during a Translate drag and by the hover
+        // edge-dwell feed otherwise; both write this same orchestrator field.
         let edge_scroll_deadline = self.edge_scroll_deadline;
         // The hover cursor-poll deadline, armed only while at least one hover
         // behavior flag is on and no tile drag is in progress. Anchored on the
@@ -551,7 +553,7 @@ impl FlowWM {
                     let is_dragged = self
                         .drag_state
                         .as_ref()
-                        .map(|ds| ds.dragged_hwnd == hwnd)
+                        .map(|ds| ds.dragged_hwnd() == hwnd)
                         .unwrap_or(false);
                     if is_dragged {
                         self.on_drag_move(hwnd);

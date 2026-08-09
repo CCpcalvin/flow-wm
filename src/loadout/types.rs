@@ -8,15 +8,12 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level loadout file envelope.
 ///
-/// Serialized as a JSON object with a `version` field for forward-compat
-/// and an RFC3339 `saved_at` timestamp for staleness checks.
+/// Serialized as a JSON object with a `version` field for forward-compat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadoutFile {
     /// File-format version number. Must equal [`LoadoutFile::CURRENT_VERSION`];
     /// any other value is rejected at load time rather than migrated.
     pub version: u32,
-    /// RFC3339 timestamp of when this snapshot was taken.
-    pub saved_at: String,
     /// Per-workspace snapshots in the order they were saved.
     pub workspaces: Vec<WorkspaceSnapshot>,
 }
@@ -28,7 +25,7 @@ impl LoadoutFile {
     /// `version` differs (a legacy pre-`HWND` file cannot be migrated because
     /// `HWND` cannot be synthesized, so it is skipped with a logged reason
     /// rather than silently misread). Bump this on any breaking schema change.
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 3;
 }
 
 /// Snapshot of a single workspace's tiling and floating state.
@@ -118,35 +115,19 @@ pub struct RectJson {
     pub h: i32,
 }
 
-/// Returns `true` when the loadout snapshot is older than `max_age_secs`
-/// or when `saved_at` cannot be parsed.
-///
-/// Unparseable timestamps are treated as stale so the daemon skips them
-/// rather than crashing on corrupt data.
-#[must_use]
-pub fn is_stale(saved_at: &str, max_age_secs: u64) -> bool {
-    let saved = match chrono::DateTime::parse_from_rfc3339(saved_at) {
-        Ok(dt) => dt,
-        Err(_) => return true,
-    };
-    let now = chrono::Utc::now();
-    let elapsed = now.signed_duration_since(saved);
-    elapsed.num_seconds() > max_age_secs as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ── Positive: serde round-trip ──────────────────────────────────
 
-    /// `CURRENT_VERSION` is exactly 2 (the HWND-identity schema).
+    /// `CURRENT_VERSION` is exactly 3 (the HWND-identity schema, no timestamp).
     //
     // Locks the version the writer emits and the loader accepts; a schema
     // change must deliberately bump this.
     #[test]
-    fn current_version_is_two() {
-        assert_eq!(LoadoutFile::CURRENT_VERSION, 2);
+    fn current_version_is_three() {
+        assert_eq!(LoadoutFile::CURRENT_VERSION, 3);
     }
 
     /// Round-trip a complete [`LoadoutFile`] through JSON.
@@ -156,7 +137,6 @@ mod tests {
     fn round_trip_full_loadout() {
         let file = LoadoutFile {
             version: LoadoutFile::CURRENT_VERSION,
-            saved_at: "2026-07-24T12:00:00Z".to_string(),
             workspaces: vec![WorkspaceSnapshot {
                 workspace_id: 0,
                 active: true,
@@ -199,7 +179,6 @@ mod tests {
         let restored: LoadoutFile = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(restored.version, LoadoutFile::CURRENT_VERSION);
-        assert_eq!(restored.saved_at, "2026-07-24T12:00:00Z");
         assert_eq!(restored.workspaces.len(), 1);
         let ws = &restored.workspaces[0];
         assert_eq!(ws.workspace_id, 0);
@@ -226,77 +205,12 @@ mod tests {
     fn round_trip_empty_loadout() {
         let file = LoadoutFile {
             version: LoadoutFile::CURRENT_VERSION,
-            saved_at: "2026-01-01T00:00:00Z".into(),
             workspaces: vec![],
         };
 
         let json = serde_json::to_string(&file).expect("serialize");
         let restored: LoadoutFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.workspaces.len(), 0);
-    }
-
-    // ── Positive: is_stale ────────────────────────────────────────────
-
-    /// A snapshot from the past older than the threshold is stale.
-    // Positive: old timestamp is stale.
-    #[test]
-    fn stale_when_old() {
-        let saved = "2020-01-01T00:00:00Z";
-        assert!(is_stale(saved, 60));
-    }
-
-    /// A snapshot taken just now (within threshold) is fresh.
-    // Positive: now-relative timestamp is fresh.
-    #[test]
-    fn fresh_when_recent() {
-        let now = chrono::Utc::now().to_rfc3339();
-        assert!(!is_stale(&now, 3600));
-    }
-
-    // ── Negative: is_stale ───────────────────────────────────────────
-
-    /// Garbage strings are treated as stale (never crash).
-    // Negative: unparseable input returns true (stale).
-    #[test]
-    fn unparseable_is_stale() {
-        assert!(is_stale("not-a-date", 3600));
-        assert!(is_stale("", 3600));
-    }
-
-    /// A timestamp exactly at the threshold boundary is NOT stale
-    /// (must be strictly greater than max_age_secs).
-    // Negative: boundary — equal age is fresh.
-    #[test]
-    fn boundary_equals_is_fresh() {
-        let now = chrono::Utc::now();
-        let past = now - chrono::Duration::seconds(300);
-        assert!(!is_stale(&past.to_rfc3339(), 300));
-    }
-
-    /// One second beyond the threshold IS stale.
-    // Negative: one second over threshold is stale.
-    #[test]
-    fn one_second_over_is_stale() {
-        let now = chrono::Utc::now();
-        let past = now - chrono::Duration::seconds(301);
-        assert!(is_stale(&past.to_rfc3339(), 300));
-    }
-
-    /// A timestamp in the future (clock skew ahead of `now`) is NOT stale.
-    ///
-    /// `is_stale` computes `now - saved`; when `saved` is ahead of `now` the
-    /// signed duration is negative, and `negative > max_age_secs` is `false`.
-    /// This is the desired behavior: a slightly-future timestamp from clock
-    /// skew must not cause the loadout to be silently dropped on auto-restore.
-    // Negative: future timestamp boundary — returns fresh (not stale).
-    #[test]
-    fn future_timestamp_is_fresh() {
-        let now = chrono::Utc::now();
-        let future = now + chrono::Duration::seconds(600);
-        assert!(
-            !is_stale(&future.to_rfc3339(), 60),
-            "a future saved_at must be treated as fresh (negative elapsed)"
-        );
     }
 
     // ── Negative: serde malformed input ──────────────────────────────
@@ -309,7 +223,7 @@ mod tests {
     // Negative: missing required field rejects deserialization.
     #[test]
     fn missing_version_field_fails_to_deserialize() {
-        let json = r#"{"saved_at":"2026-07-24T12:00:00Z","workspaces":[]}"#;
+        let json = r#"{"workspaces":[]}"#;
         let result: Result<LoadoutFile, _> = serde_json::from_str(json);
         assert!(
             result.is_err(),

@@ -206,6 +206,32 @@ This extends the `WindowId`-as-bridge decision above: `WindowId` bridges the
 registry and layout engine *at runtime*; the stored HWND bridges the same
 identity *across daemon restarts*.
 
+## Drop the loadout staleness guard (No `saved_at` / `max_age_secs`)
+
+Restore runs **no staleness check**: a loadout is applied whenever every saved
+HWND is live, and the no-partial abort handles everything else. Earlier the
+file carried a `saved_at` timestamp and auto-restore skipped snapshots older
+than `max_age_secs` (default 60s). That guard was removed as **redundant with
+no-partial** — the two are anti-correlated across the save→restore gap:
+
+- **Short gap (< `max_age_secs`):** the staleness guard does not trip, so it
+  contributes nothing, and HWND recycling within seconds is vanishingly
+  unlikely.
+- **Long gap (> `max_age_secs`):** an HWND could be recycled to a different
+  window — but in that same gap other saved windows have closed too, so their
+  HWNDs are simply absent and `resolve_hwnd` aborts the whole load on the
+  first missing one, before any recycled handle can match. The collision is
+  shadowed by an ordinary no-partial abort.
+
+For a collision to slip through, every saved HWND would have to be live *and*
+one recycled to a different window — a gap so long a 60s threshold is the wrong
+proxy anyway. Worse, the threshold paid a **false-negative cost**: a valid
+restore after a >60s gap (every window still open, every HWND stable) was
+silently skipped. Removing the guard fixes that. The file format bumped
+`version` 2 → 3 (old files are rejected by the existing version guard, logged
+and harmless); `--no-restore` (the "don't even try" escape hatch) is unchanged.
+Full rationale in `docs/adr/0006-drop-loadout-staleness-guard.md`.
+
 ## Restore Animates All, Switch Teleports Bystanders (Intentionally Divergent)
 
 Workspace switching and loadout restore both end with the same picture: one
