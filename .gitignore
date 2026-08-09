@@ -1,7 +1,17 @@
 # Build Stuff
 /target
 
-# My Personal Stuff
+# OS Stuff
+.DS_Store
+**:Zone.Identifier
+
+# Per-developer agentic workflow / tooling (kept local, not shared)
+AGENTS.md
+CLAUDE.md
+.opencode/
+.claude/
+.pi/
+graphify-out/
 ref/
 .vscode
 .worktree
@@ -10,13 +20,8 @@ state*.json
 shortcut.ahk
 TODO.md
 *.log
-
-# OS Stuff
-.DS_Store
-**:Zone.Identifier
-
-# Per-developer agentic workflow / tooling (kept local, not shared)
-AGENTS.md
-.opencode/
-.pi/
-graphify-out/
+.pi-subagents
+.scratch
+skills-lock.json
+docs/agents/
+assets

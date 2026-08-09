@@ -250,10 +250,7 @@ impl FlowWM {
     ///
     /// Thin wrapper over [`Self::apply_loadout`] that maps the `Result` to a
     /// [`SocketResponse`] for the IPC layer.
-    pub(super) fn dispatch_loadout_load(
-        &mut self,
-        path: Option<PathBuf>,
-    ) -> SocketResponse {
+    pub(super) fn dispatch_loadout_load(&mut self, path: Option<PathBuf>) -> SocketResponse {
         match self.apply_loadout(path) {
             Ok(()) => SocketResponse::Ok,
             Err(e) => {
