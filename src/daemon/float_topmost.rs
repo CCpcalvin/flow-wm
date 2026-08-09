@@ -11,7 +11,8 @@ use crate::registry::hooks::float_hwnds_snapshot;
 use crate::registry::win32 as registry_win32;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetWindowPos,
 };
 
 use super::types::FlowWM;
@@ -110,15 +111,15 @@ impl FlowWM {
             TopmostAction::Drop => {
                 // How to lower depends on the foreground kind (ADR-0007). A
                 // fullscreen foreground bottoms every float (and its border)
-                // so the fullscreen app covers them; a non-flow foreground
-                // will re-raise above the float once #23 lands, but for now
-                // the scaffold falls through to plain-demote.
+                // so the fullscreen app covers them; a non-flow foreground is
+                // re-raised above the demoted floats, yielding
+                // `foreground > float > tiles` without sinking the floats.
                 match float_topmost::decide_drop_mechanism(foreground_kind) {
                     float_topmost::DropMechanism::ToBottom => {
                         self.drop_floats_to_bottom(&floats);
                     }
                     float_topmost::DropMechanism::ReRaiseForeground => {
-                        self.set_floats_topmost(&floats, false);
+                        self.drop_floats_below_foreground(&floats, foreground);
                     }
                 }
                 self.floats_topmost = false;
@@ -145,6 +146,44 @@ impl FlowWM {
         }
         // Re-pin only the drifted floats, reusing the shared SetWindowPos loop.
         self.set_floats_topmost(&drifted, true);
+    }
+
+    /// Drop floats **below a non-flow foreground** that may not cover the
+    /// screen — ADR-0007's non-flow-case mechanism. Demotes the floats (and
+    /// borders in lockstep via [`Self::set_floats_topmost`]), re-seats each
+    /// border above its demoted float, then re-raises the foreign foreground
+    /// to the top of its Z-order band, leaving `foreground > float > tiles`.
+    ///
+    /// (`docs/adr/0007-drop-lowers-floats-below-foreground.md`)
+    fn drop_floats_below_foreground(&self, floats: &[isize], foreground: isize) {
+        // Demote every float (and border overlay) to non-topmost. The re-raise
+        // below is what leaves the floats beneath the foreground — clearing
+        // TOPMOST alone is insufficient (ADR-0007).
+        self.set_floats_topmost(floats, false);
+        // Re-seat each border overlay just above its demoted float, mirroring
+        // `drop_floats_to_bottom` so the resize ring yields with its float.
+        for &hwnd_val in floats {
+            let hwnd = HWND(hwnd_val as *mut _);
+            if let Some(window) = self.registry.get_window(hwnd)
+                && let Some(border) = window.border.as_ref()
+            {
+                border.seat_above_target();
+            }
+        }
+        // Re-raise the foreign foreground to the top of its Z-order band — the
+        // only way to leave the demoted float beneath it (there is no
+        // seat-below-window-X primitive; `SetWindowPos(A, B)` seats A above B).
+        let fg_hwnd = HWND(foreground as *mut _);
+        let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
+        // SAFETY: `SetWindowPos` on a foreground flow may not own.
+        // NOACTIVATE|NOMOVE|NOSIZE restricts the effect to Z-order. `HWND_TOP`
+        // is a sentinel HWND (value 0) seating the window at the top of its
+        // band. An elevated foreground (Task Manager, `uiAccess`, UWP) denies
+        // with `ERROR_ACCESS_DENIED` — logged and skipped, never fatal; the
+        // float stays above such an app (ADR-0007's accepted UIPI wall).
+        if let Err(e) = unsafe { SetWindowPos(fg_hwnd, Some(HWND_TOP), 0, 0, 0, 0, flags) } {
+            log::warn!("foreground re-raise failed for hwnd {foreground}: {e}");
+        }
     }
 
     /// Drop floats to the **bottom** of the Z-order so a non-topmost
