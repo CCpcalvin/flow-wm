@@ -29,6 +29,18 @@ The top stacking layer. Holds floating windows, ordered by `FloatingSpace` (late
 **Stacking invariant**:
 The rule the daemon enforces on every foreground change: every float is always above every tile in Win32 Z-order, no matter which window holds focus or how focus moved there (FFM, keyboard nav, alt-tab, taskbar).
 
+**Topmost band**:
+The Win32 Z-order band populated by windows carrying `WS_EX_TOPMOST`. It sits above the non-topmost band, so a topmost window is above every non-topmost window regardless of focus. Clearing the flag (`HWND_NOTOPMOST`) places a window at the *top* of the non-topmost band — not at the bottom of the Z-order — which is why a plain demote does not hide a float behind a non-topmost fullscreen foreground.
+_Avoid_: always-on-top (ambiguous with the lay meaning), topmost layer (ambiguous with the Float layer).
+
+**Drop**:
+The act of moving the float layer *below the foreground* when the foreground stops being flow-managed — demote (clear `WS_EX_TOPMOST`) **and** lower below the foreground. For a fullscreen foreground the lowering is `HWND_BOTTOM`; for a non-flow foreground it is a re-raise of the foreground above the float (#23). "Drop" is **not** "clear the topmost flag" alone — that leaves the float at the top of the non-topmost band and was the bug ADR-0007 records.
+_Avoid_: unpin, hide (ambiguous with `ShowWindow(SW_HIDE)`), demote (only the first half of a drop).
+
+**Seat** (a.k.a. **seat above**):
+A `SetWindowPos(A, B)` z-order op that places window A immediately *above* sibling B in the Z-order, without raising A to any band. Used to keep a border overlay just above its target float; once the float is bottomed below a fullscreen foreground, seating the border above it leaves the border below the foreground too. There is no Win32 primitive to seat a window *below* a specific sibling — only above.
+_Avoid_: re-raise, promote (both raise to a band, not relative to a sibling), insert (ambiguous with the IPC sense).
+
 ## Cursor behavior
 
 **Focus-follows-mouse**:

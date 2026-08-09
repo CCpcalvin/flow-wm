@@ -380,7 +380,11 @@ impl Border {
             return;
         }
         let overlay_hwnd = HWND(raw as *mut _);
-        let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        let insert_after = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
         // SAFETY: SetWindowPos on our own overlay, toggling only the
         // WS_EX_TOPMOST bit. HWND_TOPMOST / HWND_NOTOPMOST are special sentinel
         // HWND values (not real windows).

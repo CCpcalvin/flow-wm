@@ -933,6 +933,52 @@ pub fn is_cloaked(hwnd: HWND) -> bool {
     }
 }
 
+/// Geometry facts behind the fullscreen verdict, returned by [`fullscreen_geometry`].
+///
+/// Captured so callers (the float-TOPMOST reconcile) can log *why* the decision
+/// came out as it did — the window rect, the monitor's physical rect, and whether
+/// `IsZoomed` excluded it — instead of just the boolean.
+#[derive(Debug, Clone, Copy)]
+pub struct FullscreenGeometry {
+    /// The window's outer rect (`GetWindowRect`, including the invisible frame).
+    pub window_rect: Rect,
+    /// Full physical bounds (`rcMonitor`) of the window's own monitor.
+    pub screen_rect: Rect,
+    /// Whether the window is maximized (`IsZoomed` / `WS_MAXIMIZE`).
+    pub maximized: bool,
+    /// `true` iff `window_rect == screen_rect && !maximized`.
+    pub fullscreen: bool,
+}
+
+/// The geometry behind [`is_fullscreen`]: the window rect, its monitor's full
+/// physical rect, the maximized flag, and the resulting fullscreen verdict.
+///
+/// Factored out so the float-TOPMOST reconcile can log the rects — the exact
+/// `rect == screen` equality is known to be fragile to ±px invisible-frame
+/// offsets (`docs/adr/0003-float-tile-stacking-invariant.md`) — while the
+/// classifier keeps using the plain [`is_fullscreen`] bool. See that function
+/// for the detection rationale (monitor-aware, no style-bit gate, `IsZoomed`
+/// exclusion).
+///
+/// # Arguments
+///
+/// * `hwnd` — Win32 window handle.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if a geometry query fails.
+pub fn fullscreen_geometry(hwnd: HWND) -> Result<FullscreenGeometry, String> {
+    let window_rect = get_window_rect(hwnd)?;
+    let screen_rect = monitor_screen_rect(hwnd)?;
+    let maximized = is_zoomed(hwnd);
+    Ok(FullscreenGeometry {
+        fullscreen: window_rect == screen_rect && !maximized,
+        window_rect,
+        screen_rect,
+        maximized,
+    })
+}
+
 /// Detects whether the window is in exclusive or borderless fullscreen.
 ///
 /// A window is fullscreen when it covers its **entire physical monitor**
@@ -958,11 +1004,7 @@ pub fn is_cloaked(hwnd: HWND) -> bool {
 ///
 /// Returns a human-readable error string if the geometry query fails.
 pub fn is_fullscreen(hwnd: HWND) -> Result<bool, String> {
-    let rect = get_window_rect(hwnd)?;
-    let screen = monitor_screen_rect(hwnd)?;
-    // Equality (not containment): a window that merely overlaps the screen edge
-    // is not fullscreen — it must cover the full physical display.
-    Ok(rect == screen && !is_zoomed(hwnd))
+    Ok(fullscreen_geometry(hwnd)?.fullscreen)
 }
 
 /// Full physical display bounds (`rcMonitor`) of the monitor `hwnd` is on.
