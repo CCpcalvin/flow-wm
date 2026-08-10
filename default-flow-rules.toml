@@ -113,6 +113,23 @@ action = "ignore"
 match = { class = "InputNonClientPointerSource" }
 action = "ignore"
 
+# ── Live Wallpaper ──────────────────────────────────────────────────
+
+# Live wallpaper desktop render surface. WindowsLiveWallpaper.exe (the "Desktop
+# Live Wallpapers" Store app / Lively family, WinUI 3) creates a top-level
+# visible, titled, Alt+Tab-visible, ownerless window titled "WinUI Desktop" that
+# passes every pre-filter gate. It is the wallpaper canvas rendered behind
+# everything — never a window to tile or float. Ignored by exe+class+title
+# because the SAME exe+class also hosts the app's settings UI (titled "Desktop
+# Live Wallpapers"), which must stay managed: only the title distinguishes the
+# two surfaces, so exe or class alone would wrongly ignore the settings window.
+# Title is safe here: debug.log shows "WinUI Desktop" already present at
+# registration time, so there is no creation race that would let the window fall
+# through to the default `float` action and draw a border on the desktop.
+[[rules]]
+match = { exe = "WindowsLiveWallpaper.exe", class = "WinUIDesktopWin32WindowClass", title = "WinUI Desktop" }
+action = "ignore"
+
 # ── Task Manager ────────────────────────────────────────────────────
 
 # Task Manager's main window — the real top-level surface the user interacts
