@@ -2,11 +2,13 @@
 //!
 //! The Win32-coupled resolver in `daemon::hover` walks `WindowFromPoint` to its
 //! top-level ancestor, looks the window up in the registry, queries the OS
-//! foreground, and resolves which workspace the window calls home. Those are
-//! the only OS lookups the resolver performs. **Every eligibility rule** —
-//! "managed, on the active workspace, not already the foreground" — lives here,
-//! in a pure, hermetic leaf function the wiring consults. This mirrors the
-//! existing pure-fn-called-by-wiring pattern established by
+//! foreground (and resolves the foreground's root owner via
+//! `GetAncestor(GA_ROOTOWNER)`), and resolves which workspace the window calls
+//! home. Those are the only OS lookups the resolver performs. **Every
+//! eligibility rule** — "managed, on the active workspace, not owning the
+//! foreground, not already the foreground" — lives here, in a pure, hermetic
+//! leaf function the wiring consults. This mirrors the existing
+//! pure-fn-called-by-wiring pattern established by
 //! [`edge_band_direction`](super::edge_band_direction): the wiring gathers OS
 //! truth, the pure leaf owns the rule, and the rule is a unit test with no
 //! daemon construction.
@@ -23,6 +25,22 @@
 //! monitor resolves to no home and is ineligible, so FFM never crosses
 //! monitors. See `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`
 //! for the full rationale.
+//!
+//! # The owner-chain clause
+//!
+//! The owner-chain aware clause [`owns_foreground`](FfmCandidate::owns_foreground)
+//! shields an **owned popup** (a top-level window owned by a tracked window but
+//! un-tracked itself — e.g. Chrome's download-history panel) from being
+//! dismissed by FFM: when one of a managed window's owned transients holds the
+//! OS foreground, the managed owner is **not** an eligible FFM target, so the
+//! 25 ms dwell never re-focuses it (which would strip activation from the
+//! popup and dismiss it). The flag is `true` exactly when
+//! `GetAncestor(GA_ROOTOWNER)` of the OS foreground equals the candidate
+//! window; it agrees with the literal-foreground clause whenever the
+//! foreground is the candidate itself (a window is its own root owner) and
+//! additionally covers the un-tracked owned-transient case the literal clause
+//! misses. See `docs/adr/0010-ffm-owner-chain-aware-eligibility.md` for the
+//! full rationale and the accepted behavioral boundaries.
 //!
 //! [`WindowState`]: crate::registry::types::WindowState
 
@@ -55,6 +73,21 @@ pub struct FfmCandidate<'a> {
     /// window re-arm a dwell that fires pointlessly, so the foreground is
     /// always ineligible.
     pub is_foreground: bool,
+    /// Whether the candidate is the **root owner** of the current OS
+    /// foreground — i.e. `GetAncestor(GA_ROOTOWNER)` of the foreground equals
+    /// this candidate.
+    ///
+    /// When an **owned popup** (a top-level window owned by a tracked window
+    /// but un-tracked itself — e.g. Chrome's download-history panel) holds the
+    /// foreground, focusing its owner strips activation from the popup and
+    /// dismisses it. Marking the owner ineligible while one of its owned
+    /// transients is foreground lets the popup survive a pointer sweep. This
+    /// clause agrees with [`is_foreground`](Self::is_foreground) when the
+    /// foreground is the candidate itself (a window is its own root owner) and
+    /// additionally covers the un-tracked owned-transient case the literal
+    /// clause cannot see. See
+    /// `docs/adr/0010-ffm-owner-chain-aware-eligibility.md`.
+    pub owns_foreground: bool,
 }
 
 /// Pure FFM target eligibility predicate.
@@ -62,8 +95,9 @@ pub struct FfmCandidate<'a> {
 /// Returns `true` only when the candidate is a **managed** window — tracked
 /// and in the [`Tiling`](WindowState::Tiling) or
 /// [`Floating`](WindowState::Floating) state (ignored / maximized / fullscreen
-/// windows are tracked but excluded) — that lives on the **active workspace**
-/// and is **not already the foreground**. Returns `false` otherwise.
+/// windows are tracked but excluded) — that lives on the **active workspace**,
+/// does **not own the current foreground** (no owned popup is up), and is
+/// **not already the foreground**. Returns `false` otherwise.
 ///
 /// This owns every eligibility rule; the resolver delegates to it. The
 /// predicate touches no Win32, no daemon, no layout — it is a pure function
@@ -75,17 +109,20 @@ pub struct FfmCandidate<'a> {
 /// # use flow_wm::hover::{ffm_target_eligible, FfmCandidate};
 /// # use flow_wm::registry::types::{WindowState, TilingState};
 /// let managed = WindowState::Tiling(TilingState::Active { col: 0, row: 0 });
-/// // Managed, on the active workspace, not foreground → eligible.
+/// // Managed, on the active workspace, not owning the foreground, not
+/// // foreground → eligible.
 /// assert!(ffm_target_eligible(FfmCandidate {
 ///     state: Some(&managed),
 ///     on_active_workspace: true,
 ///     is_foreground: false,
+///     owns_foreground: false,
 /// }));
 /// // Same window on a non-active workspace → not eligible.
 /// assert!(!ffm_target_eligible(FfmCandidate {
 ///     state: Some(&managed),
 ///     on_active_workspace: false,
 ///     is_foreground: false,
+///     owns_foreground: false,
 /// }));
 /// ```
 #[must_use]
@@ -110,7 +147,20 @@ pub fn ffm_target_eligible(candidate: FfmCandidate<'_>) -> bool {
     if !candidate.on_active_workspace {
         return false;
     }
-    // Clause 4 — not foreground: focusing the current foreground is a no-op
+    // Clause 4 — owner-chain aware: a candidate that owns the current
+    // foreground (i.e. one of its owned popups is up) is not an FFM target.
+    // Re-focusing the owner would strip activation from the popup and dismiss
+    // it. This clause extends the literal-foreground clause below — the two
+    // compose without a gap: when the foreground is the candidate itself the
+    // two agree (a window is its own root owner); this clause additionally
+    // covers the un-tracked owned-transient case the literal clause cannot
+    // see. The literal-foreground clause is retained as load-bearing for the
+    // fail-open / OS-quirk path. See
+    // `docs/adr/0010-ffm-owner-chain-aware-eligibility.md`.
+    if candidate.owns_foreground {
+        return false;
+    }
+    // Clause 5 — not foreground: focusing the current foreground is a no-op
     // and would re-arm a dwell that fires pointlessly.
     if candidate.is_foreground {
         return false;
@@ -146,7 +196,8 @@ mod tests {
     }
 
     // =====================================================================
-    // Happy path: managed, on active workspace, not foreground → eligible
+    // Happy path: managed, on active workspace, not owning foreground, not
+    // foreground → eligible
     // =====================================================================
 
     #[test]
@@ -156,6 +207,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -166,11 +218,12 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
     // =====================================================================
-    // New clause: a window off the active workspace is never eligible
+    // Workspace clause: a window off the active workspace is never eligible
     // (the load-bearing fix for the workspace-switch flicker)
     // =====================================================================
 
@@ -181,6 +234,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: false,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -191,6 +245,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: false,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -205,6 +260,7 @@ mod tests {
             state: None,
             on_active_workspace: false,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -218,6 +274,7 @@ mod tests {
             state: None,
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -228,6 +285,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -238,6 +296,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -248,6 +307,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -260,6 +320,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: false,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -270,6 +331,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: true,
+            owns_foreground: false,
         }));
     }
 
@@ -281,6 +343,114 @@ mod tests {
             state: Some(&state),
             on_active_workspace: false,
             is_foreground: true,
+            owns_foreground: false,
+        }));
+    }
+
+    // =====================================================================
+    // Owner-chain clause: a managed candidate that owns the current foreground
+    // (one of its owned popups is up) is not eligible — the load-bearing fix
+    // for the popup-dismissal bug. See ADR-0010.
+    // =====================================================================
+
+    #[test]
+    fn managed_tiling_owning_foreground_is_not_eligible() {
+        // A managed tiling window whose owned popup (e.g. Chrome
+        // download-history) holds the foreground must not be re-focused by
+        // FFM — re-focus strips activation and dismisses the popup.
+        let state = tiling_active();
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: true,
+            is_foreground: false,
+            owns_foreground: true,
+        }));
+    }
+
+    #[test]
+    fn managed_floating_owning_foreground_is_not_eligible() {
+        // The shield applies uniformly across tile and float layers (a
+        // tracked floating window's owned dialogs are shielded the same way
+        // tiled windows' popups are).
+        let state = floating_active();
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: true,
+            is_foreground: false,
+            owns_foreground: true,
+        }));
+    }
+
+    #[test]
+    fn managed_not_owning_foreground_remains_eligible() {
+        // Happy path preserved: with no owned popup up, the candidate is a
+        // normal FFM target — the new clause does not over-suppress.
+        let state = tiling_active();
+        assert!(ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: true,
+            is_foreground: false,
+            owns_foreground: false,
+        }));
+    }
+
+    #[test]
+    fn untracked_owning_foreground_is_not_eligible() {
+        // Defense in depth: an untracked candidate (state = None) is
+        // ineligible regardless of the ownership flag — the state=None check
+        // must win. (The resolver never passes owns_foreground=true with
+        // state=None, but the predicate must not rely on the caller.)
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: None,
+            on_active_workspace: false,
+            is_foreground: false,
+            owns_foreground: true,
+        }));
+    }
+
+    #[test]
+    fn owner_off_active_workspace_is_not_eligible() {
+        // Composition with the workspace clause: an off-active-workspace
+        // owner is ineligible by either clause; the predicate short-circuits
+        // on the workspace check first.
+        let state = tiling_active();
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: false,
+            is_foreground: false,
+            owns_foreground: true,
+        }));
+    }
+
+    #[test]
+    fn ownership_clause_agrees_with_literal_foreground_when_candidate_is_foreground() {
+        // When the foreground is the candidate itself, GA_ROOTOWNER of the
+        // foreground is the candidate, so owns_foreground must be true as
+        // well. Both clauses reject; flipping only is_foreground (or only
+        // owns_foreground) must still reject, so the two clauses compose
+        // without a gap when the wiring happens to compute one but not the
+        // other.
+        let state = tiling_active();
+        // Both clauses reject:
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: true,
+            is_foreground: true,
+            owns_foreground: true,
+        }));
+        // Literal foreground alone rejects:
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: true,
+            is_foreground: true,
+            owns_foreground: false,
+        }));
+        // Ownership alone rejects (the popup case the literal clause misses):
+        assert!(!ffm_target_eligible(FfmCandidate {
+            state: Some(&state),
+            on_active_workspace: true,
+            is_foreground: false,
+            owns_foreground: true,
         }));
     }
 
@@ -299,6 +469,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 
@@ -309,6 +480,7 @@ mod tests {
             state: Some(&state),
             on_active_workspace: true,
             is_foreground: false,
+            owns_foreground: false,
         }));
     }
 }

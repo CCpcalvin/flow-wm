@@ -221,11 +221,13 @@ impl FlowWM {
     /// This is the Win32-coupled half of FFM target resolution: it performs
     /// only the OS lookups — `WindowFromPoint` walked to its top-level ancestor
     /// (so child controls read as their owning window), the registry lookup,
-    /// the foreground query, and workspace resolution — then hands the gathered
-    /// snapshot to the pure [`ffm_target_eligible`] predicate, which owns every
-    /// eligibility rule (managed, on the active workspace, not already the
-    /// foreground). See `src/hover/ffm.rs` and
-    /// `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+    /// the foreground query (literal and root-owner), and workspace resolution
+    /// — then hands the gathered snapshot to the pure [`ffm_target_eligible`]
+    /// predicate, which owns every eligibility rule (managed, on the active
+    /// workspace, not owning the foreground, not already the foreground). See
+    /// `src/hover/ffm.rs`,
+    /// `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`, and
+    /// `docs/adr/0010-ffm-owner-chain-aware-eligibility.md`.
     fn hover_ffm_target(&self, cx: i32, cy: i32) -> Option<WindowId> {
         let hwnd = registry_win32::window_from_point(cx, cy)?;
         let hwnd_handle = HWND(hwnd as *mut _);
@@ -244,10 +246,18 @@ impl FlowWM {
                 .find_workspace_containing(WindowId(hwnd))
                 .is_some_and(|home| home == active_id)
         });
+        // Owner-chain aware foreground lookup: the root owner of the current
+        // foreground (GetAncestor(GA_ROOTOWNER)). When an owned popup (e.g.
+        // Chrome's download-history panel) holds the foreground, this is the
+        // popup's owner; the pure predicate marks that owner ineligible so FFM
+        // does not re-focus it and dismiss the popup. Fail-open: no root
+        // owner (None) ⇒ the candidate does not own the foreground ⇒ eligible.
+        let owns_foreground = registry_win32::foreground_root_owner() == Some(hwnd);
         let candidate = FfmCandidate {
             state: window.map(|w| &w.state),
             on_active_workspace,
             is_foreground: registry_win32::get_foreground_window() == Some(hwnd),
+            owns_foreground,
         };
         ffm_target_eligible(candidate).then_some(WindowId(hwnd))
     }
