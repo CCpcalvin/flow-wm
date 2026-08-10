@@ -30,7 +30,7 @@ use crate::hover::{
 };
 use crate::registry::win32 as registry_win32;
 
-use super::drag::interaction_suppresses_hover;
+use super::drag::hover_suppressed;
 use super::types::FlowWM;
 
 /// Compute the already-clamped effective hover dwell durations from the config.
@@ -61,7 +61,7 @@ impl FlowWM {
     /// (the controller cancels any pending FFM dwell on band entry).
     pub(super) fn poll_hover(&mut self) {
         if (!self.config.hover.focus_follows_mouse && !self.config.hover.edge_scroll)
-            || interaction_suppresses_hover(self.drag_state.as_ref())
+            || hover_suppressed(self.drag_state.as_ref(), self.animator.is_animating())
         {
             return;
         }
@@ -134,8 +134,9 @@ impl FlowWM {
     /// the deadline arrives.
     pub(super) fn maybe_fire_focus_dwell(&mut self) {
         // Defense in depth: the hover subsystem is suppressed while a tile drag
-        // is in progress (`on_drag_start` already clears this deadline).
-        if interaction_suppresses_hover(self.drag_state.as_ref()) {
+        // is in progress OR an animation is tweening (`on_drag_start` and the
+        // animate-submit site already clear this deadline).
+        if hover_suppressed(self.drag_state.as_ref(), self.animator.is_animating()) {
             return;
         }
         if !self.config.hover.focus_follows_mouse {
@@ -172,8 +173,9 @@ impl FlowWM {
     /// when no edge-dwell is armed or before the deadline arrives.
     pub(super) fn maybe_fire_edge_dwell(&mut self) {
         // Defense in depth: the hover subsystem is suppressed while a tile drag
-        // is in progress (`on_drag_start` already clears this deadline).
-        if interaction_suppresses_hover(self.drag_state.as_ref()) {
+        // is in progress OR an animation is tweening (`on_drag_start` and the
+        // animate-submit site already clear this deadline).
+        if hover_suppressed(self.drag_state.as_ref(), self.animator.is_animating()) {
             return;
         }
         if !self.config.hover.edge_scroll {
@@ -301,5 +303,30 @@ impl FlowWM {
             }
             HoverAction::NoOp => {}
         }
+    }
+
+    /// Reset all armed hover state — the **clean-on-engage** half of animation
+    /// suppression.
+    ///
+    /// Clears the armed focus/edge-dwell deadlines and resets the
+    /// [`HoverController`], mirroring [`on_drag_start`](super::drag::FlowWM::on_drag_start)'s
+    /// hover teardown less the drag-specific edge-scroll scheduler reset (an
+    /// animation does not feed the shared scheduler). Called at every
+    /// animate-submit site so an animation triggered by any path (IPC command,
+    /// hook, workspace switch) uniformly drops a dwell armed *before* the
+    /// keypress — skip-on-engage alone cannot, since the early-return guard
+    /// leaves an orphan timer that fires the instant the animation ends. For
+    /// commands that already perform an OS foreground change (focus moves,
+    /// workspace switches),
+    /// [`on_hover_foreground_change`](Self::on_hover_foreground_change) cancels
+    /// the FFM dwell today, so this is defense-in-depth there; it is
+    /// load-bearing for viewport-only commands (scroll/center) that move
+    /// windows without a foreground change.
+    ///
+    /// See `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+    pub(super) fn reset_armed_hover(&mut self) {
+        self.focus_dwell_deadline = None;
+        self.edge_dwell_deadline = None;
+        self.hover.reset();
     }
 }

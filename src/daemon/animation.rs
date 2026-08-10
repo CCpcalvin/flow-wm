@@ -196,6 +196,11 @@ impl FlowWM {
             targets.len()
         );
 
+        // Clean-on-engage: drop any dwell armed before this submit so it cannot
+        // fire on a stale target the instant the animation ends. See
+        // `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+        self.reset_armed_hover();
+
         if let Err(e) = self.animator.animate(targets) {
             log::warn!("animation error: {e}");
         }
@@ -331,6 +336,11 @@ impl FlowWM {
             targets.len(),
             batches.len()
         );
+
+        // Clean-on-engage: drop any dwell armed before this submit so it cannot
+        // fire on a stale target the instant the animation ends. See
+        // `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+        self.reset_armed_hover();
 
         if let Err(e) = self.animator.animate(targets) {
             log::warn!("animate_workspaces error: {e}");
