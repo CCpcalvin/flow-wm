@@ -18,6 +18,14 @@ _Avoid_: bring-to-front, foreground (when meaning visual position)
 The Win32 OS concept: the window holding active state (`WM_ACTIVATE`), input-queue ownership, and taskbar highlight. Windows *bundles* foreground with raise in `SetForegroundWindow` — this conflation is the root cause flow-wm must work around. When we say "foreground" we mean the OS's notion specifically.
 _Avoid_: using "foreground" loosely for either focus or raise.
 
+**Managed window**:
+A top-level window flow-wm tracks in its registry — tiled, floating, or ignored (maximized/fullscreen/explicit-rule). Only managed windows are FFM targets and participate in layout; everything else (taskbar, desktop, foreign apps, and owned popups) is un-tracked and never focused by FFM.
+_Avoid_: tracked window (when emphasizing the FFM/layout contract rather than the registry membership), foreground (a Win32 concept, not a flow-wm category).
+
+**Owned popup**:
+A top-level window *owned* by another window (per the Win32 ownership convention: created without `WS_CHILD` with a non-null `hWndParent`) that flow-wm does **not** track — dialogs, tooltips, context menus, omnibox dropdowns, Chrome's download-history panel. It can hold the OS Foreground while its owner does not, which is the case the literal-foreground FFM clause cannot see; the owner-chain aware clause (ADR-0010) shields the owner while one is up so FFM does not dismiss the popup by re-focusing the owner. Distinct from a **managed window**, which is tracked and is a normal FFM target. Some Electron/Chromium-composited transients have no Win32 owner and slip through — accepted residual gap.
+_Avoid_: popup (ambiguous — also covers in-flow-wm floating windows), transient (Win32 jargon; prefer the Win32-term gloss here), child window (a `WS_CHILD` control, which is a different Win32 relationship walked by `GA_ROOT`, not `GA_ROOTOWNER`).
+
 ### Stacking layers
 
 **Tile layer**:

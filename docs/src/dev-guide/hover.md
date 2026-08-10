@@ -53,7 +53,7 @@ flowchart TD
     B -- no --> Z["no poll, no deadline"]
     B -- yes --> C["GetCursorPos"]
     C --> D["edge_band_direction(cursor, work_area, band_width)"]
-    C --> E["WindowFromPoint → GetAncestor(GA_ROOT)<br/>→ ffm_target_eligible(...)"]
+    C --> E["WindowFromPoint → GetAncestor(GA_ROOT)<br/>+ GetAncestor(GA_ROOTOWNER) of foreground<br/>→ ffm_target_eligible(...)"]
     D --> F["HoverPoll { cursor, edge_band, target }"]
     E --> F
     F --> G["controller.on_poll(...) -> Vec<HoverAction>"]
@@ -72,15 +72,21 @@ Two pure inputs are resolved per poll:
   its top-level ancestor** (`GetAncestor(GA_ROOT)`) before the registry
   membership check. Without the walk, child controls inside a window would read
   as untracked and defeat FFM. The resolver then performs only OS lookups
-  (top-level walk, registry membership, foreground query, workspace resolution);
-  every eligibility *rule* — tracked, managed, not ignored/maximized/fullscreen,
-  not the current foreground, and **on the active workspace** — lives in the
-  pure [`ffm_target_eligible`](../../hover/ffm/fn.ffm_target_eligible.html)
-  predicate. `Some(hwnd)` only when `ffm_target_eligible` accepts the candidate;
-  `None` otherwise. The active-workspace clause is the load-bearing fix for the
+  (top-level walk, registry membership, foreground query, foreground root-owner
+  lookup, workspace resolution); every eligibility *rule* — tracked, managed,
+  not ignored/maximized/fullscreen, not owning the current foreground, not the
+  current foreground, and **on the active workspace** — lives in the pure
+  [`ffm_target_eligible`](../../hover/ffm/fn.ffm_target_eligible.html) predicate.
+  `Some(hwnd)` only when `ffm_target_eligible` accepts the candidate; `None`
+  otherwise. The active-workspace clause is the load-bearing fix for the
   workspace-switch flicker: a window whose home workspace is not the active
   workspace is never an FFM target, so a cursor resting over a still-visible
-  old-workspace window during a switch cannot drag focus back.
+  old-workspace window during a switch cannot drag focus back. The **owner-chain
+  clause** is the load-bearing fix for the popup-dismissal bug: when an owned
+  popup (a top-level window owned by a tracked window but un-tracked itself,
+  e.g. Chrome's download-history panel) holds the foreground, its owner is
+  marked ineligible so the 25 ms dwell never re-focuses it and dismisses the
+  popup. See ADR-0010.
 
 **Edge-band takes precedence:** when the cursor is in a band, the edge path runs
 and any pending FFM dwell is cancelled. `target` is consulted only off-band.
@@ -246,6 +252,7 @@ lifecycle.
 - [ADR-0001 — Hover subsystem](../adr/0001-hover-subsystem.md): poll-not-hook, movement-gated dwell, unified scheduler.
 - [ADR-0002 — Edge-scroll config block](../adr/0002-edge-scroll-config-block.md): promoting the shared parameters.
 - [ADR-0009 — FFM active-workspace eligibility + animation suppression](../adr/0009-ffm-active-workspace-and-animation-suppression.md): scoping FFM to the active workspace and suspending hover during animation.
+- [ADR-0010 — FFM owner-chain aware eligibility](../adr/0010-ffm-owner-chain-aware-eligibility.md): shielding the owner of an owned popup while the popup holds the foreground.
 - [Tile Drag](./tile-drag.md): the drag feed of the shared scheduler; edge scroll during drag.
 - [Config & Persistence](./config-and-persistence.md): code-as-source-of-truth, `#[serde(default)]`.
 - The pure decision module: `src/hover/` (`HoverController`, `edge_band_direction`, `ffm_target_eligible`); the derived suppression predicate `hover_suppressed` in `src/daemon/drag.rs`.

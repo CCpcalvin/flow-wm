@@ -43,7 +43,7 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetCursorPos,
+    BringWindowToTop, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetCursorPos,
     GetForegroundWindow, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
     SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, WINDOW_EX_STYLE, WM_CLOSE,
@@ -468,6 +468,45 @@ pub fn get_foreground_window() -> Option<isize> {
         None
     } else {
         Some(hwnd.0 as isize)
+    }
+}
+
+/// Resolve the **root owner** of the current OS foreground window.
+///
+/// Companion to [`get_foreground_window`]: instead of the literal foreground
+/// HWND, this returns the window returned by `GetAncestor(foreground,
+/// GA_ROOTOWNER)` — the head of the foreground's parent+owner chain. When an
+/// **owned popup** (a top-level window owned by a tracked window but un-tracked
+/// itself — e.g. Chrome's download-history panel, a dialog, an omnibox
+/// dropdown) holds the foreground, this is the popup's owner; when the
+/// foreground is a normal top-level window, this is that window itself.
+///
+/// The FFM resolver compares the candidate window against this value: when
+/// they are equal the candidate *owns the foreground*, and the pure
+/// [`ffm_target_eligible`](crate::hover::ffm_target_eligible) predicate marks
+/// it ineligible so FFM does not re-focus the owner and dismiss the popup.
+/// See `docs/adr/0010-ffm-owner-chain-aware-eligibility.md`.
+///
+/// # Fail-open
+///
+/// Returns `None` when there is no foreground window or `GetAncestor` returns
+/// a null handle (no root owner). The resolver treats `None` as "the candidate
+/// does not own the foreground" (eligible), matching the existing fail-open
+/// posture of the FFM wiring — a missing OS fact never suppresses FFM.
+///
+/// See `docs/adr/0010-ffm-owner-chain-aware-eligibility.md` and
+/// `docs/src/dev-guide/hover.md`.
+#[must_use]
+pub fn foreground_root_owner() -> Option<isize> {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() {
+        return None;
+    }
+    let owner = unsafe { GetAncestor(fg, GA_ROOTOWNER) };
+    if owner.0.is_null() {
+        None
+    } else {
+        Some(owner.0 as isize)
     }
 }
 
@@ -1462,6 +1501,21 @@ mod tests {
     #[test]
     fn get_shell_window_has_option_isize_return_type() {
         let fn_ptr: fn() -> Option<isize> = get_shell_window;
+        let _ = fn_ptr; // Compile-time signature check.
+    }
+
+    /// Positive: verify that [`foreground_root_owner`] has the
+    /// `fn() -> Option<isize>` signature, mirroring [`get_foreground_window`]
+    /// and [`get_shell_window`].
+    ///
+    /// We cannot exercise the foreground's owner chain without a real Windows
+    /// desktop session (`GetForegroundWindow` + `GetAncestor(GA_ROOTOWNER)`
+    /// return live HWNDs), so this is a compile-time signature check matching
+    /// the pattern used by the other Win32 foreground wrappers — guarding the
+    /// FFM owner-chain clause against an upstream signature change.
+    #[test]
+    fn foreground_root_owner_has_option_isize_return_type() {
+        let fn_ptr: fn() -> Option<isize> = foreground_root_owner;
         let _ = fn_ptr; // Compile-time signature check.
     }
 
