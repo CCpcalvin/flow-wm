@@ -127,10 +127,31 @@ impl DragMode {
 ///
 /// Pure and Win32-free so it is unit-testable. The three hover entry points
 /// (`poll_hover`, `maybe_fire_focus_dwell`, `maybe_fire_edge_dwell`) consult
-/// this instead of inlining `drag_state.is_some()`.
+/// the derived [`hover_suppressed`] (which ORs in the animator's
+/// `is_animating` flag) rather than this directly.
 #[must_use]
 pub(super) fn interaction_suppresses_hover(mode: Option<&DragMode>) -> bool {
     mode.is_some()
+}
+
+/// The single source of truth for "should hover be off right now".
+///
+/// Combines the existing [`interaction_suppresses_hover`] decision (any
+/// in-progress tile/float drag) with the animator's
+/// [`is_animating`](crate::animation::WindowAnimator::is_animating) flag (a
+/// viewport/workspace tween is in flight). Every hover entry point consults
+/// this instead of inlining its own check, so drag and animation suppression
+/// stay in lockstep. Pure and Win32-free so it is unit-testable across the
+/// full `(drag_state, is_animating)` cross-product.
+///
+/// See
+/// `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md` for why
+/// this is a derived predicate (not a unified state enum): `drag_state` is a
+/// main-thread gesture FSM, animation is a worker-thread flag, and the two
+/// state machines should not be welded together.
+#[must_use]
+pub(super) fn hover_suppressed(mode: Option<&DragMode>, is_animating: bool) -> bool {
+    interaction_suppresses_hover(mode) || is_animating
 }
 
 /// Provisional `Classifying` payload: identity + the start rect.
@@ -1286,5 +1307,50 @@ mod tests {
         // the whole MoveSizeStart→MoveSizeEnd window, so the existing
         // suppression invariant must cover the Float variant too.
         assert!(interaction_suppresses_hover(Some(&float())));
+    }
+
+    // =====================================================================
+    // hover_suppressed: the (drag_state variant, is_animating) cross-product
+    // (ticket #30 — the single source of truth consulted by every hover
+    // entry point).
+    // =====================================================================
+
+    #[test]
+    fn idle_not_animating_does_not_suppress_hover() {
+        // The only configuration in which hover runs.
+        assert!(!hover_suppressed(None, false));
+    }
+
+    #[test]
+    fn idle_animating_suppresses_hover() {
+        // A viewport/workspace tween with no drag still suppresses: a moving
+        // cursor must not arm or fire a dwell mid-animation.
+        assert!(hover_suppressed(None, true));
+    }
+
+    #[test]
+    fn classifying_drag_not_animating_suppresses_hover() {
+        assert!(hover_suppressed(Some(&classifying()), false));
+    }
+
+    #[test]
+    fn translate_drag_not_animating_suppresses_hover() {
+        assert!(hover_suppressed(Some(&translate()), false));
+    }
+
+    #[test]
+    fn resize_drag_not_animating_suppresses_hover() {
+        assert!(hover_suppressed(Some(&resize()), false));
+    }
+
+    #[test]
+    fn float_drag_not_animating_suppresses_hover() {
+        assert!(hover_suppressed(Some(&float()), false));
+    }
+
+    #[test]
+    fn drag_plus_animating_suppresses_hover() {
+        // Both inputs agree → suppressed (one example suffices; OR is symmetric).
+        assert!(hover_suppressed(Some(&translate()), true));
     }
 }
