@@ -2,10 +2,11 @@
 //!
 //! This module is the **pure, testable core** of the hover feature: a
 //! clock-injectable [`HoverController`] that decides focus and edge-scroll
-//! actions from injected time and cursor/foreground/timer inputs, plus a pure
-//! [`edge_band_direction`] screen-edge classifier. Neither touches Win32 or the
-//! daemon — both are hermetic and deterministic, so every hover rule is a unit
-//! test with no daemon construction.
+//! actions from injected time and cursor/foreground/timer inputs, a pure
+//! [`edge_band_direction`] screen-edge classifier, and a pure
+//! [`ffm_target_eligible`] FFM-target eligibility predicate. None touches Win32
+//! or the daemon — all are hermetic and deterministic, so every hover rule is a
+//! unit test with no daemon construction.
 //!
 //! The controller is **not yet wired** into the live daemon: the wiring tickets
 //! translate its [`HoverAction`]s into `GetCursorPos` polls, OS foreground
@@ -26,6 +27,8 @@
 
 pub mod controller;
 pub mod edge_band;
+pub mod ffm;
 
 pub use controller::{HoverAction, HoverController, HoverPoll, HoverTimings};
 pub use edge_band::edge_band_direction;
+pub use ffm::{FfmCandidate, ffm_target_eligible};

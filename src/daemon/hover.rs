@@ -25,8 +25,9 @@ use windows::Win32::Foundation::HWND;
 
 use crate::common::{Point, WindowId};
 use crate::config::FlowConfig;
-use crate::hover::{HoverAction, HoverPoll, HoverTimings, edge_band_direction};
-use crate::registry::types::WindowState;
+use crate::hover::{
+    FfmCandidate, HoverAction, HoverPoll, HoverTimings, edge_band_direction, ffm_target_eligible,
+};
 use crate::registry::win32 as registry_win32;
 
 use super::drag::interaction_suppresses_hover;
@@ -215,31 +216,38 @@ impl FlowWM {
 
     /// Resolve the focus-follows-mouse target under the cursor, if eligible.
     ///
-    /// Walks `WindowFromPoint` to its top-level ancestor (so child controls read
-    /// as their owning window), then checks eligibility: a tracked, managed
-    /// window (tiling or floating — ignored windows are excluded) that is not
-    /// already the foreground. Returns `None` for an untracked window, an
-    /// ignored window, the taskbar/desktop, or the current foreground.
+    /// This is the Win32-coupled half of FFM target resolution: it performs
+    /// only the OS lookups — `WindowFromPoint` walked to its top-level ancestor
+    /// (so child controls read as their owning window), the registry lookup,
+    /// the foreground query, and workspace resolution — then hands the gathered
+    /// snapshot to the pure [`ffm_target_eligible`] predicate, which owns every
+    /// eligibility rule (managed, on the active workspace, not already the
+    /// foreground). See `src/hover/ffm.rs` and
+    /// `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
     fn hover_ffm_target(&self, cx: i32, cy: i32) -> Option<WindowId> {
         let hwnd = registry_win32::window_from_point(cx, cy)?;
         let hwnd_handle = HWND(hwnd as *mut _);
-        let window = self.registry.get_window(hwnd_handle)?;
-        // Eligibility: a managed window (tiling or floating). Ignored windows
-        // (maximized/fullscreen) are tracked but excluded. Minimized/hidden
-        // windows cannot be under the cursor, so a broad state match is safe.
-        if !matches!(
-            window.state,
-            WindowState::Tiling(_) | WindowState::Floating(_)
-        ) {
-            return None;
-        }
-        // Not already the foreground (OS truth): focusing the current foreground
-        // is a no-op and would let the cursor's window re-arm a dwell that fires
-        // pointlessly. The controller's movement-gate handles restart-on-move.
-        if registry_win32::get_foreground_window() == Some(hwnd) {
-            return None;
-        }
-        Some(WindowId(hwnd))
+        let window = self.registry.get_window(hwnd_handle);
+        // Workspace resolution: a tracked window's home workspace must be the
+        // active workspace, or it is never an FFM target (the load-bearing fix
+        // for the workspace-switch flicker). Scoped to the active monitor —
+        // matching `on_focus_changed`'s lookup — so a window on a non-active
+        // monitor resolves to `None` and is ineligible (FFM does not cross
+        // monitors). An untracked window has no home workspace either, so the
+        // flag is false there.
+        let active = self.active_monitor();
+        let on_active_workspace = window.is_some_and(|_| {
+            let active_id = active.active_workspace_id();
+            active
+                .find_workspace_containing(WindowId(hwnd))
+                .is_some_and(|home| home == active_id)
+        });
+        let candidate = FfmCandidate {
+            state: window.map(|w| &w.state),
+            on_active_workspace,
+            is_foreground: registry_win32::get_foreground_window() == Some(hwnd),
+        };
+        ffm_target_eligible(candidate).then_some(WindowId(hwnd))
     }
 
     /// Apply a controller-emitted [`HoverAction`] to the live orchestrator.
