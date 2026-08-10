@@ -196,9 +196,7 @@ impl FlowWM {
             targets.len()
         );
 
-        // Clean-on-engage: drop any dwell armed before this submit so it cannot
-        // fire on a stale target the instant the animation ends. See
-        // `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+        // Clean-on-engage before every animated submit (ADR-0009).
         self.reset_armed_hover();
 
         if let Err(e) = self.animator.animate(targets) {
@@ -337,9 +335,7 @@ impl FlowWM {
             batches.len()
         );
 
-        // Clean-on-engage: drop any dwell armed before this submit so it cannot
-        // fire on a stale target the instant the animation ends. See
-        // `docs/adr/0009-ffm-active-workspace-and-animation-suppression.md`.
+        // Clean-on-engage before every animated submit (ADR-0009).
         self.reset_armed_hover();
 
         if let Err(e) = self.animator.animate(targets) {

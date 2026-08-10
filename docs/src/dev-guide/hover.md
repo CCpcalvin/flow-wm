@@ -20,7 +20,7 @@ that gave edge-scroll its own block is [ADR-0002](../adr/0002-edge-scroll-config
 
 This page is the architecture narrative. The per-item contracts live in
 docstrings; the pure decision logic lives in the [`hover`](../../hover/index.html)
-module (`HoverController`, `edge_band_direction`).
+module (`HoverController`, `edge_band_direction`, `ffm_target_eligible`).
 
 ## Why a poll, not a hook
 
@@ -53,7 +53,7 @@ flowchart TD
     B -- no --> Z["no poll, no deadline"]
     B -- yes --> C["GetCursorPos"]
     C --> D["edge_band_direction(cursor, work_area, band_width)"]
-    C --> E["WindowFromPoint → GetAncestor(GA_ROOT)<br/>→ tracked && not foreground?"]
+    C --> E["WindowFromPoint → GetAncestor(GA_ROOT)<br/>→ ffm_target_eligible(...)"]
     D --> F["HoverPoll { cursor, edge_band, target }"]
     E --> F
     F --> G["controller.on_poll(...) -> Vec<HoverAction>"]
@@ -71,9 +71,16 @@ Two pure inputs are resolved per poll:
 - **`target`** — the window under the cursor via `WindowFromPoint`, **walked to
   its top-level ancestor** (`GetAncestor(GA_ROOT)`) before the registry
   membership check. Without the walk, child controls inside a window would read
-  as untracked and defeat FFM. `Some(hwnd)` only when that top-level window is a
-  tracked managed window (tiling **or** floating) that is not already the
-  foreground; `None` otherwise.
+  as untracked and defeat FFM. The resolver then performs only OS lookups
+  (top-level walk, registry membership, foreground query, workspace resolution);
+  every eligibility *rule* — tracked, managed, not ignored/maximized/fullscreen,
+  not the current foreground, and **on the active workspace** — lives in the
+  pure [`ffm_target_eligible`](../../hover/ffm/fn.ffm_target_eligible.html)
+  predicate. `Some(hwnd)` only when `ffm_target_eligible` accepts the candidate;
+  `None` otherwise. The active-workspace clause is the load-bearing fix for the
+  workspace-switch flicker: a window whose home workspace is not the active
+  workspace is never an FFM target, so a cursor resting over a still-visible
+  old-workspace window during a switch cannot drag focus back.
 
 **Edge-band takes precedence:** when the cursor is in a band, the edge path runs
 and any pending FFM dwell is cancelled. `target` is consulted only off-band.
@@ -195,9 +202,23 @@ invariant is fully restored.
 
 - The **entire** hover subsystem is suspended while a tile drag is in progress
   (`poll_hover` early-returns).
-- FFM during a **floating-window** drag is handled implicitly by the
-  movement-gate: the cursor is in motion while dragging, so the dwell never
-  arms. No explicit float-drag detection is added.
+- Hover is **also suspended for the duration of any animation** (ADR-0009). A
+  single derived predicate — `hover_suppressed(drag_state, is_animating) =
+  interaction_suppresses_hover(drag_state) || is_animating` — is the source of
+  truth for "should hover be off right now," consulted by all three entry points
+  (the cursor poll, the focus-dwell fire, the edge-dwell fire), each early-returning
+  when it is true. This stops the moving cursor from arming or firing a dwell
+  mid-scroll, so FFM cannot fight the camera during a same-workspace viewport
+  scroll. The animator's existing `is_animating` flag is polled — no new
+  cross-thread callback. IPC `Busy` is **not** extended to animations: focus
+  commands are cooperative (the animator retargets mid-flight), and gating them
+  would break rapid keyboard chaining.
+- Because skip-on-engage alone leaves a dwell armed *before* a keypress free to
+  fire the instant an animation ends, an animated batch submit also performs a
+  **clean-on-engage**: the armed focus/edge dwell deadlines are cleared and the
+  controller reset, mirroring the tile-drag start path. This lives at the shared
+  animate-submit site, so every animation — IPC or hook-driven — is covered
+  uniformly.
 - Edge-hover-scroll firing during a floating-window drag is a known, mild,
   deferred edge case; no speculative latch is built.
 
@@ -205,9 +226,11 @@ invariant is fully restored.
 
 The hard logic — movement-gated dwell, cancel-on-focus, eligibility, per-poll
 precedence, edge-dwell arming — is extracted as the **pure, clock-injectable**
-[`HoverController`](../../hover/controller/struct.HoverController.html) and
-[`edge_band_direction`](../../hover/edge_band/fn.edge_band_direction.html),
-fully unit-tested with no daemon construction and no Win32. The wait-timeout
+[`HoverController`](../../hover/controller/struct.HoverController.html),
+[`edge_band_direction`](../../hover/edge_band/fn.edge_band_direction.html), and
+[`ffm_target_eligible`](../../hover/ffm/fn.ffm_target_eligible.html) (plus the
+derived `hover_suppressed` suppression predicate), fully unit-tested with no
+daemon construction and no Win32. The wait-timeout
 reducer (`compute_wait_timeout_inner`) is likewise pure and unit-tested for
 every deadline source including the new poll, focus-dwell, and edge-dwell
 deadlines.
@@ -222,7 +245,8 @@ lifecycle.
 
 - [ADR-0001 — Hover subsystem](../adr/0001-hover-subsystem.md): poll-not-hook, movement-gated dwell, unified scheduler.
 - [ADR-0002 — Edge-scroll config block](../adr/0002-edge-scroll-config-block.md): promoting the shared parameters.
+- [ADR-0009 — FFM active-workspace eligibility + animation suppression](../adr/0009-ffm-active-workspace-and-animation-suppression.md): scoping FFM to the active workspace and suspending hover during animation.
 - [Tile Drag](./tile-drag.md): the drag feed of the shared scheduler; edge scroll during drag.
 - [Config & Persistence](./config-and-persistence.md): code-as-source-of-truth, `#[serde(default)]`.
-- The pure decision module: `src/hover/` (`HoverController`, `edge_band_direction`).
+- The pure decision module: `src/hover/` (`HoverController`, `edge_band_direction`, `ffm_target_eligible`); the derived suppression predicate `hover_suppressed` in `src/daemon/drag.rs`.
 - The impure wiring: `src/daemon/hover.rs`; the main-loop folding in `src/daemon/run.rs`.
