@@ -46,9 +46,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetCursorPos, GetForegroundWindow,
     GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    WS_THICKFRAME,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -210,6 +210,26 @@ pub fn get_cursor_pos() -> Result<(i32, i32), String> {
     let mut point = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut point) }.map_err(|e| format!("GetCursorPos failed: {e}"))?;
     Ok((point.x, point.y))
+}
+
+/// Teleports the cursor (mouse pointer) to `x, y` in screen coordinates.
+///
+/// This is the warp half of cursor-on-focus (ticket #34): instant teleport,
+/// no animation. The coordinates must be clamped into the monitor work area
+/// by the caller (see `daemon::cursor::warp_target`) — Win32 clamps
+/// out-of-range positions to the nearest edge itself, but an explicit clamp
+/// keeps the pointer inside the focused *window's* visible area, which is
+/// the spec's invariant.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if `SetCursorPos` fails (e.g. when
+/// another process has clipped/locked the cursor, or the calling thread
+/// lacks desktop access).
+pub fn set_cursor_pos(x: i32, y: i32) -> Result<(), String> {
+    // SAFETY: SetCursorPos takes two scalar coordinates; no handles or
+    // pointers are involved. Failure is reported via the returned Result.
+    unsafe { SetCursorPos(x, y) }.map_err(|e| format!("SetCursorPos failed to ({x}, {y}): {e}"))
 }
 
 /// Retrieves the window's **visible** screen rectangle via DWM extended frame bounds.

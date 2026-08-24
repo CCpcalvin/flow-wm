@@ -26,7 +26,19 @@ use crate::registry::types::{FloatingState, ReclassifyResult, VisibilityChange, 
 use crate::registry::win32 as registry_win32;
 use windows::Win32::Foundation::HWND;
 
+use super::cursor;
 use super::types::FlowWM;
+
+/// Read the pointer position, defaulting to an off-screen far corner.
+///
+/// `GetCursorPos` fails only when the thread lacks input-desktop access
+/// (extremely rare for the daemon's main thread). An unreadable position is
+/// treated as "outside any window" so the warp still lands the pointer on
+/// the focused window instead of being silently skipped — a deliberate
+/// fail-visible choice over fail-silent.
+fn pointer_position() -> (i32, i32) {
+    registry_win32::get_cursor_pos().unwrap_or((i32::MIN / 2, i32::MIN / 2))
+}
 
 impl FlowWM {
     /// Handle a window creation event.
@@ -437,6 +449,62 @@ impl FlowWM {
             && prev != hwnd
         {
             self.refresh_border_for(prev);
+        }
+
+        // Cursor warp — the single invariant, applied at this single
+        // convergence point for every focus path (keyboard dispatch, workspace
+        // switch, external foreground change). Skipped when the focus change
+        // did not actually move focus, so a duplicate/re-fired foreground
+        // event on the same window never re-warps an in-window pointer.
+        if prev_focus != Some(hwnd) {
+            self.warp_cursor_to(hwnd);
+        }
+    }
+
+    /// Warp the pointer onto `hwnd`'s rect center if it lies outside (ticket #34).
+    ///
+    /// The daemon-side half of the cursor-warp invariant: resolve the window's
+    /// on-screen rect (float rect for floating windows, projected actual rect
+    /// for tiling windows), compute the warp target via the pure
+    /// [`warp_target`](super::cursor::warp_target) decision function, and —
+    /// only when the pointer is outside — teleport it instantly with
+    /// [`set_cursor_pos`](crate::registry::win32::set_cursor_pos). The
+    /// decision math is clamped to the monitor work area so the pointer can
+    /// never land under the taskbar or off-monitor.
+    ///
+    /// No-ops (pointer untouched, byte-identical) when:
+    /// - `[cursor] warp_on_focus = false`,
+    /// - the pointer already lies inside the window's rect,
+    /// - the window has no resolvable rect, or
+    /// - the Win32 cursor read/teleport fails (warned, never fatal).
+    fn warp_cursor_to(&mut self, hwnd: isize) {
+        if !self.config.cursor.warp_on_focus {
+            return;
+        }
+
+        // Resolve the window's rect on whichever monitor/workspace actually
+        // contains it — not just the active one. Today the daemon runs a
+        // single monitor so this equals the active workspace, but a warp
+        // triggered by an external foreground change on another monitor
+        // must clamp against *that* monitor's work area, not the active
+        // monitor's.
+        let window = WindowId(hwnd);
+        let Some((rect, work_area)) = self.monitors.iter().find_map(|monitor| {
+            let workspace = monitor.active_workspace();
+            cursor::focused_window_rect(&workspace.scrolling, &workspace.floating, window)
+                .map(|rect| (rect, workspace.scrolling.monitor().work_area))
+        }) else {
+            log::debug!("warp_cursor_to: no resolvable rect for hwnd {hwnd}; leaving pointer");
+            return;
+        };
+
+        let Some(target) = cursor::warp_target(pointer_position(), rect, work_area) else {
+            // Pointer already inside (or degenerate rect) — leave it untouched.
+            return;
+        };
+
+        if let Err(e) = registry_win32::set_cursor_pos(target.0, target.1) {
+            log::warn!("warp_cursor_to: {e}");
         }
     }
 

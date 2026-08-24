@@ -72,6 +72,7 @@ mod tests {
             "padding",
             "animation",
             "minimize_restore",
+            "cursor",
         ];
         for key in &expected_keys {
             assert!(
@@ -79,6 +80,36 @@ mod tests {
                 "schema missing top-level property: {key}"
             );
         }
+    }
+
+    #[test]
+    fn schema_cursor_has_warp_on_focus() {
+        // The [cursor] section (ticket #34) must appear in the generated
+        // schema with its warp_on_focus boolean so taplo can autocomplete it.
+        // Follows the same $ref navigation style as the padding test below.
+        let json = generate_config_schema().expect("schema gen");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("schema is valid JSON");
+
+        let cursor_schema = parsed
+            .pointer("/properties/cursor")
+            .expect("has /properties/cursor");
+
+        let ref_path = cursor_schema
+            .get("$ref")
+            .and_then(|v| v.as_str())
+            .expect("cursor has $ref");
+        let ref_path = ref_path.trim_start_matches("#/");
+        let cursor_props = parsed
+            .pointer(&format!("/{ref_path}/properties"))
+            .unwrap_or_else(|| panic!("resolved ref {ref_path} has properties"));
+
+        let obj = cursor_props
+            .as_object()
+            .expect("cursor properties is object");
+        assert!(
+            obj.contains_key("warp_on_focus"),
+            "cursor missing 'warp_on_focus'"
+        );
     }
 
     #[test]

@@ -4,14 +4,18 @@
 //! `#[path]` attributes are needed because Rust integration-test crate roots
 //! resolve `mod` relative to the `tests/` directory, not the file's directory.
 //!
-//! `test_desktop` and `registry` modules require the `desktop` module which is
-//! gated by `#[cfg(debug_assertions)]`. Integration tests run in debug mode by
-//! default (`cargo test`), so these are always available during development.
+//! The `test_desktop`-dependent modules (including `cursor_warp`) require the
+//! `desktop` module which is gated by `#[cfg(debug_assertions)]`.
+//! Integration tests run in debug mode by default (`cargo test`), so these are
+//! always available during development.
 
 #[path = "cli/common.rs"]
 mod common;
 #[path = "cli/cursor.rs"]
 mod cursor;
+#[cfg(debug_assertions)]
+#[path = "cli/cursor_warp.rs"]
+mod cursor_warp;
 #[cfg(debug_assertions)]
 #[path = "cli/daemon_init.rs"]
 mod daemon_init;

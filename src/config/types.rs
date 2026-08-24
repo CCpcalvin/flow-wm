@@ -161,6 +161,8 @@ pub struct FlowConfig {
 
     /// Loadout save/restore configuration.
     pub loadout: LoadoutConfig,
+    /// Cursor behavior configuration (warp-on-focus).
+    pub cursor: CursorConfig,
     /// Whether `flow start` should query GitHub for a newer release and print a
     /// one-line notification prompting `flow update` when one exists.
     ///
@@ -193,6 +195,45 @@ impl Default for LoadoutConfig {
     }
 }
 
+/// Cursor behavior configuration.
+///
+/// Controls how the daemon moves the mouse pointer in response to window
+/// focus changes. The first knob is [`warp_on_focus`](Self::warp_on_focus):
+/// when enabled (the default), any focus change — keyboard focus dispatch,
+/// workspace switch, or an external foreground change (alt-tab, taskbar) —
+/// teleports the pointer to the newly focused window's center if (and only
+/// if) the pointer lies outside that window's rect. The invariant lives at
+/// the daemon's single focus convergence point (`on_focus_changed`); there
+/// are no per-path warp flags.
+///
+/// # Example
+///
+/// ```toml
+/// [cursor]
+/// warp_on_focus = true
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct CursorConfig {
+    /// Whether focus changes teleport the pointer to the focused window's
+    /// center when it lies outside the window's rect.
+    ///
+    /// On by default: pointer and focus stay coherent for keyboard-driven
+    /// navigation. Set to `false` to leave the pointer completely untouched
+    /// on focus changes. When `true` and the pointer is already inside the
+    /// newly focused window's rect, it is left byte-identically in place —
+    /// clicking a window into focus never yanks the pointer.
+    pub warp_on_focus: bool,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            warp_on_focus: true,
+        }
+    }
+}
+
 fn default_window_action() -> WindowAction {
     WindowAction::Float
 }
@@ -213,6 +254,7 @@ impl Default for FlowConfig {
             focus: FocusConfig::default(),
             drag: DragConfig::default(),
             loadout: LoadoutConfig::default(),
+            cursor: CursorConfig::default(),
             check_for_updates: true,
         }
     }
@@ -1064,6 +1106,34 @@ strategy = "original_slot"
         assert_eq!(FocusConfig::default().foreground_sync_interval_ms, 250);
     }
 
+    /// Positive: `CursorConfig::default()` ships `warp_on_focus = true` —
+    /// the spec's on-by-default choice, so upgraders with no `[cursor]`
+    /// section get pointer/focus coherence on keyboard navigation.
+    ///
+    /// A regression to `false` would silently disable the feature for every
+    /// user who never wrote the section. Mirrors
+    /// `focus_config_default_interval_is_250ms`.
+    #[test]
+    fn cursor_config_default_warp_on_focus_is_true() {
+        assert!(CursorConfig::default().warp_on_focus);
+    }
+
+    /// Positive: a partial `[cursor]` section fills missing fields from
+    /// serde defaults, and a config with no `[cursor]` section at all gets
+    /// the compiled default — same partial-config contract as `[padding]`.
+    #[test]
+    fn cursor_config_partial_and_missing_sections_use_defaults() {
+        let partial: FlowConfig =
+            toml::from_str("[cursor]\nwarp_on_focus = false\n").expect("partial [cursor] parses");
+        assert!(!partial.cursor.warp_on_focus, "explicit false must win");
+
+        let missing: FlowConfig = toml::from_str("").expect("empty config parses");
+        assert!(
+            missing.cursor.warp_on_focus,
+            "missing [cursor] section must default to warp_on_focus = true"
+        );
+    }
+
     /// Positive: `LoadoutConfig::default()` ships `default_path = "loadout.json"`
     /// — the canonical value the daemon resolves against when no `[loadout]`
     /// block is present in the user's `flow.toml`.
@@ -1129,6 +1199,9 @@ strategy = "original_slot"
             loadout: LoadoutConfig {
                 default_path: "my-loadout.json".into(),
             },
+            cursor: CursorConfig {
+                warp_on_focus: false,
+            },
             check_for_updates: false,
         };
 
@@ -1165,6 +1238,7 @@ strategy = "original_slot"
         assert_eq!(parsed.drag.edge_scroll_initial_delay_ms, 350);
         assert_eq!(parsed.drag.edge_scroll_repeat_interval_ms, 200);
         assert_eq!(parsed.loadout.default_path, "my-loadout.json");
+        assert!(!parsed.cursor.warp_on_focus);
         assert!(!parsed.check_for_updates);
     }
 
