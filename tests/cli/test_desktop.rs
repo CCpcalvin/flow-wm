@@ -41,6 +41,21 @@ pub fn unique_title(base: &str) -> String {
     format!("FlowTest-{base}-{id}")
 }
 
+/// Per-test config directory keyed by the (unique) pipe name — the same
+/// scheme `start_test_daemon` passes to `flowd --config`.
+///
+/// Exported so tests that need to seed or clear files in that directory
+/// (e.g. the cursor-warp tests writing a `flow.toml`, or clearing one a
+/// previous invocation left behind) resolve the exact same path the daemon
+/// will use, instead of re-deriving the scheme by hand.
+pub fn test_config_dir(pipe: &str) -> std::path::PathBuf {
+    let safe: String = pipe
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    std::env::temp_dir().join(format!("flow-test-config-{safe}"))
+}
+
 // ── TestDesktop ─────────────────────────────────────────────────────
 
 /// RAII guard for an isolated test desktop.
@@ -72,6 +87,10 @@ pub struct TestDesktop {
     desktop: HDESK,
     /// Handle to the original desktop (to restore on drop).
     original: HDESK,
+    /// Handle to the original **input** desktop, captured when
+    /// [`make_input`](Self::make_input) promoted this desktop; restored on
+    /// drop. `None` while this desktop was never the input desktop.
+    input_original: Option<HDESK>,
 }
 
 impl TestDesktop {
@@ -93,12 +112,50 @@ impl TestDesktop {
             name,
             desktop: desk_handle,
             original,
+            input_original: None,
         })
+    }
+
+    /// Promote this desktop to the session's **input** desktop.
+    ///
+    /// Cursor APIs (`GetCursorPos` / `SetCursorPos`) are only permitted for
+    /// threads on the input desktop — the desktop receiving keyboard/mouse
+    /// input. Tests that exercise cursor behavior (cursor warp, ticket #34)
+    /// call this after [`create`] so both the test process's reads and the
+    /// daemon's warp teleports are permitted. Drop restores the previous
+    /// input desktop automatically.
+    pub fn make_input(&mut self) -> Result<(), String> {
+        if self.input_original.is_some() {
+            return Ok(()); // already the input desktop
+        }
+        let prev_input = desktop::input_desktop()?;
+        // SwitchDesktop fails with access-denied while the calling thread is
+        // attached to the desktop being switched AWAY from (i.e. this test
+        // desktop, via TestDesktop::create). Detach to the original desktop
+        // for the switch, then re-attach to the test desktop so subsequent
+        // TestWindow::create calls still land on it.
+        desktop::set_thread_desktop(self.original)?;
+        desktop::make_input_desktop(self.desktop)?;
+        desktop::set_thread_desktop(self.desktop)?;
+        self.input_original = Some(prev_input);
+        log::info!("test: promoted desktop '{}' to input desktop", self.name);
+        Ok(())
     }
 }
 
 impl Drop for TestDesktop {
     fn drop(&mut self) {
+        // Restore the previous input desktop FIRST — while our desktop
+        // handle is still valid and before the thread leaves it. The handle
+        // from input_desktop() is then closed (it is an OpenInputDesktop
+        // handle, unlike the GetThreadDesktop one in `original`).
+        if let Some(prev) = self.input_original.take() {
+            if let Err(e) = desktop::restore_input_desktop(prev) {
+                log::error!("test: failed to restore input desktop: {e}");
+            }
+            desktop::close_desktop(prev);
+        }
+
         // Switch back to the original desktop.
         if let Err(e) = desktop::set_thread_desktop(self.original) {
             log::error!("test: failed to restore original desktop: {e}");
@@ -300,8 +357,7 @@ pub fn start_test_daemon_with_extra_args(
         .creation_flags(DETACHED);
 
     // Per-test filesystem key derived from the (unique) pipe name. Used for
-    // both the isolated config directory and the log file below so parallel
-    // tests never collide on disk.
+    // the log file below so parallel tests never collide on disk.
     let safe: String = pipe
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -320,7 +376,7 @@ pub fn start_test_daemon_with_extra_args(
     const TEST_RULES_TOML: &str = include_str!("fixtures/flow-rules.toml");
     let config_overridden = extra_args.contains(&"--config");
     if !config_overridden {
-        let config_dir = std::env::temp_dir().join(format!("flow-test-config-{safe}"));
+        let config_dir = test_config_dir(pipe);
         std::fs::create_dir_all(&config_dir)
             .map_err(|e| format!("failed to create test config dir: {e}"))?;
         let rules_path = config_dir.join("flow-rules.toml");

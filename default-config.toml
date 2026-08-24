@@ -142,3 +142,14 @@ edge_scroll_repeat_interval_ms = 240
 #                   `flow loadout save` and `flow loadout restore`
 [loadout]
 default_path = "loadout.json"
+
+# Cursor behavior settings.
+#
+# - warp_on_focus: when the focused window changes by any path (keyboard
+#   focus dispatch, workspace switch, alt-tab/taskbar foreground change),
+#   the pointer teleports instantly to that window's center if it lies
+#   outside the window's rect. A pointer already inside the window is left
+#   completely untouched. Set to false to never move the pointer on focus
+#   changes.
+[cursor]
+warp_on_focus = true

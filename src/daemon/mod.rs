@@ -33,6 +33,7 @@
 //! - [`dispatch`] — IPC command dispatch router and action handlers
 //! - [`query`] — query handlers (extracted from dispatch)
 //! - [`edge_scroll`] — pure, clock-injectable edge-scroll auto-repeat scheduler
+//! - [`cursor`] — cursor warp-on-focus decision math + daemon-side warp call
 //! - [`animation`] — animation bridge ([`FlowWM::animate_layout`])
 //! - [`config_derive`] — configuration derivation helpers and tests
 //! - [`shutdown`] — graceful-shutdown window rescue
@@ -45,6 +46,7 @@
 mod animation;
 mod borders;
 mod config_derive;
+mod cursor;
 mod dispatch;
 mod drag;
 mod edge_scroll;
