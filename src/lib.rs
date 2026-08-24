@@ -22,6 +22,7 @@
 //! - [`ipc`] — named-pipe server and message protocol
 //! - [`config`] — TOML config (code is the single source of truth)
 //! - [`common`] — shared bridge types (`WindowId`, `Rect`, `Direction`)
+//! - [`cursor`] — system cursor restore escape hatch (daemonless)
 //!
 //! Every layout change flows through a pure three-stage pipeline —
 //! **mutate → project → animate** — and all subsystems take `&mut self` (no
@@ -40,6 +41,7 @@ pub mod autostart;
 pub mod borders;
 pub mod common;
 pub mod config;
+pub mod cursor;
 pub mod daemon;
 pub mod ipc;
 pub mod layout;

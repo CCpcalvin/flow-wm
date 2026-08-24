@@ -1,13 +1,14 @@
 //! flow — FlowWM CLI client.
 //!
 //! Sends commands to the `flowd` daemon via a Windows named pipe. Commands fall
-//! into four groups:
+//! into these groups:
 //!
 //! | Group | Commands |
 //! |-------|----------|
 //! | Lifecycle | `start`, `stop`, `enable-autostart`, `disable-autostart` |
 //! | Loadout | `loadout save|load [path]` |
 //! | Config | `config init` / `reload` / `edit` / `path` / `check` |
+//! | Cursor | `cursor restore` |
 //! | Query | `query all` |
 //! | Dispatch | `dispatch focus\|swap-column\|move-window\|merge-column\|promote\|expand-column\|shrink-column\|center\|close-window\|set-window\|switch-workspace\|move-to-workspace`, plus stub `swap-workspace` |
 //!
@@ -100,6 +101,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// System cursor controls (the cursor-restore escape hatch).
+    Cursor {
+        #[command(subcommand)]
+        command: CursorCommands,
+    },
     /// Query daemon state.
     Query {
         #[command(subcommand)]
@@ -170,6 +176,23 @@ enum ConfigCommands {
 enum QueryCommands {
     /// Dump all tracked windows with full debug info (state, rect, col/row, etc.).
     All,
+}
+
+/// Cursor subcommands.
+///
+/// These commands run **entirely in the CLI process** — no daemon contact,
+/// no IPC. See [`CursorCommands::Restore`] for why that matters.
+#[derive(Debug, Subcommand)]
+enum CursorCommands {
+    /// Restore the system cursor shapes.
+    ///
+    /// Reloads the full system cursor set (arrow, I-beam, wait, …) from the
+    /// registry defaults. This is the escape hatch for the daemon's
+    /// cursor-hide mechanism: it needs no daemon, no config, and no IPC, so
+    /// it keeps working when `flowd` was killed with the cursor blanked.
+    /// Idempotent — restoring already-normal cursors is a no-op. See
+    /// [`flow_wm::cursor`] for details.
+    Restore,
 }
 
 /// Dispatch subcommands — one per action category.
@@ -389,6 +412,7 @@ fn main() {
         Commands::Stop { ahk } => cmd_stop(ahk),
         Commands::Loadout { command } => cmd_loadout(command),
         Commands::Config { command } => cmd_config(command),
+        Commands::Cursor { command } => cmd_cursor(command),
         Commands::Query { command } => cmd_query(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
         Commands::EnableAutostart { ahk } => cmd_enable_autostart(ahk),
@@ -762,6 +786,23 @@ fn cmd_query(command: QueryCommands) -> Result<(), String> {
     match command {
         QueryCommands::All => cmd_query_all(),
     }
+}
+
+/// Dispatch a cursor subcommand.
+///
+/// Cursor commands are daemonless by design: they call the OS directly in
+/// this process so they keep working when `flowd` is dead.
+fn cmd_cursor(command: CursorCommands) -> Result<(), String> {
+    match command {
+        CursorCommands::Restore => cmd_cursor_restore(),
+    }
+}
+
+/// Restore the system cursor shapes locally (see [`CursorCommands::Restore`]).
+fn cmd_cursor_restore() -> Result<(), String> {
+    flow_wm::cursor::restore_system_cursors()?;
+    println!("flow: cursors restored");
+    Ok(())
 }
 
 /// Dump all tracked windows from the daemon as pretty-printed JSON.
