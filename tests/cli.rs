@@ -10,6 +10,8 @@
 
 #[path = "cli/common.rs"]
 mod common;
+#[path = "cli/cursor.rs"]
+mod cursor;
 #[cfg(debug_assertions)]
 #[path = "cli/daemon_init.rs"]
 mod daemon_init;

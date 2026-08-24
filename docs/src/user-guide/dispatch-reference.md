@@ -257,6 +257,7 @@ A few other top-level commands are worth knowing:
 | `flow config path` | Print the resolved config directory path. |
 | `flow config check` | Validate `flow.toml` / `flow-rules.toml` without loading them. |
 | `flow query all` | Dump every tracked window (state, rect, column/row, …) as JSON. |
+| `flow cursor restore` | Restore the system cursor shapes. Runs entirely in the CLI — no daemon needed — so it is the escape hatch if `flowd` dies while your cursor is hidden. Idempotent. |
 | `flow enable-autostart [--ahk]` | Create the login shortcut in `shell:startup` (idempotent). |
 | `flow disable-autostart` | Remove the login shortcut (idempotent). |
 
