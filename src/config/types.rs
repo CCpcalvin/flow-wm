@@ -198,19 +198,30 @@ impl Default for LoadoutConfig {
 /// Cursor behavior configuration.
 ///
 /// Controls how the daemon moves the mouse pointer in response to window
-/// focus changes. The first knob is [`warp_on_focus`](Self::warp_on_focus):
-/// when enabled (the default), any focus change — keyboard focus dispatch,
-/// workspace switch, or an external foreground change (alt-tab, taskbar) —
-/// teleports the pointer to the newly focused window's center if (and only
-/// if) the pointer lies outside that window's rect. The invariant lives at
-/// the daemon's single focus convergence point (`on_focus_changed`); there
-/// are no per-path warp flags.
+/// focus changes, and when the pointer hides after mouse inactivity. The
+/// first knob is [`warp_on_focus`](Self::warp_on_focus): when enabled (the
+/// default), any focus change — keyboard focus dispatch, workspace switch, or
+/// an external foreground change (alt-tab, taskbar) — teleports the pointer
+/// to the newly focused window's center if (and only if) the pointer lies
+/// outside that window's rect. The invariant lives at the daemon's single
+/// focus convergence point (`on_focus_changed`); there are no per-path warp
+/// flags.
+///
+/// The remaining two knobs (ticket #37) drive **cursor hide**: after
+/// [`hide_timeout_ms`](Self::hide_timeout_ms) with no mouse activity the
+/// system cursor becomes invisible; any real mouse activity — pointer motion
+/// or a button press — makes it visible again and restarts the timer. Hide
+/// is opt-in (`hide_timeout_ms = 0` by default), never happens during a
+/// move-size gesture (tile translate/resize), and a warp counts as activity
+/// for its timer.
 ///
 /// # Example
 ///
 /// ```toml
 /// [cursor]
 /// warp_on_focus = true
+/// hide_timeout_ms = 3000
+/// poll_interval_ms = 125
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -224,13 +235,64 @@ pub struct CursorConfig {
     /// newly focused window's rect, it is left byte-identically in place —
     /// clicking a window into focus never yanks the pointer.
     pub warp_on_focus: bool,
+    /// Mouse-inactivity timeout after which the system cursor is hidden, in
+    /// milliseconds (ticket #37).
+    ///
+    /// `0` (the default) disables hiding entirely **and** the cursor
+    /// activity polling that drives it — the daemon keeps its
+    /// zero-CPU-while-idle property. Any real mouse activity (pointer motion
+    /// or a button press) un-hides the cursor and restarts the timer. A warp
+    /// counts as activity (the interaction invariant with `warp_on_focus`).
+    /// The cursor is never hidden while a move-size gesture (tile
+    /// translate/resize) is in progress.
+    pub hide_timeout_ms: u32,
+    /// How often the daemon polls pointer position + button state while hide
+    /// is enabled, in milliseconds (default 125).
+    ///
+    /// Only consulted when `hide_timeout_ms > 0` — with hiding disabled no
+    /// polling is ever scheduled. Bounds the un-hide latency: wiggle the
+    /// mouse and the cursor reappears within one interval.
+    pub poll_interval_ms: u32,
 }
 
 impl Default for CursorConfig {
     fn default() -> Self {
         Self {
             warp_on_focus: true,
+            hide_timeout_ms: 0,
+            poll_interval_ms: 125,
         }
+    }
+}
+
+impl CursorConfig {
+    /// Validate the cursor-hide knobs.
+    ///
+    /// `hide_timeout_ms` may be any value (`0` is the documented disable
+    /// sentinel). `poll_interval_ms` must be non-zero **and** no larger than
+    /// the hide timeout: an interval larger than the timeout could let the
+    /// entire timeout elapse between two polls, making the hide latency
+    /// unobservably wrong (the deadline would fire before any activity
+    /// check). With hiding disabled (`hide_timeout_ms = 0`) the interval is
+    /// never consulted, so it is not validated then.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.hide_timeout_ms == 0 {
+            return Ok(());
+        }
+        if self.poll_interval_ms == 0 {
+            return Err(
+                "cursor.poll_interval_ms must be positive when hide_timeout_ms is set, got 0"
+                    .into(),
+            );
+        }
+        if self.poll_interval_ms > self.hide_timeout_ms {
+            return Err(format!(
+                "cursor.poll_interval_ms ({}) must not exceed cursor.hide_timeout_ms ({}): \
+                 the activity poll must run at least once per hide timeout",
+                self.poll_interval_ms, self.hide_timeout_ms
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -388,6 +450,7 @@ impl FlowConfig {
                 self.drag.edge_scroll_repeat_interval_ms, effective_repeat, effective_repeat
             ));
         }
+        self.cursor.validate()?;
         Ok(())
     }
 }
@@ -1134,6 +1197,105 @@ strategy = "original_slot"
         );
     }
 
+    /// Positive: `CursorConfig::default()` ships the hide knobs disabled —
+    /// `hide_timeout_ms = 0` and `poll_interval_ms = 125` — so upgraders
+    /// with no `[cursor]` section get no hiding (and no polling).
+    #[test]
+    fn cursor_config_default_hide_is_disabled() {
+        let c = CursorConfig::default();
+        assert_eq!(c.hide_timeout_ms, 0, "hide must ship disabled (0)");
+        assert_eq!(c.poll_interval_ms, 125, "default poll interval is 125 ms");
+    }
+
+    /// Positive: a `[cursor]` section written before ticket #37 (only
+    /// `warp_on_focus`) still parses, with the hide knobs serde-defaulting
+    /// to disabled — pre-existing user configs keep working unchanged.
+    #[test]
+    fn cursor_config_pre_hide_section_parses_with_hide_defaults() {
+        let old: FlowConfig = toml::from_str("[cursor]\nwarp_on_focus = false\n")
+            .expect("pre-#37 [cursor] section parses");
+        assert!(!old.cursor.warp_on_focus);
+        assert_eq!(old.cursor.hide_timeout_ms, 0);
+        assert_eq!(old.cursor.poll_interval_ms, 125);
+    }
+
+    /// Positive: hide knobs parse from TOML and participate in the
+    /// round-trip (the all-fields serialize/deserialize test above covers
+    /// the wire format; this pins the TOML key names).
+    #[test]
+    fn cursor_config_hide_knobs_parse_from_toml() {
+        let c: FlowConfig =
+            toml::from_str("[cursor]\nhide_timeout_ms = 2000\npoll_interval_ms = 100\n")
+                .expect("[cursor] hide knobs parse");
+        assert_eq!(c.cursor.hide_timeout_ms, 2000);
+        assert_eq!(c.cursor.poll_interval_ms, 100);
+    }
+
+    /// `CursorConfig::validate`: `hide_timeout_ms = 0` accepts any poll
+    /// interval (never consulted, so never validated).
+    #[test]
+    fn cursor_validate_disabled_accepts_any_interval() {
+        let c = CursorConfig {
+            hide_timeout_ms: 0,
+            poll_interval_ms: 60_000,
+            ..CursorConfig::default()
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    /// `CursorConfig::validate`: zero poll interval with hide enabled is
+    /// rejected — the poll could never run.
+    #[test]
+    fn cursor_validate_rejects_zero_interval_when_enabled() {
+        let c = CursorConfig {
+            hide_timeout_ms: 2000,
+            poll_interval_ms: 0,
+            ..CursorConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    /// `CursorConfig::validate`: an interval larger than the timeout is
+    /// rejected — the poll must run at least once per hide timeout.
+    #[test]
+    fn cursor_validate_rejects_interval_above_timeout() {
+        let c = CursorConfig {
+            hide_timeout_ms: 1000,
+            poll_interval_ms: 2000,
+            ..CursorConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    /// `CursorConfig::validate`: sane enabled values pass, including the
+    /// boundary `poll_interval_ms == hide_timeout_ms`.
+    #[test]
+    fn cursor_validate_accepts_sane_and_boundary_values() {
+        let sane = CursorConfig {
+            hide_timeout_ms: 2000,
+            poll_interval_ms: 125,
+            ..CursorConfig::default()
+        };
+        assert!(sane.validate().is_ok());
+
+        let boundary = CursorConfig {
+            hide_timeout_ms: 2000,
+            poll_interval_ms: 2000,
+            ..CursorConfig::default()
+        };
+        assert!(boundary.validate().is_ok());
+    }
+
+    /// `FlowConfig::validate` reaches the cursor checks (wired through the
+    /// top-level validator the reload path runs).
+    #[test]
+    fn flow_config_validate_propagates_cursor_errors() {
+        let mut c = FlowConfig::default();
+        c.cursor.hide_timeout_ms = 1000;
+        c.cursor.poll_interval_ms = 5000;
+        assert!(c.validate().is_err());
+    }
+
     /// Positive: `LoadoutConfig::default()` ships `default_path = "loadout.json"`
     /// — the canonical value the daemon resolves against when no `[loadout]`
     /// block is present in the user's `flow.toml`.
@@ -1201,6 +1363,8 @@ strategy = "original_slot"
             },
             cursor: CursorConfig {
                 warp_on_focus: false,
+                hide_timeout_ms: 2500,
+                poll_interval_ms: 90,
             },
             check_for_updates: false,
         };

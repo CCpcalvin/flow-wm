@@ -505,6 +505,15 @@ impl FlowWM {
 
         if let Err(e) = registry_win32::set_cursor_pos(target.0, target.1) {
             log::warn!("warp_cursor_to: {e}");
+        } else {
+            // A warp counts as mouse activity for the cursor-hide machine:
+            // un-hide (if hidden) and restart the inactivity timer. The spec
+            // invariant — keyboard focus navigation always produces a
+            // visible, centered pointer that hides again after the full
+            // timeout. Note this only runs when a warp actually occurred;
+            // no warp → a hidden cursor deterministically stays hidden.
+            let action = self.cursor_hide.on_warp(std::time::Instant::now());
+            self.apply_cursor_hide_action(action);
         }
     }
 

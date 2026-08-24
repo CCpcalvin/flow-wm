@@ -60,6 +60,23 @@ struct Args {
 
 /// Daemon entry point.
 fn main() {
+    // Panic hook FIRST, before any initialization can panic: if the daemon
+    // dies mid-flight while the cursor-hide mechanism has the system cursors
+    // blanked, the user must not be left with an invisible pointer. The hook
+    // restores the system cursor set (`SPI_SETCURSORS`) on unwind, mirroring
+    // the clean-shutdown restore in `run()` and the daemonless
+    // `flow cursor restore` escape hatch — the layered safety net specified
+    // in the parent cursor spec (#35).
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Err(e) = flow_wm::cursor::restore_system_cursors() {
+            // Best-effort by design: stderr is all that is left on the panic
+            // path (the logger may itself be mid-teardown).
+            eprintln!("flowd: panic-path cursor restore failed: {e}");
+        }
+        previous_hook(info);
+    }));
+
     // Parse CLI arguments first so the `--log-file` override is available to
     // the logger. Clap handles `--help`/`--version` and usage errors by
     // printing to stderr and exiting, which needs no logger. All subsequent
@@ -157,6 +174,14 @@ fn run(args: Args) -> Result<(), String> {
     // Graceful exit (Stop command or fatal wait error): rescue any windows
     // stranded off-screen before tearing down. See `daemon::shutdown`.
     flow.rescue_stranded_windows();
+
+    // Restore the system cursors in case the hide mechanism had them
+    // blanked — a normally-exiting daemon must never leave a blank cursor
+    // (the parent cursor spec #35's layered safety net). Idempotent:
+    // restoring already-normal cursors is a no-op.
+    if let Err(e) = flow_wm::cursor::restore_system_cursors() {
+        log::warn!("flowd: clean-shutdown cursor restore failed: {e}");
+    }
 
     Ok(())
 }

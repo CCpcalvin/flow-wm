@@ -110,6 +110,16 @@ mod tests {
             obj.contains_key("warp_on_focus"),
             "cursor missing 'warp_on_focus'"
         );
+        // Ticket #37 adds the hide knobs to the same section — taplo must
+        // autocomplete them too.
+        assert!(
+            obj.contains_key("hide_timeout_ms"),
+            "cursor missing 'hide_timeout_ms'"
+        );
+        assert!(
+            obj.contains_key("poll_interval_ms"),
+            "cursor missing 'poll_interval_ms'"
+        );
     }
 
     #[test]

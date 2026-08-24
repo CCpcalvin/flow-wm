@@ -251,6 +251,12 @@ impl FlowWM {
 
         set_dragged_hwnd(hwnd);
 
+        // A move-size gesture suspends cursor hiding for its whole duration:
+        // the pointer must stay visible so the user never loses the grab
+        // point mid-drag (ticket #37). Un-hides if currently hidden.
+        let action = self.cursor_hide.on_gesture_begin();
+        self.apply_cursor_hide_action(action);
+
         // Recolor the border to focused to give visual feedback.
         let focused_style = style_for_state(&self.config.borders, BorderState::Focused);
         if let Some(win) = self.registry.get_window_mut(hwnd_handle)
@@ -722,6 +728,12 @@ impl FlowWM {
             return;
         };
         let dragged_hwnd = drag.dragged_hwnd();
+
+        // The gesture ended: cursor-hide's inactivity timer resumes cleanly
+        // from now — the drag's mouse motion was real activity, so the full
+        // timeout elapses again before the cursor may hide.
+        let action = self.cursor_hide.on_gesture_end(std::time::Instant::now());
+        self.apply_cursor_hide_action(action);
         // Always clear the dragged-HWND global so LOCATIONCHANGE routing returns
         // to the float-sync path, and (for Translate) tear down the scheduler.
         if let DragMode::Translate(t) = &mut drag {

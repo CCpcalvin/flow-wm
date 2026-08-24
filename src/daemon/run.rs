@@ -217,6 +217,14 @@ impl FlowWM {
             // wake adds only a microsecond-scale guard clause.
             self.reconcile_foreground();
 
+            // Cursor-hide activity poll. Runs on every wake while hide is
+            // enabled (a microsecond-scale guard clause + one Win32 position
+            // read), so un-hide latency is bounded by how fast the loop woke
+            // rather than by the poll deadline alone. A no-op when hide is
+            // disabled — and the disabled machine contributes no deadline,
+            // so the loop never even wakes for it.
+            self.poll_cursor_hide(std::time::Instant::now());
+
             // Block until a hook event, an IPC client connection, OR a Win32
             // window message arrives. When there are pending window creations
             // or a float-resume deadline, use the sooner finite timeout so
@@ -304,6 +312,7 @@ impl FlowWM {
                     self.process_hook_events();
                     self.maybe_resume_float_tracking();
                     self.maybe_fire_edge_scroll();
+                    self.poll_cursor_hide(std::time::Instant::now());
 
                     // Read next IPC message (blocking — but client is active).
                     match self.server.read_message() {
@@ -394,11 +403,15 @@ impl FlowWM {
             .drag_state
             .as_ref()
             .and_then(|ds| ds.edge_scroll_deadline());
+        // The cursor-hide machine's poll deadline (only armed while hide is
+        // enabled — `None` otherwise, so default configs never wake for it).
+        let cursor_hide_deadline = self.cursor_hide_poll_deadline();
         compute_wait_timeout_inner(
             !self.pending_creations.is_empty(),
             self.float_resume_deadline,
             next_foreground_sync,
             edge_scroll_deadline,
+            cursor_hide_deadline,
             std::time::Instant::now(),
         )
     }
@@ -529,7 +542,7 @@ impl FlowWM {
 /// to a free function so the branching is unit-testable without constructing
 /// a full [`FlowWM`] (which needs Win32 + a hook thread).
 ///
-/// Four finite-deadline sources fold into the result via `min`:
+/// Five finite-deadline sources fold into the result via `min`:
 /// 1. `has_pending_creations` → fixed `PENDING_RETRY_TIMEOUT_MS` cadence.
 /// 2. `float_resume_deadline` → remaining ms until float tracking resumes.
 /// 3. `next_foreground_sync` → remaining ms until the foreground is reconciled
@@ -538,11 +551,15 @@ impl FlowWM {
 /// 4. `edge_scroll_deadline` → remaining ms until the drag's armed auto-repeat
 ///    timer fires (so a held cursor in a band keeps scrolling even with no
 ///    hook/IPC activity).
+/// 5. `cursor_hide_deadline` → remaining ms until the cursor-hide activity
+///    poll runs (only armed while `hide_timeout_ms > 0`; `None` otherwise so
+///    default configs keep sleeping indefinitely).
 fn compute_wait_timeout_inner(
     has_pending_creations: bool,
     float_resume_deadline: Option<std::time::Instant>,
     next_foreground_sync: Option<std::time::Instant>,
     edge_scroll_deadline: Option<std::time::Instant>,
+    cursor_hide_deadline: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> u32 {
     let mut best: Option<u32> = None;
@@ -556,6 +573,7 @@ fn compute_wait_timeout_inner(
         .into_iter()
         .chain(next_foreground_sync)
         .chain(edge_scroll_deadline)
+        .chain(cursor_hide_deadline)
     {
         let remaining = deadline.saturating_duration_since(now);
         let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
@@ -574,7 +592,7 @@ mod tests {
     fn wait_timeout_infinite_when_idle() {
         let now = Instant::now();
         assert_eq!(
-            compute_wait_timeout_inner(false, None, None, None, now),
+            compute_wait_timeout_inner(false, None, None, None, None, now),
             u32::MAX
         );
     }
@@ -583,7 +601,7 @@ mod tests {
     fn wait_timeout_pending_creations_uses_retry_cadence() {
         let now = Instant::now();
         assert_eq!(
-            compute_wait_timeout_inner(true, None, None, None, now),
+            compute_wait_timeout_inner(true, None, None, None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -593,7 +611,7 @@ mod tests {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(500);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(false, Some(deadline), None, None, None, now),
             500
         );
     }
@@ -604,7 +622,7 @@ mod tests {
         // Pending = 100 ms cadence; deadline in 50 ms → 50 wins.
         let deadline = now + Duration::from_millis(50);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(true, Some(deadline), None, None, None, now),
             50
         );
     }
@@ -615,7 +633,7 @@ mod tests {
         // Pending = 100 ms; deadline in 5 s → 100 wins.
         let deadline = now + Duration::from_secs(5);
         assert_eq!(
-            compute_wait_timeout_inner(true, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(true, Some(deadline), None, None, None, now),
             PENDING_RETRY_TIMEOUT_MS,
         );
     }
@@ -627,7 +645,7 @@ mod tests {
         // loop re-wakes and runs the resume handler instead of busy-spinning.
         let deadline = now - Duration::from_millis(10);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(deadline), None, None, now),
+            compute_wait_timeout_inner(false, Some(deadline), None, None, None, now),
             1
         );
     }
@@ -638,7 +656,7 @@ mod tests {
         // Sync deadline in 250 ms (the default interval) → 250.
         let deadline = now + Duration::from_millis(250);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, Some(deadline), None, now),
+            compute_wait_timeout_inner(false, None, Some(deadline), None, None, now),
             250
         );
     }
@@ -651,7 +669,14 @@ mod tests {
         let float_deadline = now + Duration::from_secs(5);
         let sync_deadline = now + Duration::from_millis(80);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(float_deadline), Some(sync_deadline), None, now),
+            compute_wait_timeout_inner(
+                false,
+                Some(float_deadline),
+                Some(sync_deadline),
+                None,
+                None,
+                now
+            ),
             80
         );
     }
@@ -662,7 +687,7 @@ mod tests {
         // Armed auto-repeat timer in 120 ms → 120.
         let deadline = now + Duration::from_millis(120);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, None, Some(deadline), now),
+            compute_wait_timeout_inner(false, None, None, Some(deadline), None, now),
             120
         );
     }
@@ -675,7 +700,14 @@ mod tests {
         let float_deadline = now + Duration::from_secs(5);
         let edge_deadline = now + Duration::from_millis(60);
         assert_eq!(
-            compute_wait_timeout_inner(false, Some(float_deadline), None, Some(edge_deadline), now),
+            compute_wait_timeout_inner(
+                false,
+                Some(float_deadline),
+                None,
+                Some(edge_deadline),
+                None,
+                now
+            ),
             60
         );
     }
@@ -686,7 +718,49 @@ mod tests {
         // Already past → floor to 1 so the loop re-wakes and fires the repeat.
         let deadline = now - Duration::from_millis(5);
         assert_eq!(
-            compute_wait_timeout_inner(false, None, None, Some(deadline), now),
+            compute_wait_timeout_inner(false, None, None, Some(deadline), None, now),
+            1
+        );
+    }
+
+    #[test]
+    fn wait_timeout_cursor_hide_deadline_uses_remaining_ms() {
+        let now = Instant::now();
+        // Cursor-hide poll deadline in 125 ms (the default poll interval) → 125.
+        let deadline = now + Duration::from_millis(125);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, Some(deadline), now),
+            125
+        );
+    }
+
+    #[test]
+    fn wait_timeout_cursor_hide_deadline_wins_when_soonest() {
+        let now = Instant::now();
+        // Float deadline in 5 s; cursor-hide poll in 40 ms → 40 wins. Confirms
+        // the fifth source participates in the min-reduce, not just appends.
+        let float_deadline = now + Duration::from_secs(5);
+        let cursor_deadline = now + Duration::from_millis(40);
+        assert_eq!(
+            compute_wait_timeout_inner(
+                false,
+                Some(float_deadline),
+                None,
+                None,
+                Some(cursor_deadline),
+                now
+            ),
+            40
+        );
+    }
+
+    #[test]
+    fn wait_timeout_cursor_hide_due_deadline_floors_to_one_ms() {
+        let now = Instant::now();
+        // Already past → floor to 1 so the loop re-wakes and runs the poll.
+        let deadline = now - Duration::from_millis(3);
+        assert_eq!(
+            compute_wait_timeout_inner(false, None, None, None, Some(deadline), now),
             1
         );
     }
