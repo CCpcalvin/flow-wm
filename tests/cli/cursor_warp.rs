@@ -28,6 +28,11 @@
 //! short-lived I/O thread and pumps Win32 messages on the test thread until
 //! the response arrives, mirroring how a real foreground app stays
 //! responsive.
+//!
+//! The pointer/pump/IPC helpers are shared with `cursor_hide` and
+//! `cursor_interaction` via `test_desktop` (hoisted in ticket #38), and the
+//! input-desktop lock lives there too — only one desktop can be the session
+//! input desktop at a time and the session cursor is shared.
 
 // The daemon child process is reaped by the OS after `DaemonGuard` sends the
 // Stop IPC message. See the same pattern in `dispatch_workspace.rs`.
@@ -36,167 +41,18 @@
 use std::time::Duration;
 
 use flow_wm::ipc::message::{SocketMessage, SocketResponse};
-use windows::Win32::Foundation::{HWND, POINT};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, MSG, PM_NOREMOVE, PM_QS_PAINT, PeekMessageW, SetCursorPos, TranslateMessage,
-};
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{
-    DaemonGuard, TestDesktop, TestWindow, send_ipc_retry, start_test_daemon, test_config_dir,
-    unique_title, wait_until_windows_tiled,
+    DaemonGuard, TestDesktop, TestWindow, actual_rect_of, cursor_pos, dispatch_while_pumping,
+    fresh_config_dir_with, lock_input_desktop, query_actual_while_pumping, set_cursor_pos,
+    start_test_daemon, unique_title, wait_tiled_while_pumping,
 };
 
-/// Delay for hook/foreground settle after window creation.
-///
-/// Mirrors `HOOK_SETTLE` in `dispatch_workspace.rs` — long enough for the
-/// isolated desktop's spurious-event backlog to drain and the FOREGROUND
-/// hook (plus any resulting warp) to run.
-const HOOK_SETTLE: Duration = Duration::from_millis(1500);
-
-/// Delay after a focus dispatch before reading the pointer.
-///
-/// The dispatch handler runs synchronously in the daemon, but the *warp*
-/// fires from `on_focus_changed` consuming the `EVENT_SYSTEM_FOREGROUND`
-/// the dispatch induced — an async hop through the hook channel. 500 ms is
-/// comfortably above that while keeping the test fast.
-const WARP_SETTLE: Duration = Duration::from_millis(500);
-
-/// Read the pointer position (screen coordinates).
-fn cursor_pos() -> (i32, i32) {
-    let mut point = POINT { x: 0, y: 0 };
-    // SAFETY: GetCursorPos writes into a valid local POINT. It cannot fail
-    // for a thread on the input desktop; a panic here means the test
-    // harness itself is broken.
-    unsafe { GetCursorPos(&mut point) }.expect("GetCursorPos must succeed on the test desktop");
-    (point.x, point.y)
-}
-
-/// Park the pointer at an explicit screen position.
-fn set_cursor_pos(x: i32, y: i32) {
-    // SAFETY: two scalar coordinates; failure would only mean the position
-    // was rejected, which the subsequent read-back assertions catch.
-    let _ = unsafe { SetCursorPos(x, y) };
-}
-
-/// Drain pending paint messages on the calling (GUI) thread.
-///
-/// The test windows live on this thread, so it must pump paint messages or
-/// the daemon's synchronous activation sends to them stall. Paint-only
-/// (`PM_QS_PAINT` + `PM_NOREMOVE`-checked retrieval loop) — input and
-/// posted messages are left for the system, matching the minimum a
-/// foreground app must do to stay responsive.
-fn pump_paint_messages() {
-    let mut msg = MSG::default();
-    // SAFETY: PeekMessageW inspects the thread's queue and fills `msg`;
-    // TranslateMessage/DispatchMessage for paint-only messages go to
-    // DefWindowProc (via test_wnd_proc), which just validates.
-    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE | PM_QS_PAINT).as_bool() } {
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-        }
-    }
-}
-
-/// Run `f` (an IPC send) on a helper thread while pumping paint messages on
-/// the calling thread, returning `f`'s result.
-///
-/// See the module docs: the test thread owns the test windows, so it must
-/// stay responsive to the daemon's synchronous activation sends while the
-/// pipe round trip is in flight.
-fn ipc_while_pumping<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    let handle = std::thread::spawn(f);
-    loop {
-        match handle.is_finished() {
-            true => {
-                return handle
-                    .join()
-                    .map_err(|_| "IPC thread panicked".to_string())?;
-            }
-            false => pump_paint_messages(),
-        }
-    }
-}
-
-/// Send an IPC message (retrying through pipe refusals) while pumping.
-fn dispatch(pipe: &str, msg: SocketMessage) -> Result<SocketResponse, String> {
-    let pipe = pipe.to_owned();
-    ipc_while_pumping(move || send_ipc_retry(&pipe, &msg))
-}
-
-/// Query the actual layout (retrying) while pumping.
-fn query_actual(pipe: &str) -> Result<serde_json::Value, String> {
-    let pipe = pipe.to_owned();
-    ipc_while_pumping(
-        move || match send_ipc_retry(&pipe, &SocketMessage::QueryLayoutActual)? {
-            SocketResponse::Data { payload } => Ok(payload),
-            SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
-            other => Err(format!("unexpected response: {other:?}")),
-        },
-    )
-}
-
-/// Wait until `expected` windows are tiled (polling while pumping).
-fn wait_tiled(pipe: &str, expected: usize) -> Result<serde_json::Value, String> {
-    let pipe = pipe.to_owned();
-    ipc_while_pumping(move || wait_until_windows_tiled(&pipe, expected))
-}
-
-/// Serializes the cursor-warp tests.
-///
-/// [`TestDesktop::make_input`] promotes a *session-global* input desktop —
-/// only one test desktop can be the input desktop at a time, and the
-/// session cursor it exposes is shared. Running these tests in parallel
-/// would have each test stealing input-desktop status (and warping the
-/// pointer) out from under the others. The guard serializes exactly this
-/// module's tests while leaving the rest of the suite parallel.
-static INPUT_DESKTOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// RAII guard acquiring [`INPUT_DESKTOP_LOCK`].
-fn lock_input_desktop() -> std::sync::MutexGuard<'static, ()> {
-    INPUT_DESKTOP_LOCK.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Shared-across-modules access to the same input-desktop lock.
-///
-/// `cursor_hide`'s tests promote their own test desktop to the session input
-/// desktop too (cursor state is session-global), so they must serialize
-/// against these tests on the *same* mutex — a second lock would be no lock
-/// at all.
-pub(super) fn lock_input_desktop_public() -> std::sync::MutexGuard<'static, ()> {
-    lock_input_desktop()
-}
-
-/// Look up the projected (actual-layout) rect of a window by HWND.
-fn actual_rect_of(json: &serde_json::Value, hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
-    let hwnd = hwnd.0 as i64;
-    json["entries"].as_array()?.iter().find_map(|e| {
-        if e["window_id"].as_i64() != Some(hwnd) {
-            return None;
-        }
-        let r = &e["rect"];
-        Some((
-            r["x"].as_i64()? as i32,
-            r["y"].as_i64()? as i32,
-            r["width"].as_i64()? as i32,
-            r["height"].as_i64()? as i32,
-        ))
-    })
-}
-
-/// Resolve the per-test config directory the daemon will use (shared
-/// `test_config_dir` helper — same scheme as `start_test_daemon`) and clear
-/// any stale `flow.toml` a previous run left behind, so a cursor test never
-/// inherits another test's app config (the temp dir is keyed by pipe id,
-/// which repeats across `cargo test` invocations).
-fn fresh_config_dir(pipe: &str) -> std::path::PathBuf {
-    let dir = test_config_dir(pipe);
-    let _ = std::fs::remove_file(dir.join("flow.toml"));
-    dir
-}
+// Shared timing constants (hoisted in ticket #38), aliased to the names this
+// module was written against.
+use super::test_desktop::CURSOR_HOOK_SETTLE as HOOK_SETTLE;
+use super::test_desktop::CURSOR_WARP_SETTLE as WARP_SETTLE;
 
 /// Assert a position lies inside a rect (boundary-inclusive).
 fn assert_inside(pos: (i32, i32), rect: (i32, i32, i32, i32), ctx: &str) {
@@ -225,7 +81,7 @@ fn focus_dispatch_warps_pointer_to_new_window_center() {
     td.make_input().expect("promote test desktop to input");
     let pipe = unique_pipe_name();
     // Clear stale flow.toml from prior invocations (see test 1).
-    fresh_config_dir(&pipe);
+    fresh_config_dir_with(&pipe, None).expect("fresh config dir");
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(Duration::from_millis(500));
@@ -239,8 +95,8 @@ fn focus_dispatch_warps_pointer_to_new_window_center() {
     let w2 = TestWindow::create(&t2).expect("create W2");
     std::thread::sleep(HOOK_SETTLE);
 
-    wait_tiled(&pipe, 2).expect("two windows tiled");
-    let layout = query_actual(&pipe).expect("query layout actual");
+    wait_tiled_while_pumping(&pipe, 2).expect("two windows tiled");
+    let layout = query_actual_while_pumping(&pipe).expect("query layout actual");
     let r1 = actual_rect_of(&layout, w1.hwnd).expect("W1 in actual layout");
     let r2 = actual_rect_of(&layout, w2.hwnd).expect("W2 in actual layout");
 
@@ -252,7 +108,7 @@ fn focus_dispatch_warps_pointer_to_new_window_center() {
     let before = cursor_pos();
     assert_ne!(before, (0, 0), "sanity: pointer parked");
 
-    let resp = dispatch(&pipe, SocketMessage::FocusLeft).expect("send FocusLeft");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::FocusLeft).expect("send FocusLeft");
     assert!(
         matches!(resp, SocketResponse::Ok),
         "FocusLeft should succeed (two columns): {resp:?}"
@@ -279,7 +135,7 @@ fn pointer_inside_new_window_is_left_untouched() {
     td.make_input().expect("promote test desktop to input");
     let pipe = unique_pipe_name();
     // Clear stale flow.toml from prior invocations (see test 1).
-    fresh_config_dir(&pipe);
+    fresh_config_dir_with(&pipe, None).expect("fresh config dir");
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(Duration::from_millis(500));
@@ -292,8 +148,8 @@ fn pointer_inside_new_window_is_left_untouched() {
     let w2 = TestWindow::create(&t2).expect("create W2");
     std::thread::sleep(HOOK_SETTLE);
 
-    wait_tiled(&pipe, 2).expect("two windows tiled");
-    let layout = query_actual(&pipe).expect("query layout actual");
+    wait_tiled_while_pumping(&pipe, 2).expect("two windows tiled");
+    let layout = query_actual_while_pumping(&pipe).expect("query layout actual");
     let r1 = actual_rect_of(&layout, w1.hwnd).expect("W1 in actual layout");
 
     // Park the pointer at an off-center position INSIDE W1 (the warp target),
@@ -306,7 +162,7 @@ fn pointer_inside_new_window_is_left_untouched() {
         "sanity: pointer parked off-center inside W1"
     );
 
-    let resp = dispatch(&pipe, SocketMessage::FocusLeft).expect("send FocusLeft");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::FocusLeft).expect("send FocusLeft");
     assert!(
         matches!(resp, SocketResponse::Ok),
         "FocusLeft should succeed: {resp:?}"
@@ -335,13 +191,8 @@ fn warp_disabled_leaves_pointer_untouched() {
 
     // Seed the per-test config dir's flow.toml with warp disabled BEFORE the
     // daemon starts, so the whole session runs with the knob off.
-    let config_dir = fresh_config_dir(&pipe);
-    std::fs::create_dir_all(&config_dir).expect("create config dir");
-    std::fs::write(
-        config_dir.join("flow.toml"),
-        "[cursor]\nwarp_on_focus = false\n",
-    )
-    .expect("write flow.toml");
+    fresh_config_dir_with(&pipe, Some("[cursor]\nwarp_on_focus = false\n"))
+        .expect("seed warp-off config");
 
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
@@ -355,15 +206,15 @@ fn warp_disabled_leaves_pointer_untouched() {
     let w2 = TestWindow::create(&t2).expect("create W2");
     std::thread::sleep(HOOK_SETTLE);
 
-    wait_tiled(&pipe, 2).expect("two windows tiled");
-    let layout = query_actual(&pipe).expect("query layout actual");
+    wait_tiled_while_pumping(&pipe, 2).expect("two windows tiled");
+    let layout = query_actual_while_pumping(&pipe).expect("query layout actual");
     let r1 = actual_rect_of(&layout, w1.hwnd).expect("W1 in actual layout");
 
     // Park outside W1; a focus dispatch must NOT move the pointer.
     set_cursor_pos(4, r1.1 + r1.3 / 4);
     let before = cursor_pos();
 
-    let resp = dispatch(&pipe, SocketMessage::FocusLeft).expect("send FocusLeft");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::FocusLeft).expect("send FocusLeft");
     assert!(
         matches!(resp, SocketResponse::Ok),
         "FocusLeft should succeed: {resp:?}"
@@ -389,10 +240,9 @@ fn reload_config_flips_warp_without_restart() {
     td.make_input().expect("promote test desktop to input");
     let pipe = unique_pipe_name();
 
-    let config_dir = fresh_config_dir(&pipe);
-    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let config_dir = fresh_config_dir_with(&pipe, Some("[cursor]\nwarp_on_focus = false\n"))
+        .expect("seed warp-off config");
     let flow_toml = config_dir.join("flow.toml");
-    std::fs::write(&flow_toml, "[cursor]\nwarp_on_focus = false\n").expect("write flow.toml");
 
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
@@ -406,15 +256,15 @@ fn reload_config_flips_warp_without_restart() {
     let w2 = TestWindow::create(&t2).expect("create W2");
     std::thread::sleep(HOOK_SETTLE);
 
-    wait_tiled(&pipe, 2).expect("two windows tiled");
-    let layout = query_actual(&pipe).expect("query layout actual");
+    wait_tiled_while_pumping(&pipe, 2).expect("two windows tiled");
+    let layout = query_actual_while_pumping(&pipe).expect("query layout actual");
     let r1 = actual_rect_of(&layout, w1.hwnd).expect("W1 in actual layout");
     let r2 = actual_rect_of(&layout, w2.hwnd).expect("W2 in actual layout");
 
     // Phase 1: warp off — dispatch must not move the pointer.
     set_cursor_pos(4, r1.1 + r1.3 / 4);
     let before = cursor_pos();
-    let resp = dispatch(&pipe, SocketMessage::FocusLeft).expect("FocusLeft");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::FocusLeft).expect("FocusLeft");
     assert!(matches!(resp, SocketResponse::Ok));
     std::thread::sleep(WARP_SETTLE);
     assert_eq!(
@@ -425,7 +275,7 @@ fn reload_config_flips_warp_without_restart() {
 
     // Flip the knob on disk and hot-reload.
     std::fs::write(&flow_toml, "[cursor]\nwarp_on_focus = true\n").expect("rewrite flow.toml");
-    let resp = dispatch(&pipe, SocketMessage::ReloadConfig).expect("ReloadConfig");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::ReloadConfig).expect("ReloadConfig");
     assert!(
         matches!(resp, SocketResponse::Ok),
         "ReloadConfig should succeed: {resp:?}"
@@ -434,7 +284,7 @@ fn reload_config_flips_warp_without_restart() {
 
     // Phase 2: warp on — dispatching focus back to W2 (right) must warp.
     set_cursor_pos(4, r1.1 + r1.3 / 4);
-    let resp = dispatch(&pipe, SocketMessage::FocusRight).expect("FocusRight");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::FocusRight).expect("FocusRight");
     assert!(matches!(resp, SocketResponse::Ok));
     std::thread::sleep(WARP_SETTLE);
 

@@ -17,6 +17,9 @@ mod cursor;
 #[path = "cli/cursor_hide.rs"]
 mod cursor_hide;
 #[cfg(debug_assertions)]
+#[path = "cli/cursor_interaction.rs"]
+mod cursor_interaction;
+#[cfg(debug_assertions)]
 #[path = "cli/cursor_warp.rs"]
 mod cursor_warp;
 #[cfg(debug_assertions)]

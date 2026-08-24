@@ -568,6 +568,41 @@ mod tests {
     }
 
     #[test]
+    fn warp_during_gesture_does_not_fight_suppression() {
+        // A focus change can land mid-gesture (the gesture is mouse-driven,
+        // the focus change is not). The warp it triggers must not fight the
+        // gesture suppression: the cursor stays visible, the warp's re-arm
+        // does not survive into the gesture, and the gesture end re-arms
+        // from its own instant (full timeout from tend).
+        let mut s = scheduler();
+        let t0 = now();
+        drive_to_hidden(&mut s, t0);
+        assert_eq!(s.on_gesture_begin(), CursorHideAction::Unhide);
+        // Warp mid-gesture: the cursor is already visible, so no action —
+        // but the warp arms a deadline that the gesture must disarm.
+        let tw = t0 + Duration::from_millis(TIMEOUT as u64 + 20);
+        assert_eq!(s.on_warp(tw), CursorHideAction::None);
+        let mut t = tw;
+        for _ in 0..5 {
+            assert_eq!(s.on_poll(still((100, 100)), t), CursorHideAction::None);
+            assert!(!s.is_hidden());
+            t += Duration::from_secs(1);
+        }
+        assert_eq!(
+            s.next_deadline(),
+            None,
+            "no deadline may stay armed mid-gesture, not even a warp's"
+        );
+        // Gesture end re-arms cleanly from its own instant.
+        let tend = t;
+        assert_eq!(s.on_gesture_end(tend), CursorHideAction::None);
+        let before = tend + Duration::from_millis(TIMEOUT as u64 - 1);
+        assert_eq!(s.on_poll(still((100, 100)), before), CursorHideAction::None);
+        let after = tend + Duration::from_millis(TIMEOUT as u64 + 1);
+        assert_eq!(s.on_poll(still((100, 100)), after), CursorHideAction::Hide);
+    }
+
+    #[test]
     fn warp_on_disabled_machine_is_noop() {
         let mut s = CursorHideScheduler::new(0, POLL);
         assert_eq!(s.on_warp(now()), CursorHideAction::None);
