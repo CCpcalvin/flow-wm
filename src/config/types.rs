@@ -269,12 +269,14 @@ impl CursorConfig {
     /// Validate the cursor-hide knobs.
     ///
     /// `hide_timeout_ms` may be any value (`0` is the documented disable
-    /// sentinel). `poll_interval_ms` must be non-zero **and** no larger than
-    /// the hide timeout: an interval larger than the timeout could let the
-    /// entire timeout elapse between two polls, making the hide latency
-    /// unobservably wrong (the deadline would fire before any activity
-    /// check). With hiding disabled (`hide_timeout_ms = 0`) the interval is
-    /// never consulted, so it is not validated then.
+    /// sentinel). `poll_interval_ms` must merely be non-zero (a zero interval
+    /// would busy-loop the main loop). Any larger interval is **clamped** to
+    /// the hide timeout by the scheduler rather than rejected here — the spec
+    /// puts no lower bound on the timeout, and a config like
+    /// `hide_timeout_ms = 100` with the default `poll_interval_ms = 125`
+    /// is legal and must not keep the daemon from starting. With hiding
+    /// disabled (`hide_timeout_ms = 0`) the interval is never consulted, so
+    /// it is not validated then.
     pub fn validate(&self) -> Result<(), String> {
         if self.hide_timeout_ms == 0 {
             return Ok(());
@@ -284,13 +286,6 @@ impl CursorConfig {
                 "cursor.poll_interval_ms must be positive when hide_timeout_ms is set, got 0"
                     .into(),
             );
-        }
-        if self.poll_interval_ms > self.hide_timeout_ms {
-            return Err(format!(
-                "cursor.poll_interval_ms ({}) must not exceed cursor.hide_timeout_ms ({}): \
-                 the activity poll must run at least once per hide timeout",
-                self.poll_interval_ms, self.hide_timeout_ms
-            ));
         }
         Ok(())
     }
@@ -1256,15 +1251,29 @@ strategy = "original_slot"
     }
 
     /// `CursorConfig::validate`: an interval larger than the timeout is
-    /// rejected — the poll must run at least once per hide timeout.
+    /// accepted — the spec puts no lower bound on the timeout, and the
+    /// scheduler clamps the effective interval instead (see
+    /// `effective_poll_interval`).
     #[test]
-    fn cursor_validate_rejects_interval_above_timeout() {
+    fn cursor_validate_accepts_interval_above_timeout() {
         let c = CursorConfig {
             hide_timeout_ms: 1000,
             poll_interval_ms: 2000,
             ..CursorConfig::default()
         };
-        assert!(c.validate().is_err());
+        assert!(c.validate().is_ok());
+    }
+
+    /// The spec-legal worst case: `hide_timeout_ms = 100` with the *default*
+    /// `poll_interval_ms = 125` must not keep the daemon from starting.
+    #[test]
+    fn cursor_validate_accepts_short_timeout_with_default_interval() {
+        let c = CursorConfig {
+            hide_timeout_ms: 100,
+            poll_interval_ms: 125,
+            ..CursorConfig::default()
+        };
+        assert!(c.validate().is_ok());
     }
 
     /// `CursorConfig::validate`: sane enabled values pass, including the
@@ -1292,7 +1301,7 @@ strategy = "original_slot"
     fn flow_config_validate_propagates_cursor_errors() {
         let mut c = FlowConfig::default();
         c.cursor.hide_timeout_ms = 1000;
-        c.cursor.poll_interval_ms = 5000;
+        c.cursor.poll_interval_ms = 0;
         assert!(c.validate().is_err());
     }
 

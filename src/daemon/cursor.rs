@@ -19,9 +19,10 @@
 //! animation and no per-path flag — every focus path (keyboard dispatch,
 //! workspace switch, alt-tab/taskbar foreground change) converges on the
 //! same `warp_cursor_to` call. The single-invariant design (one warp rule
-//! instead of per-path flags) follows the rationale in the parent spec
-//! issue #35, which deliberately avoids the Hyprland multi-knob
-//! interaction-bug failure mode.
+//! instead of per-path flags) deliberately avoids the Hyprland multi-knob
+//! interaction-bug failure mode; the full rationale lives in
+//! `docs/adr/0007-cursor-hide-and-warp.md` and the domain terms (*cursor
+//! warp*, *cursor hide*, *activity*) are pinned in `CONTEXT.md`.
 //!
 //! The cursor-**hide** daemon glue also lives here
 //! ([`FlowWM::apply_cursor_hide_action`], [`FlowWM::poll_cursor_hide`]): the
@@ -36,6 +37,18 @@ use super::types::FlowWM;
 use crate::common::{Rect, WindowId};
 use crate::cursor::restore_system_cursors;
 use crate::registry::win32;
+
+/// Read the pointer position, defaulting to an off-screen far corner.
+///
+/// `GetCursorPos` fails only when the thread lacks input-desktop access
+/// (extremely rare for the daemon's main thread). An unreadable position is
+/// treated as "outside any window" by every consumer — the warp path still
+/// lands the pointer on the focused window, and the hide poll counts it as
+/// motion (a transient failure un-hides rather than leaving stale hidden
+/// state) — a deliberate fail-visible choice over fail-silent.
+pub(super) fn pointer_position() -> (i32, i32) {
+    win32::get_cursor_pos().unwrap_or((i32::MIN / 2, i32::MIN / 2))
+}
 
 impl FlowWM {
     /// Perform the impure half of a [`CursorHideAction`].
@@ -78,13 +91,12 @@ impl FlowWM {
             return;
         }
         let sample = ActivitySample {
-            // A failed position read coerces to the far corner — a deliberate
-            // fail-visible choice (same philosophy as the warp path's
-            // `pointer_position`): an unreadable position counts as motion, so
+            // A failed read coerces to the far corner via `pointer_position`'s
+            // fail-visible rule — an unreadable position counts as motion, so
             // a transient desktop-access failure un-hides the cursor rather
             // than leaving a possibly-stale hidden state. The next successful
             // poll re-establishes the baseline.
-            position: win32::get_cursor_pos().unwrap_or((i32::MIN / 2, i32::MIN / 2)),
+            position: pointer_position(),
             button_down: win32::any_mouse_button_down(),
         };
         let action = self.cursor_hide.on_poll(sample, now);

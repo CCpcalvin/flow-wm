@@ -42,7 +42,9 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VIRTUAL_KEY, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateCursor, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetCursorPos,
     GetForegroundWindow, GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
@@ -246,12 +248,17 @@ pub fn set_cursor_pos(x: i32, y: i32) -> Result<(), String> {
 /// Returns `false` when the query fails (treated as no activity — hide
 /// restarts on the next successful poll rather than never).
 pub fn any_mouse_button_down() -> bool {
+    // Every mouse button the spec counts as activity — left, right, middle,
+    // and the two X (back/forward) buttons. A press of *any* of them with no
+    // pointer motion must un-hide.
+    const MOUSE_BUTTONS: [VIRTUAL_KEY; 5] =
+        [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2];
     // SAFETY: GetAsyncKeyState takes a scalar virtual key. The high bit of
     // the returned i16 is set while the key is down. Failure is not
     // representable — the API returns 0 for "up".
-    let left = unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16) & 0x8000 != 0 };
-    let right = unsafe { (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16) & 0x8000 != 0 };
-    left || right
+    MOUSE_BUTTONS
+        .iter()
+        .any(|vk| unsafe { (GetAsyncKeyState(vk.0 as i32) as u16) & 0x8000 != 0 })
 }
 
 /// The full list of system cursor shapes replaced by

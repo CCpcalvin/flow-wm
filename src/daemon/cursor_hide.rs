@@ -1,6 +1,11 @@
 //! Pure, clock-injectable state machine for cursor hide after mouse
 //! inactivity (ticket #37, parent spec #35).
 //!
+//! Design rationale — why polling instead of a hook, why the swap/restore
+//! split, and the layered-restore safety net — lives in
+//! `docs/adr/0007-cursor-hide-and-warp.md`; the domain terms (*cursor hide*,
+//! *activity*, *move-size gesture*) are pinned in `CONTEXT.md`.
+//!
 //! After `hide_timeout_ms` with no mouse activity the system cursor becomes
 //! invisible; any real mouse activity — pointer motion or a button press —
 //! makes it visible again and restarts the timer. Activity detection is
@@ -99,6 +104,25 @@ pub(super) struct CursorHideScheduler {
     last_position: Option<(i32, i32)>,
 }
 
+/// Resolve the poll cadence actually used by the machine.
+///
+/// The config places no lower bound on `hide_timeout_ms`, so a legal
+/// configuration can name an interval larger than the timeout (e.g.
+/// `hide_timeout_ms = 100` with the default `poll_interval_ms = 125`).
+/// Rather than reject it, the interval is clamped down to the timeout:
+/// the activity poll then runs exactly once per timeout window, which is
+/// the coarsest cadence that still observes every elapse. Validation only
+/// rejects a zero interval (a busy loop); see `CursorConfig::validate`.
+fn effective_poll_interval(hide_timeout_ms: u32, poll_interval_ms: u32) -> Duration {
+    let interval = Duration::from_millis(poll_interval_ms as u64);
+    let timeout = Duration::from_millis(hide_timeout_ms as u64);
+    if interval > timeout {
+        timeout.max(Duration::from_millis(1))
+    } else {
+        interval
+    }
+}
+
 impl CursorHideScheduler {
     /// Build a scheduler from the live `[cursor]` config knobs.
     ///
@@ -110,7 +134,7 @@ impl CursorHideScheduler {
         Self {
             enabled: hide_timeout_ms > 0,
             timeout: Duration::from_millis(hide_timeout_ms as u64),
-            poll_interval: Duration::from_millis(poll_interval_ms as u64),
+            poll_interval: effective_poll_interval(hide_timeout_ms, poll_interval_ms),
             hidden: false,
             gesture_active: false,
             deadline: None,
@@ -158,7 +182,7 @@ impl CursorHideScheduler {
         let was_enabled = self.enabled;
         self.enabled = hide_timeout_ms > 0;
         self.timeout = Duration::from_millis(hide_timeout_ms as u64);
-        self.poll_interval = Duration::from_millis(poll_interval_ms as u64);
+        self.poll_interval = effective_poll_interval(hide_timeout_ms, poll_interval_ms);
 
         if !self.enabled {
             // Disabled mid-flight: restore the cursors if blank and stop
@@ -351,6 +375,46 @@ mod tests {
         let quiet = t0 + Duration::from_millis(TIMEOUT as u64 + 1);
         assert_eq!(s.on_poll(still((100, 100)), quiet), CursorHideAction::Hide);
         assert!(s.is_hidden());
+    }
+
+    // ── effective poll interval clamping ──────────────────────────────
+
+    /// An interval larger than the timeout is clamped to the timeout, not
+    /// rejected: the spec puts no lower bound on `hide_timeout_ms`, and the
+    /// spec-legal `hide_timeout_ms = 100` + default `poll_interval_ms = 125`
+    /// must yield a working (once-per-timeout) cadence.
+    #[test]
+    fn poll_interval_above_timeout_is_clamped() {
+        assert_eq!(
+            effective_poll_interval(100, 125),
+            Duration::from_millis(100),
+            "interval clamps down to the timeout"
+        );
+        assert_eq!(
+            effective_poll_interval(2000, 125),
+            Duration::from_millis(125),
+            "in-range interval passes through unchanged"
+        );
+        assert_eq!(
+            effective_poll_interval(0, 125),
+            Duration::from_millis(1),
+            "disabled machine: interval clamps to the 1 ms floor (never scheduled anyway)"
+        );
+    }
+
+    /// A clamped scheduler still hides on schedule: with
+    /// `hide_timeout_ms = 100` and `poll_interval_ms = 125`, the effective
+    /// poll runs at the 100 ms cadence and observes the elapse.
+    #[test]
+    fn clamped_interval_still_observes_timeout() {
+        let mut s = CursorHideScheduler::new(100, 125);
+        assert_eq!(s.poll_interval(), Some(Duration::from_millis(100)));
+        let t0 = now();
+        assert_eq!(s.on_poll(still((0, 0)), t0), CursorHideAction::None);
+        assert_eq!(
+            s.on_poll(still((0, 0)), t0 + Duration::from_millis(101)),
+            CursorHideAction::Hide
+        );
     }
 
     // ── timeout elapse → hidden ─────────────────────────────────────────

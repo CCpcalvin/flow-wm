@@ -31,6 +31,22 @@ The rule the daemon enforces on every foreground change: every float is always a
 
 ## Cursor behavior
 
+**Cursor warp**:
+Teleporting the pointer (`SetCursorPos`) to the newly focused window's center when — and only when — the pointer lies outside that window's rect. One invariant at the daemon's single focus convergence point (`on_focus_changed`); there are no per-path warp flags. A warp counts as *activity* (the interaction invariant with *cursor hide*).
+_Avoid_: pointer jump, mouse follow (conflates with focus-follows-mouse)
+
+**Cursor hide**:
+Making the system cursor invisible after `hide_timeout_ms` with no mouse *activity*. Any real activity — pointer motion or a button press — restores it and restarts the timer. Never armed during a *move-size gesture*. Layered restore: unhide, clean daemon exit, panic hook, and the daemonless `flow cursor restore`.
+_Avoid_: auto-hide cursor (vague about what triggers it)
+
+**Activity**:
+The cursor-hide machine's unhide/timer-reset source: pointer motion, any mouse button press, or a warp. Keyboard input is deliberately *not* activity in v1 — the daemon is keyboard-blind.
+_Avoid_: input (too broad — includes keyboard)
+
+**Move-size gesture**:
+An in-progress drag that reorders or resizes a window (tile *translate*, resize, float move). While one is active, cursor hiding is suspended and the pointer stays visible for the whole gesture.
+_Avoid_: drag (ambiguous — also names the drag subsystem)
+
 **Focus-follows-mouse**:
 Hovering the cursor over a window moves OS focus to it (`SetForegroundWindow`), no click required.
 _Avoid_: hover-focus, sloppy-focus, follow_mouse (ambiguous — also covers edge-scroll-follows-mouse)

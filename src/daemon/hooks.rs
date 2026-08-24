@@ -29,17 +29,6 @@ use windows::Win32::Foundation::HWND;
 use super::cursor;
 use super::types::FlowWM;
 
-/// Read the pointer position, defaulting to an off-screen far corner.
-///
-/// `GetCursorPos` fails only when the thread lacks input-desktop access
-/// (extremely rare for the daemon's main thread). An unreadable position is
-/// treated as "outside any window" so the warp still lands the pointer on
-/// the focused window instead of being silently skipped — a deliberate
-/// fail-visible choice over fail-silent.
-fn pointer_position() -> (i32, i32) {
-    registry_win32::get_cursor_pos().unwrap_or((i32::MIN / 2, i32::MIN / 2))
-}
-
 impl FlowWM {
     /// Handle a window creation event.
     ///
@@ -498,7 +487,7 @@ impl FlowWM {
             return;
         };
 
-        let Some(target) = cursor::warp_target(pointer_position(), rect, work_area) else {
+        let Some(target) = cursor::warp_target(cursor::pointer_position(), rect, work_area) else {
             // Pointer already inside (or degenerate rect) — leave it untouched.
             return;
         };
