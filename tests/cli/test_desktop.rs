@@ -11,16 +11,18 @@ use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::StationsAndDesktops::HDESK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, HCURSOR,
-    HICON, RegisterClassExW, SW_MINIMIZE, SW_RESTORE, ShowWindow, WINDOW_EX_STYLE, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, GetCursorPos, HCURSOR, HICON, MSG, PM_NOREMOVE, PM_QS_PAINT, PeekMessageW,
+    RegisterClassExW, SW_MINIMIZE, SW_RESTORE, SetCursorPos, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
+use flow_wm::ipc::message::{SocketMessage, SocketResponse};
 use flow_wm::registry::desktop;
 
 /// Per-test unique counter for desktop names.
@@ -48,12 +50,24 @@ pub fn unique_title(base: &str) -> String {
 /// (e.g. the cursor-warp tests writing a `flow.toml`, or clearing one a
 /// previous invocation left behind) resolve the exact same path the daemon
 /// will use, instead of re-deriving the scheme by hand.
-pub fn test_config_dir(pipe: &str) -> std::path::PathBuf {
-    let safe: String = pipe
-        .chars()
+/// Filesystem-safe key derived from a (unique) pipe name: non-alphanumeric
+/// characters collapse to `_`. Used to key per-test on-disk artifacts (config
+/// dir, daemon log) so parallel tests never collide.
+fn pipe_key(pipe: &str) -> String {
+    pipe.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
-    std::env::temp_dir().join(format!("flow-test-config-{safe}"))
+        .collect()
+}
+
+/// Per-test config directory keyed by the (unique) pipe name — the same
+/// scheme `start_test_daemon` passes to `flowd --config`.
+///
+/// Exported so tests that need to seed or clear files in that directory
+/// (e.g. the cursor-warp tests writing a `flow.toml`, or clearing one a
+/// previous run left behind) resolve the exact same path the daemon
+/// will use, instead of re-deriving the scheme by hand.
+pub fn test_config_dir(pipe: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("flow-test-config-{}", pipe_key(pipe)))
 }
 
 // ── TestDesktop ─────────────────────────────────────────────────────
@@ -358,10 +372,7 @@ pub fn start_test_daemon_with_extra_args(
 
     // Per-test filesystem key derived from the (unique) pipe name. Used for
     // the log file below so parallel tests never collide on disk.
-    let safe: String = pipe
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
+    let safe = pipe_key(pipe);
 
     // Point the daemon at an isolated, per-test config directory seeded with a
     // rules file that tiles unknown windows.
@@ -719,4 +730,232 @@ pub fn wide(s: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+// ── Cursor-test helpers (shared by cursor_warp / cursor_hide / cursor_interaction) ──
+//
+// Hoisted from the cursor_warp and cursor_hide modules (ticket #38): both
+// needed byte-identical copies of the pointer read/park primitives, the
+// GUI-thread pump, the IPC-while-pumping bridge, and the timing constants.
+// They live here so a third consumer (the cross-feature interaction tests)
+// does not grow a third copy.
+
+/// Delay for hook/foreground settle after window creation.
+///
+/// Long enough for the isolated desktop's spurious-event backlog to drain
+/// and the FOREGROUND hook (plus any resulting warp) to run. Mirrors
+/// `HOOK_SETTLE` in `dispatch_workspace.rs`.
+pub const CURSOR_HOOK_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Delay after a focus dispatch before reading the pointer.
+///
+/// The dispatch handler runs synchronously in the daemon, but the *warp*
+/// fires from `on_focus_changed` consuming the `EVENT_SYSTEM_FOREGROUND`
+/// the dispatch induced — an async hop through the hook channel. 500 ms is
+/// comfortably above that while keeping the test fast.
+pub const CURSOR_WARP_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The hide timeout the cursor tests configure — short enough for a snappy
+/// test, long enough that startup jitter cannot look like "no activity".
+pub const CURSOR_HIDE_TIMEOUT_MS: u32 = 1500;
+
+/// The poll interval the cursor tests configure — bounds the un-hide latency.
+pub const CURSOR_POLL_INTERVAL_MS: u32 = 125;
+
+/// One poll interval of slack when waiting for a blank/restore transition.
+pub const CURSOR_HIDE_SLACK: std::time::Duration =
+    std::time::Duration::from_millis(CURSOR_POLL_INTERVAL_MS as u64 + 400);
+
+/// The quiet stretch that must elapse (from the last activity) for the
+/// cursor to hide: full timeout plus the poll slack.
+pub fn cursor_hide_wait() -> std::time::Duration {
+    CURSOR_HIDE_SLACK + std::time::Duration::from_millis(CURSOR_HIDE_TIMEOUT_MS as u64)
+}
+
+/// Read the session cursor position (screen coordinates).
+///
+/// Only meaningful on the input desktop — cursor tests promote their test
+/// desktop via [`TestDesktop::make_input`] first.
+pub fn cursor_pos() -> (i32, i32) {
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos writes into a valid local POINT. It cannot fail
+    // for a thread on the input desktop; a panic here means the test harness
+    // itself is broken.
+    unsafe { GetCursorPos(&mut point) }.expect("GetCursorPos must succeed on the test desktop");
+    (point.x, point.y)
+}
+
+/// Park the pointer at an explicit screen position.
+///
+/// This is real mouse activity for the daemon's hide poll — parking the
+/// pointer restarts the inactivity timer, which cursor tests rely on when
+/// establishing a quiet stretch.
+pub fn set_cursor_pos(x: i32, y: i32) {
+    // SAFETY: two scalar coordinates; failure would only mean the position
+    // was rejected, which the subsequent read-back assertions catch.
+    let _ = unsafe { SetCursorPos(x, y) };
+}
+
+/// Drain pending paint messages on the calling (GUI) thread.
+///
+/// The test windows live on this thread, so it must pump paint messages or
+/// the daemon's synchronous activation sends to them stall. Paint-only
+/// (`PM_QS_PAINT` + `PM_NOREMOVE`-checked retrieval loop) — input and
+/// posted messages are left for the system, matching the minimum a
+/// foreground app must do to stay responsive.
+pub fn pump_paint_messages() {
+    let mut msg = MSG::default();
+    // SAFETY: PeekMessageW inspects the thread's queue and fills `msg`;
+    // TranslateMessage/DispatchMessage for paint-only messages go to
+    // DefWindowProc (via test_wnd_proc), which just validates.
+    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE | PM_QS_PAINT).as_bool() } {
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Run `f` (an IPC send) on a helper thread while pumping paint messages on
+/// the calling thread, returning `f`'s result.
+///
+/// The test thread owns the test windows, so it must stay responsive to the
+/// daemon's synchronous activation sends while the pipe round trip is in
+/// flight. See the `cursor_warp` module docs for the full rationale.
+pub fn ipc_while_pumping<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let handle = std::thread::spawn(f);
+    loop {
+        match handle.is_finished() {
+            true => {
+                return handle
+                    .join()
+                    .map_err(|_| "IPC thread panicked".to_string())?;
+            }
+            false => pump_paint_messages(),
+        }
+    }
+}
+
+/// Send one IPC message (retrying through pipe refusals) while pumping.
+pub fn dispatch_while_pumping(pipe: &str, msg: SocketMessage) -> Result<SocketResponse, String> {
+    let pipe = pipe.to_owned();
+    ipc_while_pumping(move || send_ipc_retry(&pipe, &msg))
+}
+
+/// Query the actual layout (retrying) while pumping.
+pub fn query_actual_while_pumping(pipe: &str) -> Result<serde_json::Value, String> {
+    let pipe = pipe.to_owned();
+    ipc_while_pumping(
+        move || match send_ipc_retry(&pipe, &SocketMessage::QueryLayoutActual)? {
+            SocketResponse::Data { payload } => Ok(payload),
+            SocketResponse::Error { message } => Err(format!("daemon error: {message}")),
+            other => Err(format!("unexpected response: {other:?}")),
+        },
+    )
+}
+
+/// Wait until `expected` windows are tiled (polling while pumping).
+pub fn wait_tiled_while_pumping(pipe: &str, expected: usize) -> Result<serde_json::Value, String> {
+    let pipe = pipe.to_owned();
+    ipc_while_pumping(move || wait_until_windows_tiled(&pipe, expected))
+}
+
+/// The per-test daemon log path (start_test_daemon redirects there unless the
+/// test overrides `--log-file`).
+pub fn daemon_log_path(pipe: &str) -> std::path::PathBuf {
+    let safe = pipe_key(pipe);
+    std::env::temp_dir().join(format!("flowd-test-{safe}.log"))
+}
+
+/// Count occurrences of `pattern` in the daemon log (0 when unreadable).
+pub fn daemon_log_count(pipe: &str, pattern: &str) -> usize {
+    std::fs::read_to_string(daemon_log_path(pipe))
+        .map(|log| log.matches(pattern).count())
+        .unwrap_or(0)
+}
+
+/// Wait until the daemon log contains `pattern`, polling (while pumping) up
+/// to `budget`.
+pub fn wait_for_daemon_log(pipe: &str, pattern: &str, budget: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        pump_paint_messages();
+        if let Ok(log) = std::fs::read_to_string(daemon_log_path(pipe))
+            && log.contains(pattern)
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// Wait until the daemon log contains **more than `at_least`** occurrences of
+/// `pattern`, polling (while pumping) up to `budget`.
+pub fn wait_for_daemon_log_extra(
+    pipe: &str,
+    pattern: &str,
+    at_least: usize,
+    budget: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        pump_paint_messages();
+        if daemon_log_count(pipe, pattern) > at_least {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// The per-test config directory, with a stale `flow.toml` removed and the
+/// given `[cursor]`-section TOML written (or none, when `cursor_toml` is
+/// `None`, leaving the compiled defaults in force).
+pub fn fresh_config_dir_with(
+    pipe: &str,
+    cursor_toml: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let dir = test_config_dir(pipe);
+    let _ = std::fs::remove_file(dir.join("flow.toml"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+    if let Some(toml) = cursor_toml {
+        std::fs::write(dir.join("flow.toml"), toml).map_err(|e| format!("write flow.toml: {e}"))?;
+    }
+    Ok(dir)
+}
+
+/// Serializes every test that promotes a test desktop to the session input
+/// desktop.
+///
+/// Only one desktop can be the input desktop at a time, and the session
+/// cursor (and the session-global system-cursor swap) it exposes is shared.
+/// Running these tests in parallel would have each test stealing
+/// input-desktop status (and warping the pointer) out from under the others.
+/// The guard serializes exactly the cursor tests while leaving the rest of
+/// the suite parallel.
+pub static INPUT_DESKTOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard acquiring [`INPUT_DESKTOP_LOCK`].
+pub fn lock_input_desktop() -> std::sync::MutexGuard<'static, ()> {
+    INPUT_DESKTOP_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Look up the projected (actual-layout) rect of a window by HWND.
+pub fn actual_rect_of(json: &serde_json::Value, hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
+    let hwnd = hwnd.0 as i64;
+    json["entries"].as_array()?.iter().find_map(|e| {
+        if e["window_id"].as_i64() != Some(hwnd) {
+            return None;
+        }
+        let r = &e["rect"];
+        Some((
+            r["x"].as_i64()? as i32,
+            r["y"].as_i64()? as i32,
+            r["width"].as_i64()? as i32,
+            r["height"].as_i64()? as i32,
+        ))
+    })
 }

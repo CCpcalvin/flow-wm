@@ -23,8 +23,9 @@
 //! full manual checklist (drag suspension, panic restore) is noted in the
 //! ticket/PR.
 //!
-//! The input-desktop lock is shared with `cursor_warp` via a file-lock-style
-//! mutex on a common lock file, because only one desktop can be the session
+//! The pointer/pump/IPC/log helpers are shared with `cursor_warp` and
+//! `cursor_interaction` via `test_desktop` (hoisted in ticket #38), and the
+//! input-desktop lock lives there too — only one desktop can be the session
 //! input desktop at a time and the session cursor is shared.
 
 // The daemon child process is reaped by the OS after `DaemonGuard` sends the
@@ -34,158 +35,26 @@
 use std::time::Duration;
 
 use flow_wm::ipc::message::{SocketMessage, SocketResponse};
-use windows::Win32::Foundation::POINT;
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, MSG, PM_NOREMOVE, PM_QS_PAINT, PeekMessageW, TranslateMessage,
-};
 
 use super::common::unique_pipe_name;
 use super::test_desktop::{
-    DaemonGuard, TestDesktop, TestWindow, start_test_daemon, test_config_dir, unique_title,
-    wait_until_windows_tiled,
+    DaemonGuard, TestDesktop, TestWindow, daemon_log_path, dispatch_while_pumping,
+    fresh_config_dir_with, lock_input_desktop, set_cursor_pos, start_test_daemon, unique_title,
+    wait_for_daemon_log, wait_for_daemon_log_extra, wait_tiled_while_pumping,
 };
+
+// Shared timing constants (hoisted in ticket #38), aliased to the names this
+// module was written against.
+use super::test_desktop::CURSOR_HIDE_SLACK as HIDE_SLACK;
+use super::test_desktop::CURSOR_HIDE_TIMEOUT_MS as HIDE_TIMEOUT_MS;
 
 /// How long the daemon needs to settle after start before hide timing is
 /// stable (hook backlog drain + first cursor poll).
 const START_SETTLE: Duration = Duration::from_millis(500);
 
-/// The hide timeout the tests configure — short enough for a snappy test,
-/// long enough that startup jitter cannot look like "no activity".
-const HIDE_TIMEOUT_MS: u32 = 1500;
-
-/// The poll interval the tests configure — bounds the un-hide latency.
-const POLL_INTERVAL_MS: u32 = 125;
-
-/// How long to wait (polling) for the daemon to blank/restore the cursors
-/// after the timeout elapses: one poll interval of slack.
-const HIDE_SLACK: Duration = Duration::from_millis(POLL_INTERVAL_MS as u64 + 400);
-
-/// The `[cursor]` section enabling hide for these tests.
+/// The `[cursor]` section enabling hide for these tests (must stay in sync
+/// with the shared `CURSOR_HIDE_TIMEOUT_MS` / `CURSOR_POLL_INTERVAL_MS`).
 const CURSOR_HIDE_TOML: &str = "[cursor]\nhide_timeout_ms = 1500\npoll_interval_ms = 125\n";
-
-/// Read the session cursor position (screen coordinates).
-#[allow(dead_code)] // symmetry with cursor_warp; used when debugging locally
-fn cursor_pos() -> (i32, i32) {
-    let mut p = POINT { x: 0, y: 0 };
-    // SAFETY: `p` is a valid out-pointer; the call has no preconditions.
-    unsafe { GetCursorPos(&mut p) }.expect("GetCursorPos");
-    (p.x, p.y)
-}
-
-/// Move the session cursor (also counts as mouse activity for the daemon's
-/// poll).
-fn set_cursor_pos(x: i32, y: i32) {
-    // SAFETY: two scalars, no preconditions.
-    unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y) }.expect("SetCursorPos");
-}
-
-/// Pump pending paint messages on the test thread (it is a GUI thread — it
-/// owns the test windows; see the cursor_warp module docs for why).
-fn pump_paint_messages() {
-    let mut msg = MSG::default();
-    // SAFETY: PeekMessageW inspects the thread's queue and fills `msg`;
-    // TranslateMessage/DispatchMessage for paint-only messages go to
-    // DefWindowProc (via test_wnd_proc), which just validates.
-    unsafe {
-        while PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE | PM_QS_PAINT).as_bool() {
-            let _ = TranslateMessage(&msg);
-            windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-        }
-    }
-}
-
-/// Send an IPC message on a worker thread while the test thread pumps.
-fn ipc_while_pumping<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    let handle = std::thread::spawn(f);
-    loop {
-        if handle.is_finished() {
-            return handle
-                .join()
-                .map_err(|_| "IPC thread panicked".to_string())?;
-        }
-        pump_paint_messages();
-    }
-}
-
-/// Send one IPC message (retrying through pipe refusals) while pumping.
-fn dispatch(pipe: &str, msg: SocketMessage) -> Result<SocketResponse, String> {
-    let pipe = pipe.to_owned();
-    ipc_while_pumping(move || super::test_desktop::send_ipc_retry(&pipe, &msg))
-}
-
-/// Wait until `expected` windows are tiled (polling while pumping).
-fn wait_tiled(pipe: &str, expected: usize) -> Result<(), String> {
-    let pipe = pipe.to_owned();
-    ipc_while_pumping(move || wait_until_windows_tiled(&pipe, expected).map(|_| ()))
-}
-
-/// The per-test config directory, with a fresh `[cursor]` hide config
-/// written into `flow.toml` (mirrors `fresh_config_dir` in `cursor_warp`,
-/// plus writing our section).
-fn config_dir_with_hide(pipe: &str) -> std::path::PathBuf {
-    let dir = test_config_dir(pipe);
-    let _ = std::fs::remove_file(dir.join("flow.toml"));
-    std::fs::create_dir_all(&dir).expect("create config dir");
-    std::fs::write(dir.join("flow.toml"), CURSOR_HIDE_TOML).expect("write flow.toml");
-    dir
-}
-
-/// The per-test config directory with **no** `flow.toml` (hide disabled by
-/// default).
-fn config_dir_default(pipe: &str) -> std::path::PathBuf {
-    let dir = test_config_dir(pipe);
-    let _ = std::fs::remove_file(dir.join("flow.toml"));
-    std::fs::create_dir_all(&dir).expect("create config dir");
-    dir
-}
-
-/// The daemon's per-test log path (start_test_daemon redirects there unless
-/// the test overrides `--log-file`).
-fn daemon_log(pipe: &str) -> std::path::PathBuf {
-    let safe: String = pipe
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
-    std::env::temp_dir().join(format!("flowd-test-{safe}.log"))
-}
-
-/// Wait until the daemon log contains `pattern`, polling up to `budget`.
-fn wait_for_log(pipe: &str, pattern: &str, budget: Duration) -> bool {
-    let deadline = std::time::Instant::now() + budget;
-    while std::time::Instant::now() < deadline {
-        pump_paint_messages();
-        if let Ok(log) = std::fs::read_to_string(daemon_log(pipe))
-            && log.contains(pattern)
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-/// Count occurrences of `pattern` in the daemon log (0 when unreadable).
-fn log_count(pipe: &str, pattern: &str) -> usize {
-    std::fs::read_to_string(daemon_log(pipe))
-        .map(|log| log.matches(pattern).count())
-        .unwrap_or(0)
-}
-
-/// Wait until the daemon log contains **more than `at_least`** occurrences
-/// of `pattern`, polling up to `budget`.
-fn wait_for_log_extra(pipe: &str, pattern: &str, at_least: usize, budget: Duration) -> bool {
-    let deadline = std::time::Instant::now() + budget;
-    while std::time::Instant::now() < deadline {
-        pump_paint_messages();
-        if log_count(pipe, pattern) > at_least {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
 
 // ── Tests ───────────────────────────────────────────────────────────
 
@@ -203,11 +72,11 @@ fn wait_for_log_extra(pipe: &str, pattern: &str, at_least: usize, budget: Durati
 /// additionally covered by the manual checklist (see the module docs).
 #[test]
 fn hide_after_timeout_and_unhide_on_motion() {
-    let _input_guard = super::cursor_warp::lock_input_desktop_public();
+    let _input_guard = lock_input_desktop();
     let mut td = TestDesktop::create().expect("test desktop");
     td.make_input().expect("promote test desktop to input");
     let pipe = unique_pipe_name();
-    config_dir_with_hide(&pipe);
+    fresh_config_dir_with(&pipe, Some(CURSOR_HIDE_TOML)).expect("seed hide config");
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(START_SETTLE);
@@ -216,7 +85,7 @@ fn hide_after_timeout_and_unhide_on_motion() {
     let w1 = TestWindow::create(&t1).expect("create W1");
     let _ = w1;
     std::thread::sleep(Duration::from_millis(1500));
-    wait_tiled(&pipe, 1).expect("one window tiled");
+    wait_tiled_while_pumping(&pipe, 1).expect("one window tiled");
 
     // Park the pointer somewhere neutral (this counts as activity, so the
     // inactivity timeout starts roughly now).
@@ -229,22 +98,22 @@ fn hide_after_timeout_and_unhide_on_motion() {
     // no-re-blank-while-continuously-idle property hermetically.)
     std::thread::sleep(HIDE_SLACK + Duration::from_millis(HIDE_TIMEOUT_MS as u64));
     assert!(
-        wait_for_log(&pipe, "system cursors blanked", Duration::from_secs(2)),
+        wait_for_daemon_log(&pipe, "system cursors blanked", Duration::from_secs(2)),
         "daemon should have hidden the cursor; log: {}",
-        std::fs::read_to_string(daemon_log(&pipe)).unwrap_or_default()
+        std::fs::read_to_string(daemon_log_path(&pipe)).unwrap_or_default()
     );
 
     // Real mouse motion: un-hide within a poll interval (+ slack).
     set_cursor_pos(410, 410);
     assert!(
-        wait_for_log(&pipe, "system cursors restored", Duration::from_secs(2)),
+        wait_for_daemon_log(&pipe, "system cursors restored", Duration::from_secs(2)),
         "daemon should have un-hidden the cursor on motion"
     );
 
     // And the full cycle repeats: quiet again → blanked again.
     std::thread::sleep(HIDE_SLACK + Duration::from_millis(HIDE_TIMEOUT_MS as u64));
     assert!(
-        wait_for_log_extra(&pipe, "system cursors blanked", 1, Duration::from_secs(2)),
+        wait_for_daemon_log_extra(&pipe, "system cursors blanked", 1, Duration::from_secs(2)),
         "daemon should re-hide after the restarted timeout"
     );
 
@@ -256,11 +125,11 @@ fn hide_after_timeout_and_unhide_on_motion() {
 /// (no polling is scheduled at all).
 #[test]
 fn hide_disabled_by_default_never_blanks() {
-    let _input_guard = super::cursor_warp::lock_input_desktop_public();
+    let _input_guard = lock_input_desktop();
     let mut td = TestDesktop::create().expect("test desktop");
     td.make_input().expect("promote test desktop to input");
     let pipe = unique_pipe_name();
-    config_dir_default(&pipe);
+    fresh_config_dir_with(&pipe, None).expect("fresh default config");
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(START_SETTLE);
@@ -269,13 +138,13 @@ fn hide_disabled_by_default_never_blanks() {
     let w1 = TestWindow::create(&t1).expect("create W1");
     let _ = w1;
     std::thread::sleep(Duration::from_millis(1500));
-    wait_tiled(&pipe, 1).expect("one window tiled");
+    wait_tiled_while_pumping(&pipe, 1).expect("one window tiled");
 
     // Park and wait far past the (nonexistent) timeout.
     set_cursor_pos(300, 300);
     std::thread::sleep(Duration::from_millis(HIDE_TIMEOUT_MS as u64 + 1500));
 
-    let log = std::fs::read_to_string(daemon_log(&pipe)).unwrap_or_default();
+    let log = std::fs::read_to_string(daemon_log_path(&pipe)).unwrap_or_default();
     assert!(
         !log.contains("system cursors blanked"),
         "hide is disabled by default; the daemon must never blank: {log}"
@@ -294,11 +163,11 @@ fn hide_disabled_by_default_never_blanks() {
 /// path if activity raced in, or the unconditional SPI_SETCURSORS at exit).
 #[test]
 fn clean_shutdown_restores_cursors() {
-    let _input_guard = super::cursor_warp::lock_input_desktop_public();
+    let _input_guard = lock_input_desktop();
     let mut td = TestDesktop::create().expect("test desktop");
     td.make_input().expect("promote test desktop to input");
     let pipe = unique_pipe_name();
-    config_dir_with_hide(&pipe);
+    fresh_config_dir_with(&pipe, Some(CURSOR_HIDE_TOML)).expect("seed hide config");
     let mut _child = start_test_daemon(&pipe, &td.name).expect("start daemon");
     let _guard = DaemonGuard::new(&pipe);
     std::thread::sleep(START_SETTLE);
@@ -307,12 +176,12 @@ fn clean_shutdown_restores_cursors() {
     let w1 = TestWindow::create(&t1).expect("create W1");
     let _ = w1;
     std::thread::sleep(Duration::from_millis(1500));
-    wait_tiled(&pipe, 1).expect("one window tiled");
+    wait_tiled_while_pumping(&pipe, 1).expect("one window tiled");
 
     // Park, let the timeout elapse, confirm blanked.
     set_cursor_pos(500, 500);
     assert!(
-        wait_for_log(
+        wait_for_daemon_log(
             &pipe,
             "system cursors blanked",
             HIDE_SLACK + Duration::from_millis(HIDE_TIMEOUT_MS as u64) + Duration::from_secs(2)
@@ -321,7 +190,7 @@ fn clean_shutdown_restores_cursors() {
     );
 
     // Stop the daemon (clean shutdown) while the cursors are blanked.
-    let resp = dispatch(&pipe, SocketMessage::Stop).expect("send Stop");
+    let resp = dispatch_while_pumping(&pipe, SocketMessage::Stop).expect("send Stop");
     assert!(
         matches!(resp, SocketResponse::Ok),
         "Stop should succeed: {resp:?}"
