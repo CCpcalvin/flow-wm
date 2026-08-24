@@ -1408,6 +1408,16 @@ impl FlowWM {
         // below read `self.config.borders` live.
         self.config = new_config;
 
+        // Apply the new [cursor] hide knobs to the running machine (hot
+        // reload): disabling un-hides and stops scheduling; a timeout resize
+        // re-arms the timer; a hidden cursor stays hidden through a resize.
+        let hide_action = self.cursor_hide.reconfigure(
+            self.config.cursor.hide_timeout_ms,
+            self.config.cursor.poll_interval_ms,
+            std::time::Instant::now(),
+        );
+        self.apply_cursor_hide_action(hide_action);
+
         // Reconfigure every workspace's geometry, preserving each space's
         // virtual_layout (window columns/order/focus/viewport). Only the active
         // workspace is on-screen; parked ones re-project silently and animate

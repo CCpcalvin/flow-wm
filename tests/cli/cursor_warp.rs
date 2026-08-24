@@ -160,6 +160,16 @@ fn lock_input_desktop() -> std::sync::MutexGuard<'static, ()> {
     INPUT_DESKTOP_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Shared-across-modules access to the same input-desktop lock.
+///
+/// `cursor_hide`'s tests promote their own test desktop to the session input
+/// desktop too (cursor state is session-global), so they must serialize
+/// against these tests on the *same* mutex — a second lock would be no lock
+/// at all.
+pub(super) fn lock_input_desktop_public() -> std::sync::MutexGuard<'static, ()> {
+    lock_input_desktop()
+}
+
 /// Look up the projected (actual-layout) rect of a window by HWND.
 fn actual_rect_of(json: &serde_json::Value, hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     let hwnd = hwnd.0 as i64;

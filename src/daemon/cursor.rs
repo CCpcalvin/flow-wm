@@ -22,8 +22,85 @@
 //! instead of per-path flags) follows the rationale in the parent spec
 //! issue #35, which deliberately avoids the Hyprland multi-knob
 //! interaction-bug failure mode.
+//!
+//! The cursor-**hide** daemon glue also lives here
+//! ([`FlowWM::apply_cursor_hide_action`], [`FlowWM::poll_cursor_hide`]): the
+//! pure decision machine is [`super::cursor_hide`]; this module performs the
+//! impure half — the system-cursor swap/restore Win32 calls — and feeds the
+//! machine one activity sample per main-loop poll tick.
 
+use std::time::Instant;
+
+use super::cursor_hide::{ActivitySample, CursorHideAction};
+use super::types::FlowWM;
 use crate::common::{Rect, WindowId};
+use crate::cursor::restore_system_cursors;
+use crate::registry::win32;
+
+impl FlowWM {
+    /// Perform the impure half of a [`CursorHideAction`].
+    ///
+    /// The swap/restore calls mutate session-global cursor state, so the pure
+    /// scheduler only *decides* and this method *acts*. Failures are warned
+    /// and swallowed — a failed hide just means the cursor stays visible
+    /// (cosmetic), and a failed unhide is recovered by the next activity's
+    /// retry or by the daemonless `flow cursor restore` escape hatch.
+    pub(super) fn apply_cursor_hide_action(&mut self, action: CursorHideAction) {
+        match action {
+            CursorHideAction::Hide => {
+                if let Err(e) = win32::set_system_cursor_transparent() {
+                    log::warn!("cursor hide: {e}");
+                } else {
+                    log::debug!("cursor hide: system cursors blanked");
+                }
+            }
+            CursorHideAction::Unhide => {
+                if let Err(e) = restore_system_cursors() {
+                    log::warn!("cursor unhide: {e}");
+                } else {
+                    log::debug!("cursor unhide: system cursors restored");
+                }
+            }
+            CursorHideAction::None => {}
+        }
+    }
+
+    /// One activity-poll tick for the cursor-hide machine.
+    ///
+    /// Reads the pointer position and button state (the same thin wrappers
+    /// the warp path uses — no new threads, no hooks, no shared state) and
+    /// feeds the pure scheduler with an injected clock, then applies whatever
+    /// action it emits. A no-op microsecond-scale guard clause when hide is
+    /// disabled; the main loop must not even schedule the poll then (see
+    /// [`FlowWM::cursor_hide_poll_deadline`]).
+    pub(super) fn poll_cursor_hide(&mut self, now: Instant) {
+        if !self.cursor_hide.is_active() {
+            return;
+        }
+        let sample = ActivitySample {
+            // A failed position read coerces to the far corner — a deliberate
+            // fail-visible choice (same philosophy as the warp path's
+            // `pointer_position`): an unreadable position counts as motion, so
+            // a transient desktop-access failure un-hides the cursor rather
+            // than leaving a possibly-stale hidden state. The next successful
+            // poll re-establishes the baseline.
+            position: win32::get_cursor_pos().unwrap_or((i32::MIN / 2, i32::MIN / 2)),
+            button_down: win32::any_mouse_button_down(),
+        };
+        let action = self.cursor_hide.on_poll(sample, now);
+        self.apply_cursor_hide_action(action);
+    }
+
+    /// The deadline the main loop must fold into its wait timeout for cursor
+    /// hide, if any.
+    ///
+    /// `None` when the machine is inactive — the loop then schedules no
+    /// polling at all, keeping the zero-CPU-while-idle property for
+    /// `hide_timeout_ms = 0` configs.
+    pub(super) fn cursor_hide_poll_deadline(&self) -> Option<Instant> {
+        self.cursor_hide.next_deadline()
+    }
+}
 
 /// Pure warp decision: where (if anywhere) the pointer should teleport.
 ///

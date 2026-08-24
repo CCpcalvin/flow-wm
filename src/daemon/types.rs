@@ -211,6 +211,16 @@ pub struct FlowWM {
     /// focus — closing the gap when `EVENT_SYSTEM_FOREGROUND` is dropped under
     /// rapid window churn. (`docs/src/dev-guide/event-pipelines.md`)
     pub(super) last_foreground_sync: std::time::Instant,
+
+    /// Cursor-hide scheduler (ticket #37): a pure, clock-injectable state
+    /// machine driven by main-loop polling.
+    ///
+    /// Inactive when `hide_timeout_ms = 0` (the default) — no polling is
+    /// scheduled and no cursor state is touched, so default configs keep the
+    /// daemon's zero-CPU-while-idle property. Active machines fold their
+    /// deadline into the main loop's wait timeout exactly like the
+    /// float-resume / foreground-sync / edge-scroll deadlines.
+    pub(super) cursor_hide: super::cursor_hide::CursorHideScheduler,
 }
 
 impl FlowWM {

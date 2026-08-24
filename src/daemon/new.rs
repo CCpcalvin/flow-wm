@@ -216,6 +216,13 @@ impl FlowWM {
 
         log::info!("flowd: daemon initialized successfully");
 
+        // Cursor-hide knobs captured before `app_config` is moved into the
+        // struct (the [cursor] section drives the scheduler's construction).
+        let cursor_hide_knobs = (
+            app_config.cursor.hide_timeout_ms,
+            app_config.cursor.poll_interval_ms,
+        );
+
         // ---- Build the workspace stack -------------------------------------
         //
         // The daemon ships with a fixed set of 10 workspaces (per the user
@@ -266,6 +273,12 @@ impl FlowWM {
             animator,
             server,
             config: app_config,
+            // Cursor-hide machine from the live knobs; `hide_timeout_ms = 0`
+            // (the default) yields an inactive machine — no polling.
+            cursor_hide: super::cursor_hide::CursorHideScheduler::new(
+                cursor_hide_knobs.0,
+                cursor_hide_knobs.1,
+            ),
             config_dir,
             hook_receiver,
             _hook_handle,
@@ -377,6 +390,7 @@ impl FlowWM {
             float_resume_deadline: None,
             drag_state: None,
             last_foreground_sync: std::time::Instant::now(),
+            cursor_hide: super::cursor_hide::CursorHideScheduler::new(0, 125),
         }
     }
 }

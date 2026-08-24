@@ -42,13 +42,16 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
-    SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    BringWindowToTop, CreateCursor, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetShellWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    IsZoomed, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_HELP, OCR_IBEAM, OCR_NO, OCR_NORMAL,
+    OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP, OCR_WAIT,
+    PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SYSTEM_CURSOR_ID,
+    SetCursorPos, SetForegroundWindow, SetSystemCursor, SetWindowPos, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::PWSTR;
 
@@ -230,6 +233,105 @@ pub fn set_cursor_pos(x: i32, y: i32) -> Result<(), String> {
     // SAFETY: SetCursorPos takes two scalar coordinates; no handles or
     // pointers are involved. Failure is reported via the returned Result.
     unsafe { SetCursorPos(x, y) }.map_err(|e| format!("SetCursorPos failed to ({x}, {y}): {e}"))
+}
+
+/// True while either physical mouse button is currently held down.
+///
+/// The cursor-hide activity poll uses this (`GetAsyncKeyState`) rather than a
+/// low-level mouse hook: a button press with no pointer motion must still
+/// count as activity (the "blind click on a play/pause button" case), and an
+/// async query inside the existing main-loop poll keeps the threading model
+/// unchanged (no new thread, no hook callback).
+///
+/// Returns `false` when the query fails (treated as no activity — hide
+/// restarts on the next successful poll rather than never).
+pub fn any_mouse_button_down() -> bool {
+    // SAFETY: GetAsyncKeyState takes a scalar virtual key. The high bit of
+    // the returned i16 is set while the key is down. Failure is not
+    // representable — the API returns 0 for "up".
+    let left = unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16) & 0x8000 != 0 };
+    let right = unsafe { (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16) & 0x8000 != 0 };
+    left || right
+}
+
+/// The full list of system cursor shapes replaced by
+/// [`set_system_cursor_transparent`].
+///
+/// `SetSystemCursor` swaps **individual** named system cursor shapes. A blank
+/// cursor that only swapped `OCR_NORMAL` (the arrow) would leave the I-beam,
+/// resize arrows, and the rest visible — the cursor would reappear the moment
+/// it crossed a text field. Blank every standard shape so the cursor stays
+/// hidden regardless of what the pointer is hovering.
+const ALL_SYSTEM_CURSORS: [SYSTEM_CURSOR_ID; 14] = [
+    OCR_NORMAL,
+    OCR_IBEAM,
+    OCR_WAIT,
+    OCR_CROSS,
+    OCR_UP,
+    OCR_SIZENWSE,
+    OCR_SIZENESW,
+    OCR_SIZEWE,
+    OCR_SIZENS,
+    OCR_SIZEALL,
+    OCR_NO,
+    OCR_HAND,
+    OCR_APPSTARTING,
+    OCR_HELP,
+];
+
+/// Replace every system cursor shape with a fully transparent 1×1 cursor
+/// (the hide half of ticket #37).
+///
+/// Builds a blank cursor via `CreateCursor` (AND mask all-1s, XOR mask
+/// all-0s → transparent pixel, hotspot off-bitmap so the visible pixel never
+/// counts as the hotspot) and installs it over every shape in
+/// [`ALL_SYSTEM_CURSORS`] via `SetSystemCursor`. This mutates **session-global
+/// state** — the restore is [`crate::cursor::restore_system_cursors`]
+/// (`SPI_SETCURSORS`), which the daemon runs on unhide, on clean shutdown,
+/// and in its panic hook; the daemonless `flow cursor restore` CLI command is
+/// the escape hatch when the daemon is already dead.
+///
+/// `SetSystemCursor` **takes ownership** of the handle it is given (the docs
+/// forbid reusing or destroying it afterwards), so each shape gets its own
+/// freshly created blank cursor and the handles are intentionally leaked into
+/// the OS — this is the documented pattern for the API, not a resource bug.
+///
+/// Deliberately NOT exercised by parallel automated tests: it blanks the
+/// developer's real session cursor mid-run. See the manual checklist in
+/// ticket #37.
+///
+/// # Errors
+///
+/// Returns a human-readable error when the blank cursor cannot be created or
+/// any shape swap fails, with the OS error appended for diagnostics. On
+/// partial failure the already-swapped shapes stay blank until the next
+/// restore — correct, because the caller's response to any hide failure is to
+/// restore and retry later.
+pub fn set_system_cursor_transparent() -> Result<(), String> {
+    for id in ALL_SYSTEM_CURSORS {
+        // SAFETY: no instance handle is needed to create a cursor from raw
+        // masks; the hotspot coordinates are inside 32×32 bounds and the
+        // masks are valid for the given 1×1 extent. Failure is returned via
+        // Result, never UB.
+        let blank = unsafe {
+            CreateCursor(
+                None,
+                0,
+                0,
+                1,
+                1,
+                [0xFF_u16; 1].as_ptr().cast(),
+                [0x00_u16; 1].as_ptr().cast(),
+            )
+        }
+        .map_err(|e| format!("CreateCursor failed: {e}"))?;
+        // SAFETY: the handle was freshly created above and is valid. Passing
+        // it transfers ownership to the OS (see the doc comment) — it must
+        // not be used again after this call, and it is not.
+        unsafe { SetSystemCursor(blank, id) }
+            .map_err(|e| format!("SetSystemCursor({id:?}) failed: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Retrieves the window's **visible** screen rectangle via DWM extended frame bounds.

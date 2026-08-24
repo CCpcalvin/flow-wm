@@ -151,5 +151,17 @@ default_path = "loadout.json"
 #   outside the window's rect. A pointer already inside the window is left
 #   completely untouched. Set to false to never move the pointer on focus
 #   changes.
+# - hide_timeout_ms: after this many milliseconds with no mouse activity
+#   (pointer motion or a button press), the system cursor becomes
+#   invisible; any mouse activity makes it visible again and restarts the
+#   timer. 0 (the default) disables hiding entirely — and with it all
+#   cursor polling, keeping the daemon at zero CPU while idle. The cursor
+#   never hides during a tile drag or resize.
+# - poll_interval_ms: how often pointer position and button state are
+#   polled while hiding is enabled (only consulted when hide_timeout_ms > 0).
+#   Bounds the un-hide latency: wiggle the mouse and the cursor reappears
+#   within one interval.
 [cursor]
 warp_on_focus = true
+hide_timeout_ms = 0
+poll_interval_ms = 125
