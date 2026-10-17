@@ -14,4 +14,7 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=flowd.rc");
+    println!("cargo:rerun-if-changed=flowd.exe.manifest");
+    embed_resource::compile("flowd.rc", embed_resource::NONE);
 }

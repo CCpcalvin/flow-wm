@@ -1,0 +1,3 @@
+// Resource script: embeds the DPI-awareness manifest (RT_MANIFEST = 24,
+// resource ID 1) into the binaries. See docs/adr/0007-dpi-awareness-manifest.md.
+1 24 "flowd.exe.manifest"

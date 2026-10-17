@@ -42,6 +42,11 @@ dependence on the configured column width and monitor resolution — accepted be
 `window_gap` is already pixel-based everywhere else and resolution independence
 was never a real requirement (the target is Windows desktop, not cross-platform).
 
+All pixels here are *physical* pixels: the binaries declare `PerMonitorV2`
+DPI awareness via an embedded manifest, so Windows hands the daemon unvirtualized
+coordinates and every `SetWindowPos` call is taken literally. There is no DPI
+conversion code — see ADR [0007](../../adr/0007-dpi-awareness-manifest.md).
+
 ## No `Arc<Mutex>` (Single-Thread Ownership)
 
 The daemon uses single-thread ownership: `FlowWM` lives entirely on

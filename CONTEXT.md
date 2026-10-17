@@ -29,6 +29,20 @@ The top stacking layer. Holds floating windows, ordered by `FloatingSpace` (late
 **Stacking invariant**:
 The rule the daemon enforces on every foreground change: every float is always above every tile in Win32 Z-order, no matter which window holds focus or how focus moved there (FFM, keyboard nav, alt-tab, taskbar).
 
+## Coordinate units
+
+**Physical pixel**:
+A real hardware pixel on the monitor. The unit `flowd` works in end-to-end: monitor work areas, tile rects, and every `*_px` config value (`window_gap`, `min_column_width_px`, …) are physical pixels, passed literally to `SetWindowPos`. Valid only because the process is DPI-aware (see *DPI awareness*).
+_Avoid_: pixel (unqualified), real pixel
+
+**Logical pixel**:
+A DPI-scaled coordinate: what a DPI-*unaware* process sees after Windows virtualizes the screen (a 2560×1600 panel at 150% reads as ~1707×1067). Mixing logical inputs with physical math is the root cause of tiles drifting toward the top-left on scaled displays. A future config mode may treat `*_px` values as logical and convert — until then, no logical pixels exist anywhere in flow-wm.
+_Avoid_: virtual pixel, scaled pixel, DIP
+
+**DPI awareness**:
+The process-level declaration (`PerMonitorV2`, embedded as a manifest at build time) that tells Windows *before any code runs* not to virtualize coordinates. It is a single fixed declaration — it encodes nothing about resolutions or scale factors; the layout engine derives all geometry from what the monitor reports at runtime.
+_Avoid_: scaling setting, DPI detection (nothing is detected)
+
 ## Cursor behavior
 
 **Focus-follows-mouse**:
