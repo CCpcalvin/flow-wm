@@ -22,7 +22,9 @@
 
 use crate::common::WindowId;
 use crate::registry::hooks::remove_float_hwnd;
-use crate::registry::types::{FloatingState, ReclassifyResult, VisibilityChange, WindowState};
+use crate::registry::types::{
+    FloatingState, IgnoredReason, ReclassifyResult, VisibilityChange, WindowState,
+};
 use crate::registry::win32 as registry_win32;
 use windows::Win32::Foundation::HWND;
 
@@ -456,12 +458,34 @@ impl FlowWM {
     /// `EVENT_SYSTEM_FOREGROUND` path so a background poll never triggers an
     /// unintended workspace switch. The common (in-sync) path is a
     /// microsecond-scale guard clause.
+    ///
+    /// The same poll also backs up the `Ignored(Maximized | Fullscreen)`
+    /// recovery path: if the foreground window is OS-ignored, it is re-checked
+    /// via [`on_window_state_change`](Self::on_window_state_change), because
+    /// `EVENT_OBJECT_STATECHANGE` is not raised for top-level maximize/restore.
     pub(super) fn reconcile_foreground(&mut self) {
         self.last_foreground_sync = std::time::Instant::now();
 
         let Some(true_fg) = registry_win32::get_foreground_window() else {
             return;
         };
+
+        // Maximize/restore of a top-level window is reported as LOCATIONCHANGE,
+        // not STATECHANGE, so a window that launched maximized would otherwise
+        // stay Ignored(Maximized) forever after the user restores it.
+        let os_ignored = self
+            .registry
+            .get_window(HWND(true_fg as *mut _))
+            .map(|w| {
+                matches!(
+                    w.state,
+                    WindowState::Ignored(IgnoredReason::Maximized | IgnoredReason::Fullscreen)
+                )
+            })
+            .unwrap_or(false);
+        if os_ignored {
+            self.on_window_state_change(true_fg);
+        }
 
         // Common case: tracked focus already matches reality → no-op.
         if self.registry.focused().map(|id| id.0) == Some(true_fg) {
